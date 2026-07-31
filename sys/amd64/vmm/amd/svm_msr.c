@@ -75,6 +75,21 @@ static uint64_t nested_hv_sint[MAXCPU][MSR_HV_SINT_COUNT];
 static uint64_t nested_hv_hypercall[MAXCPU];
 
 /*
+ * T34-T35 (wave6) nested-virt: per-vCPU APIC-assist / TSC shadow state.
+ * EOI / ICR / TPR MSRs are per-vCPU L1-stated values; L1's writes
+ * update only L1's view, never the host's physical APIC. Reference TSC
+ * stores L1's TSC page GPA passed in via MSR_HV_REFERENCE_TSC; the
+ * actual TSC page backing is bhyve userspace's job (T35).
+ *
+ * MUST NOT be exposed to L0: L1's EOI writes must not be forwarded to
+ * the host's LAPIC (would let L1 inject interrupts into L0).
+ */
+static uint64_t nested_hv_apic_eoi[MAXCPU];
+static uint64_t nested_hv_apic_icr[MAXCPU];
+static uint64_t nested_hv_apic_tpr[MAXCPU];
+static uint64_t nested_hv_ref_tsc[MAXCPU];
+
+/*
  * Host-wide nested-virt gate (T2). File-scope extern mirrors the
  * pattern in sys/amd64/vmm/intel/vmx.c::nested_vmcs12_region.
  */
@@ -286,6 +301,99 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		*result = nested_hv_hypercall[vcpu->vcpuid] |
 		    MSR_HV_HYPERCALL_ENABLE;
 		break;
+	case MSR_HV_APIC_EOI:
+		/*
+		 * T34: L1 EOI write acknowledgement. TLFS 7.8b §3.1.6:
+		 * any non-zero write to MSR_HV_APIC_EOI signals "EOI
+		 * the highest-priority in-service interrupt". On RDMSR
+		 * the value is implementation-defined (TLFS allows
+		 * returning 0). We return L1's last-written value as a
+		 * simple shadow.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		*result = nested_hv_apic_eoi[vcpu->vcpuid];
+		break;
+	case MSR_HV_APIC_ICR:
+		/*
+		 * T34: L1 ICR (Interrupt Command Register) shadow
+		 * read. Stores L1's APIC assist ICR value; L1's
+		 * interrupt dispatches via L1's SINT routing, not the
+		 * host's LAPIC.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		*result = nested_hv_apic_icr[vcpu->vcpuid];
+		break;
+	case MSR_HV_APIC_TPR:
+		/*
+		 * T34: L1 TPR (Task Priority Register) shadow read.
+		 * L1's CR8 accesses go through to L1's virtual APIC
+		 * page; this MSR is the SynIC-side assist.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		*result = nested_hv_apic_tpr[vcpu->vcpuid];
+		break;
+	case MSR_HV_REFERENCE_TSC:
+		/*
+		 * T35: L1 Reference TSC page GPA read. Return L1's
+		 * stored GPA. The actual TSC page layout (sequence,
+		 * scale, offset) is bhyve userspace's job to populate
+		 * when L1 sets the GPA (this is the L1-virtual TSC,
+		 * not the host's hyperv_reftsc).
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		*result = nested_hv_ref_tsc[vcpu->vcpuid];
+		break;
+	case MSR_HV_TIME_REF_COUNT:
+		/*
+		 * T35: L1 TIME_REF_COUNT read. Returns L1's virtual
+		 * timestamp counter (L1's TSC offset-adjusted). NAIVE
+		 * implementation: return rdtsc() minus L1's offset.
+		 * Full emulation (with L1's paravirtualized TSC clock)
+		 * is bhyve userspace's job.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		*result = rdtsc();
+		break;
 	default:
 		error = EINVAL;
 		break;
@@ -464,6 +572,100 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		nested_hv_hypercall[vcpu->vcpuid] = val;
 		SVM_CTR1(vcpu, "nested HV HYPERCALL GPA set to %#lx",
 		    (unsigned long)val);
+		break;
+	case MSR_HV_APIC_EOI:
+		/*
+		 * T34: L1 EOI write. TLFS 7.8b §3.1.6: any non-zero
+		 * write signals EOI. We must NOT forward to the host
+		 * LAPIC — L1's EOI only completes L1's in-service
+		 * interrupt. Indirect EOI delivery via the L1's virtual
+		 * APIC page is bhyve userspace's job (xmsr.c).
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		nested_hv_apic_eoi[vcpu->vcpuid] = val;
+		SVM_CTR1(vcpu, "nested HV APIC EOI set to %#lx",
+		    (unsigned long)val);
+		break;
+	case MSR_HV_APIC_ICR:
+		/*
+		 * T34: L1 ICR write. Triggers L1's interrupt delivery
+		 * to L1's SINT routing — never host's LAPIC. The
+		 * dispatch semantics live in xmsr.c.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		nested_hv_apic_icr[vcpu->vcpuid] = val;
+		SVM_CTR1(vcpu, "nested HV APIC ICR set to %#lx",
+		    (unsigned long)val);
+		break;
+	case MSR_HV_APIC_TPR:
+		/*
+		 * T34: L1 TPR write. Updates L1's APIC priority only.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		nested_hv_apic_tpr[vcpu->vcpuid] = val;
+		SVM_CTR1(vcpu, "nested HV APIC TPR set to %#lx",
+		    (unsigned long)val);
+		break;
+	case MSR_HV_REFERENCE_TSC:
+		/*
+		 * T35: L1 Reference TSC page GPA write. Validate
+		 * page-aligned + mapped in L1 phys mem. Returns L1's
+		 * TSC page GPA on RDMSR. The actual sequence/scale/
+		 * offset fields are populated by bhyve userspace when
+		 * L1 first writes the GPA.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		if (val != 0 && !nested_hv_validate_gpa(vcpu, val)) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		nested_hv_ref_tsc[vcpu->vcpuid] = val;
+		SVM_CTR1(vcpu, "nested HV REFERENCE TSC GPA set to %#lx",
+		    (unsigned long)val);
+		break;
+	case MSR_HV_TIME_REF_COUNT:
+		/*
+		 * T35: L1 TIME_REF_COUNT write. TLFS 7.8b §3.1.11 says
+		 * this is RO; a write is a NOP (it's a counter, not a
+		 * configuration). We silently accept.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
 		break;
 	default:
 		error = EINVAL;
