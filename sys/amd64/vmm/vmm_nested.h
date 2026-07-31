@@ -50,6 +50,18 @@ enum nested_platform {
 struct nested_vcpu_state {
 	uint32_t	magic;
 	enum nested_platform platform;
+	/*
+	 * L1-stated HSAVE GPA (AMD SVM MSR 0xC0010117). Set by the L1
+	 * hypervisor via WRMSR to MSR_VM_HSAVE_PA while running as the
+	 * guest of bhyve; consulted on L2 #VMEXIT by T25 (VMRUN hookup)
+	 * as the destination for the L2->L1 host-save-area state
+	 * transfer. 0 means "L1 has not set one" (L1 does not need to
+	 * to launch nSVM; in that case the L2 state is discarded on
+	 * exit). See sys/amd64/vmm/amd/svm_msr.c for the WRMSR
+	 * validation path (page-aligned, mapped in L1 physical memory
+	 * via vm_gpa_hold, otherwise #GP).
+	 */
+	uint64_t	hsave_gpa;
 };
 
 /* Factory: returns a zeroed per-vCPU nested state. */

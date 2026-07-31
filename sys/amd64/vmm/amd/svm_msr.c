@@ -33,18 +33,46 @@
 #include <sys/errno.h>
 #include <sys/systm.h>
 
+#include <vm/vm.h>
+
 #include <machine/cpufunc.h>
 #include <machine/specialreg.h>
 #include <machine/vmm.h>
+
+#include <dev/vmm/vmm_mem.h>
+#include <dev/vmm/vmm_vm.h>
 
 #include "svm.h"
 #include "vmcb.h"
 #include "svm_softc.h"
 #include "svm_msr.h"
+#include "vmm_nested.h"
 
 #ifndef MSR_AMDK8_IPM
 #define	MSR_AMDK8_IPM	0xc0010055
 #endif
+
+/*
+ * T8 (wave2) nested-virt: per-vCPU L1 HSAVE GPA. bhyve writes to a
+ * bhyve-controlled shadow HPA on every L2 VMRUN; the GPA captured here
+ * is the L1-stated destination for the L2->L1 host-save-area state
+ * transfer on L2 #VMEXIT (consulted by T25 VMRUN hookup). Indexed by
+ * vcpuid, parallel to the 'nested_vmcs12_region[MAXCPU]' file-scope
+ * used by T0c (vmx.c). T7's nested_vcpu_state carries the same field
+ * for forward compatibility once T7's allocation lands; the file-scope
+ * backing here is the actual storage until then.
+ *
+ * MUST NOT be exposed to L1 as-is: the L0 host HSAVE PA lives in
+ * MSR_VM_HSAVE_PA while L0 is running. Returning the host PA to an
+ * L1 RDMSR is an info leak.
+ */
+static uint64_t nested_hsave_gpa[MAXCPU];
+
+/*
+ * Host-wide nested-virt gate (T2). File-scope extern mirrors the
+ * pattern in sys/amd64/vmm/intel/vmx.c::nested_vmcs12_region.
+ */
+extern int vmm_nested_enable;
 
 enum {
 	IDX_MSR_LSTAR,
@@ -130,6 +158,27 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 	case MSR_EXTFEATURES:
 		*result = 0;
 		break;
+	case MSR_VM_HSAVE_PA:
+		/*
+		 * T8: nested-virt L1 HSAVE GPA read.
+		 *
+		 * Return the L1-stated GPA (or 0 if L1 has not set one).
+		 * NEVER return the L0 host's HSAVE PA -- that is an info
+		 * leak. For non-nested VMs the existing fall-through to
+		 * EINVAL (escalating to VM_EXITCODE_RDMSR for userland
+		 * handling) is preserved.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		*result = nested_hsave_gpa[vcpu->vcpuid];
+		break;
 	default:
 		error = EINVAL;
 		break;
@@ -175,6 +224,57 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 #endif
 	case MSR_EXTFEATURES:
+		break;
+	case MSR_VM_HSAVE_PA:
+		/*
+		 * T8: nested-virt L1 HSAVE GPA write.
+		 *
+		 * Validate the GPA before storing: must be page-aligned
+		 * (AMD APM Vol 2 §15.11) and must resolve to a real
+		 * mapping in L1 physical memory (vm_gpa_hold succeeds).
+		 * Any failure injects #GP; we do NOT update
+		 * nested_hsave_gpa on failure (caller re-executes and
+		 * faults via vm_inject_gp's hardware re-entry path).
+		 *
+		 * On success: store the GPA so a later L1 RDMSR returns
+		 * it and so T25 (VMRUN) can target the L2->L1 state
+		 * transfer at this GPA. Note: 0 is a valid stored value
+		 * meaning "L1 has cleared the preference"; the semantic
+		 * "never set" is encoded by the array being zero at
+		 * boot.
+		 *
+		 * For non-nested VMs the existing fall-through to EINVAL
+		 * (escalating to VM_EXITCODE_WRMSR for userland
+		 * handling) is preserved.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		if ((val & PAGE_MASK) != 0) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		{
+			void *cookie;
+			void *mapping;
+
+			mapping = vm_gpa_hold(vcpu->vcpu, val, 1,
+			    VM_PROT_READ, &cookie);
+			if (mapping == NULL) {
+				vm_inject_gp(vcpu->vcpu);
+				break;
+			}
+			vm_gpa_release(cookie);
+		}
+		nested_hsave_gpa[vcpu->vcpuid] = val;
+		SVM_CTR1(vcpu, "nested HSAVE GPA set to %#lx",
+		    (unsigned long)val);
 		break;
 	default:
 		error = EINVAL;
