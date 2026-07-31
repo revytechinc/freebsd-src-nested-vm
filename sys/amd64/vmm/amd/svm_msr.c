@@ -90,6 +90,24 @@ static uint64_t nested_hv_apic_tpr[MAXCPU];
 static uint64_t nested_hv_ref_tsc[MAXCPU];
 
 /*
+ * T36 (wave6) nested-virt: L1 Hyper-V identity MSRs.
+ * GUEST_OS_ID, VP_RUNTIME accumulate values across L1's vCPU residency.
+ * GUEST_IDLE is a pass-through (L1's interpretation of "is this vCPU
+ * idle"); we just store the L1 value.
+ *
+ * VP_INDEX returns L1's vCPU index (== our vcpuid here, since L1 is
+ * the direct guest of L0; L1 sees itself as the vCPU it's actually
+ * running on).
+ *
+ * MUST NOT be exposed to L0: VP_RUNTIME / VP_INDEX must reflect L1's
+ * view, not the host's (the host's MSR values are the L1 hypervisor's
+ * times, not L1's).
+ */
+static uint64_t nested_hv_guest_os_id[MAXCPU];
+static uint64_t nested_hv_vp_runtime[MAXCPU];
+static uint64_t nested_hv_guest_idle[MAXCPU];
+
+/*
  * Host-wide nested-virt gate (T2). File-scope extern mirrors the
  * pattern in sys/amd64/vmm/intel/vmx.c::nested_vmcs12_region.
  */
@@ -394,6 +412,75 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		}
 		*result = rdtsc();
 		break;
+	case MSR_HV_GUEST_OS_ID:
+		/*
+		 * T36: L1 OS identity read. Return L1's last-set value
+		 * or MSR_HV_GUEST_OS_ID_WINDOWS (0x8100) if never set
+		 * per TLFS 7.8b §3.1.1 recommendation.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		*result = nested_hv_guest_os_id[vcpu->vcpuid] != 0 ?
+		    nested_hv_guest_os_id[vcpu->vcpuid] :
+		    MSR_HV_GUEST_OS_ID_WINDOWS;
+		break;
+	case MSR_HV_VP_INDEX:
+		/*
+		 * T36: L1's vCPU index. L1 sees itself as the vCPU
+		 * it's actually running on (= our vcpuid). Must NOT
+		 * return the host's vCPU index.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		*result = (uint64_t)vcpu->vcpuid;
+		break;
+	case MSR_HV_VP_RUNTIME:
+		/*
+		 * T36: L1's vCPU runtime. Returns accumulated L1 vCPU
+		 * time. We store L1's last-set value (L1 enforces its
+		 * own runtime accounting via this MSR; the actual
+		 * timing is bhyve userspace's job).
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		*result = nested_hv_vp_runtime[vcpu->vcpuid];
+		break;
+	case MSR_HV_GUEST_IDLE:
+		/*
+		 * T36: L1 vCPU idle state. Pass-through storage.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		*result = nested_hv_guest_idle[vcpu->vcpuid];
+		break;
 	default:
 		error = EINVAL;
 		break;
@@ -666,6 +753,76 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 			error = EINVAL;
 			break;
 		}
+		break;
+	case MSR_HV_GUEST_OS_ID:
+		/*
+		 * T36: L1 OS identity write. Stores L1's OS ID.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		nested_hv_guest_os_id[vcpu->vcpuid] = val;
+		SVM_CTR1(vcpu, "nested HV GUEST_OS_ID set to %#lx",
+		    (unsigned long)val);
+		break;
+	case MSR_HV_VP_RUNTIME:
+		/*
+		 * T36: L1 vCPU runtime write. Accumulates L1's vCPU
+		 * time. We store verbatim; accounting is bhyve's job.
+		 * Note: a real VP_RUNTIME would also accept a "give me
+		 * current time" write -- L1's instruction is not a
+		 * simple store. Full semantics in xmsr.c.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		nested_hv_vp_runtime[vcpu->vcpuid] = val;
+		SVM_CTR1(vcpu, "nested HV VP_RUNTIME set to %#lx",
+		    (unsigned long)val);
+		break;
+	case MSR_HV_GUEST_IDLE:
+		/*
+		 * T36: L1 vCPU idle state write. Pass-through storage.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		if (vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU) {
+			vm_inject_gp(vcpu->vcpu);
+			break;
+		}
+		nested_hv_guest_idle[vcpu->vcpuid] = val;
+		SVM_CTR1(vcpu, "nested HV GUEST_IDLE set to %#lx",
+		    (unsigned long)val);
+		break;
+	case MSR_HV_RESET:
+		/*
+		 * T36: L1 reset request. TLFS 7.8b §3.1 requires that
+		 * any non-zero write to MSR_HV_RESET triggers an
+		 * immediate L1 reset. We accept the write but the
+		 * actual reset is bhyve userspace's job (xmsr.c).
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		SVM_CTR1(vcpu, "nested HV RESET requested, val=%#lx",
+		    (unsigned long)val);
 		break;
 	default:
 		error = EINVAL;
