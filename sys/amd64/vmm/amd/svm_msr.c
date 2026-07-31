@@ -130,6 +130,21 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 	case MSR_EXTFEATURES:
 		*result = 0;
 		break;
+	case MSR_AMD_LBR_CTL:
+	case MSR_AMD_LBR_SELECT:
+	case MSR_AMD_LBR_DATA:
+	case MSR_AMD_LBR_DATA_HI:
+	case MSR_AMD_LBR_INFO:
+	case MSR_AMD_LBR_INFO_HI:
+		/*
+		 * AMD LBR / Last Branch Record virtualization MSRs
+		 * (0xC0010200-0xC0010205).  The underlying LBR hardware
+		 * is not virtualized in nested-virt v1, so reads return
+		 * zero (cap-and-mask).  Writes are reserved and must
+		 * inject #GP via the caller (svm_wrmsr below).
+		 */
+		*result = 0;
+		break;
 	default:
 		error = EINVAL;
 		break;
@@ -168,6 +183,19 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		/*
 		 * Ignore writes to microcode update register.
 		 */
+		break;
+	case MSR_AMD_LBR_CTL:
+	case MSR_AMD_LBR_SELECT:
+	case MSR_AMD_LBR_DATA:
+	case MSR_AMD_LBR_DATA_HI:
+	case MSR_AMD_LBR_INFO:
+	case MSR_AMD_LBR_INFO_HI:
+		/*
+		 * AMD LBR virtualization MSRs (0xC0010200-0xC0010205) are
+		 * not exposed to nested guests; inject #GP.  svm_rdmsr
+		 * returns 0 on read (cap-and-mask).
+		 */
+		vm_inject_gp(vcpu->vcpu);
 		break;
 #ifdef BHYVE_SNAPSHOT
 	case MSR_TSC:
