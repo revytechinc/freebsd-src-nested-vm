@@ -123,6 +123,7 @@ SRCS+=	vmcb.c		\
 	ivhd_if.h	\
 	svm.c		\
 	svm_nested.c	\
+	svm_nested_exit.c	\
 	svm_support.S	\
 	npt.c		\
 	ivrs_drv.c	\
