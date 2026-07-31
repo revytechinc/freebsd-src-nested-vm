@@ -181,6 +181,11 @@ static int trap_wbinvd;
 SYSCTL_INT(_hw_vmm, OID_AUTO, trap_wbinvd, CTLFLAG_RDTUN, &trap_wbinvd, 0,
     "WBINVD triggers a VM-exit");
 
+int vmm_nested_enable;
+SYSCTL_INT(_hw_vmm, OID_AUTO, nested_enable, CTLFLAG_RWTUN,
+    &vmm_nested_enable, 0,
+    "Enable nested virtualization support (per-VM opt-in via VMMCTL_CREATE_NESTED)");
+
 /* global statistics */
 VMM_STAT(VCPU_MIGRATIONS, "vcpu migration across host cpus");
 VMM_STAT(VMEXIT_COUNT, "total number of vm exits");
