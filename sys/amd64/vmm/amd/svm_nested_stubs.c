@@ -33,40 +33,34 @@
 int
 svm_nested_vmrun(struct svm_vcpu *vcpu, struct vmcb *vmcb)
 {
-	SVM_CTR0(vcpu, "svm_nested_vmrun: stub (not yet implemented)");
 	return (1);
 }
 
 int
 svm_nested_vmsave(struct svm_vcpu *vcpu)
 {
-	SVM_CTR0(vcpu, "svm_nested_vmsave: stub (not yet implemented)");
 	return (1);
 }
 
 int
 svm_nested_vmload(struct svm_vcpu *vcpu)
 {
-	SVM_CTR0(vcpu, "svm_nested_vmload: stub (not yet implemented)");
 	return (1);
 }
 
 int
 svm_nested_clgi(struct svm_vcpu *vcpu)
 {
-	SVM_CTR0(vcpu, "svm_nested_clgi: stub (not yet implemented)");
 	return (1);
 }
 
 int
 svm_nested_stgi(struct svm_vcpu *vcpu)
 {
-	SVM_CTR0(vcpu, "svm_nested_stgi: stub (not yet implemented)");
 	return (1);
 }
 
 void
 svm_nested_skinit(struct svm_vcpu *vcpu)
 {
-	SVM_CTR0(vcpu, "svm_nested_skinit: stub (not yet implemented)");
 }
