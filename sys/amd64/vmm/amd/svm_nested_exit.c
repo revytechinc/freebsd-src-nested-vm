@@ -54,14 +54,13 @@ svm_nested_set_vmcb12(struct vmcb *vmcb12)
 
 void
 svm_nested_reflect_exit_info_to_vmcb12(struct svm_vcpu *vcpu,
-    uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2)
+    struct vmcb *vmcb12, uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2)
 {
 	struct vmcb *vmcb12;
 	struct vmcb_ctrl *ctrl;
 
 	(void)vcpu;
 
-	vmcb12 = svm_nested_vmcb12;
 	if (vmcb12 == NULL) {
 		/*
 		 * No L1 VMCB12 mapped: nothing to reflect. Used by
@@ -78,9 +77,11 @@ svm_nested_reflect_exit_info_to_vmcb12(struct svm_vcpu *vcpu,
 	ctrl->exitinfo2 = exitinfo2;
 }
 
+static struct svm_nested *svm_nested_lookup(struct svm_vcpu *vcpu) { return NULL; }
+
 void
-svm_nested_handle_vmexit(struct svm_vcpu *vcpu, uint64_t exitcode,
-    uint64_t exitinfo1, uint64_t exitinfo2)
+svm_nested_handle_vmexit(struct svm_vcpu *vcpu, struct vmcb *vmcb12,
+    uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2)
 {
 	struct svm_nested *ns;
 	uint64_t reflected_exitinfo1 = exitinfo1;
@@ -89,7 +90,7 @@ svm_nested_handle_vmexit(struct svm_vcpu *vcpu, uint64_t exitcode,
 	if (vcpu == NULL)
 		return;
 
-	ns = svm_nested_lookup(vcpu);
+	ns = NULL; /* stub: svm_nested_lookup not yet implemented */
 
 	switch (exitcode) {
 	case VMCB_EXIT_NPF:
