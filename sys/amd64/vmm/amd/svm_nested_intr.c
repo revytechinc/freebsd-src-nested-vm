@@ -34,6 +34,7 @@
 
 #include "svm_softc.h"
 #include "svm_nested.h"
+#include "svm_nested_intr.h"
 #include "vmcb.h"
 
 /*
