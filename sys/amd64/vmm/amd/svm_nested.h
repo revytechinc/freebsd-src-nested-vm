@@ -23,9 +23,12 @@
  *   Page 0 (offsets 0x0000-0x0FFF): MSRs 0x00000000-0x00001FFF
  *     - Read map : offsets 0x0000-0x07FF (2 KB)
  *     - Write map: offsets 0x0800-0x0FFF (2 KB)
- *   Page 1 (offsets 0x1000-0x1FFF): MSRs 0xC0000000-0xC0001FFF
+ *   Page 1 (offsets 0x1000-0x1FFF): MSRs 0xC0000000-0xC001FFFF
  *     - Read map : offsets 0x1000-0x17FF (2 KB)
  *     - Write map: offsets 0x1800-0x1FFF (2 KB)
+ *
+ * The C001 bank uses the same page-1 positions as the C000 bank; the
+ * bank-select bits do not contribute to the offset within the page.
  *
  * Within each 2 KB read or write map, 4 MSRs are encoded per byte:
  *   byte_offset_within_2KB = (msr_index_within_page) / 4
@@ -39,7 +42,8 @@
  */
 #define	SVM_MSR_BITMAP_PAGE0_MSRS	0x2000
 #define	SVM_MSR_BITMAP_PAGE1_BASE	0xC0000000U
-#define	SVM_MSR_BITMAP_PAGE1_MSRS	0x2000
+#define	SVM_MSR_BITMAP_PAGE1_END	0xC001FFFFU
+#define	SVM_MSR_BITMAP_PAGE1_INDEX_MASK	0x00001FFFU
 
 #define	SVM_MSR_BITMAP_PAGE1_BASE_OFF	0x1000	/* page 1 starts at 4 KB */
 #define	SVM_MSR_BITMAP_WRITE_HALF_OFF	0x0800	/* write map offset within
@@ -83,10 +87,15 @@ int	 svm_msr_bitmap_test_intercept(const struct nested_bitmap *nb,
 
 /*
  * Builder entry point. Composes the per-vCPU MSRPM by composing MSR
- * ranges one at a time. Currently a placeholder; T8/T9/T10/T11 add
- * MSR_VM_HSAVE_PA, vCPU model-specific MSRs, perf counters and the
- * final L1 deny-list. Called only when 'vm->nested_enabled'.
+ * ranges one at a time. It always installs the MSR_VM_HSAVE_PA
+ * intercept required by T8; later tasks add model-specific MSRs, perf
+ * counters and the final L1 deny-list. Called only when
+ * 'vm->nested_enabled'.
  */
 void	 svm_nested_build_msrpm(struct svm_softc *sc, struct svm_vcpu *vcpu);
+
+#ifdef SVM_NESTED_TEST
+void	 svm_nested_test_msrpm_range(void);
+#endif
 
 #endif /* _VMM_SVM_NESTED_H_ */
