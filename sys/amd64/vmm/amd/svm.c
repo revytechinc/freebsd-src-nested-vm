@@ -1749,46 +1749,37 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 		 * on failure the wave5 launch state machine is left
 		 * pending and we fall through to the legacy #UD path.
 		 */
-		if (svm_nested_active(svm_sc) &&
-		    svm_nested_vmrun(vcpu, vmcb) != 0) {
-			handled = 1;
-			break;
+if (svm_nested_active(svm_sc)) {
+			/* T25 stub removed: no real impl yet. */
+			(void)0;
 		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
 		break;
 	case VMCB_EXIT_VMSAVE:
-		if (svm_nested_active(svm_sc) &&
-		    svm_nested_vmsave(vcpu) != 0) {
-			handled = 1;
-			break;
+		if (svm_nested_active(svm_sc)) {
+			(void)0;
 		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
 		break;
 	case VMCB_EXIT_VMLOAD:
-		if (svm_nested_active(svm_sc) &&
-		    svm_nested_vmload(vcpu) != 0) {
-			handled = 1;
-			break;
+		if (svm_nested_active(svm_sc)) {
+			(void)0;
 		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
 		break;
 	case VMCB_EXIT_STGI:
-		if (svm_nested_active(svm_sc) &&
-		    svm_nested_stgi(vcpu) != 0) {
-			handled = 1;
-			break;
+		if (svm_nested_active(svm_sc)) {
+			(void)0;
 		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
 		break;
 	case VMCB_EXIT_CLGI:
-		if (svm_nested_active(svm_sc) &&
-		    svm_nested_clgi(vcpu) != 0) {
-			handled = 1;
-			break;
+		if (svm_nested_active(svm_sc)) {
+			(void)0;
 		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
