@@ -46,6 +46,13 @@
 #include "vmm_util.h"
 #include "x86.h"
 
+/*
+ * Host-wide nested-virt gate (T2): exposed via hw.vmm.nested.enable.
+ * Defined in sys/amd64/vmm/vmm.c; declared here rather than promoted
+ * to a public header so this translation unit can read the gate.
+ */
+extern int vmm_nested_enable;
+
 SYSCTL_DECL(_hw_vmm);
 static SYSCTL_NODE(_hw_vmm, OID_AUTO, topology, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
     NULL);
@@ -162,9 +169,18 @@ x86_emulate_cpuid(struct vcpu *vcpu, uint64_t *rax, uint64_t *rbx,
 			cpuid_count(func, param, regs);
 
 			/*
-			 * Hide SVM from guest.
+			 * Hide SVM from the guest. Exception: when
+			 * nested-virt is opted-in for this VM AND the
+			 * host-wide gate is on AND the L0 host actually
+			 * has SVM (i.e., an AMD host), expose SVM so an
+			 * L1 hypervisor (L1 bhyve/KVM) can detect it and
+			 * execute VMRUN. SVM stays hidden on Intel hosts
+			 * (L0 can't run SVM either way) and on non-nested
+			 * VMs (existing behavior preserved).
 			 */
-			regs[2] &= ~AMDID2_SVM;
+			if (!(vm->nested_enabled && vmm_nested_enable &&
+			    vmm_is_svm()))
+				regs[2] &= ~AMDID2_SVM;
 
 			/*
 			 * Don't advertise extended performance counter MSRs
@@ -316,11 +332,21 @@ x86_emulate_cpuid(struct vcpu *vcpu, uint64_t *rax, uint64_t *rbx,
 			regs[1] |= (vcpu_id << CPUID_0000_0001_APICID_SHIFT);
 
 			/*
-			 * Don't expose VMX, SpeedStep, TME or SMX capability.
+			 * Don't expose SpeedStep, TME or SMX capability.
 			 * Advertise x2APIC capability and Hypervisor guest.
+			 *
+			 * VMX is exposed only when nested-virt is opted-in
+			 * for this VM AND the host-wide gate is on AND the
+			 * L0 host actually supports VMX (i.e., an Intel
+			 * host). VMX stays hidden on AMD hosts (L0 cannot
+			 * run VMX) and on non-nested VMs (existing behavior
+			 * preserved).
 			 */
-			regs[2] &= ~(CPUID2_VMX | CPUID2_EST | CPUID2_TM2);
+			regs[2] &= ~(CPUID2_EST | CPUID2_TM2);
 			regs[2] &= ~(CPUID2_SMX);
+			if (!(vm->nested_enabled && vmm_nested_enable &&
+			    vmm_is_intel()))
+				regs[2] &= ~CPUID2_VMX;
 
 			regs[2] |= CPUID2_HV;
 

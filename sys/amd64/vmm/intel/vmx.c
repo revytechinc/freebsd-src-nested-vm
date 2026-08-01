@@ -136,6 +136,24 @@ SYSCTL_NODE(_hw_vmm, OID_AUTO, vmx, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
 int vmxon_enabled[MAXCPU];
 static uint8_t *vmxon_region;
 
+/*
+ * Per-vCPU shadow VMCS12 region GPA for nested virtualization (T0c).
+ * When a nested-enabled L1 guest executes VMXON, we capture the
+ * operand GPA (from guest RAX in 64-bit mode) here and refuse to
+ * execute VMXON (it would clobber L0's VMCS). VMXOFF clears the
+ * entry. Bounded by MAXCPU; vcpuid is validated at vm creation.
+ * TODO: relocate this to the per-vCPU nested state (struct
+ * nested_vcpu_state) once that lands as part of T8.
+ */
+static uint64_t	nested_vmcs12_region[MAXCPU];
+
+/*
+ * Host-wide nested-virt gate (T2). Defined in sys/amd64/vmm/vmm.c;
+ * declared here rather than promoted to a public header per task
+ * file-scope restriction.
+ */
+extern int vmm_nested_enable;
+
 static uint32_t pinbased_ctls, procbased_ctls, procbased_ctls2;
 static uint32_t exit_ctls, entry_ctls;
 
@@ -2825,6 +2843,58 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 		vmexit->inst_length = 0;
 		handled = HANDLED;
 		break;
+	case EXIT_REASON_VMXON:
+		/*
+		 * VMXON is a ring-0 instruction that causes a VM exit
+		 * on L0. When the guest is a nested-enabled L1
+		 * hypervisor (e.g., L1 bhyve/KVM), capture the operand
+		 * GPA (in 64-bit mode, the L1 %rax value) into the
+		 * per-vCPU shadow VMCS12 region and mark the exit
+		 * HANDLED so the L1 advances past the instruction.
+		 * Do NOT actually execute VMXON: that would clobber
+		 * L0's VMCS. For non-nested VMs, fall through to the
+		 * generic VM_EXITCODE_VMINSN reporting so userland
+		 * handles it as before.
+		 */
+		if (vcpu->vm->nested_enabled && vmm_nested_enable) {
+			/*
+			 * L1 is running outside VMX operation by
+			 * definition; a double-VMXON at L1 is a #GP
+			 * per Intel SDM. We do not enforce that here
+			 * because T25 (VMLAUNCH/VMRESUME) will own the
+			 * state machine once it lands; the immediate
+			 * requirement is just "do not clobber L0".
+			 */
+			KASSERT(vcpu->vcpuid >= 0 && vcpu->vcpuid < MAXCPU,
+			    ("vcpuid %d out of bounds", vcpu->vcpuid));
+			nested_vmcs12_region[vcpu->vcpuid] = vmxctx->guest_rax;
+			VMX_CTR1(vcpu, "nested VMXON: vmcs12 GPA=%#lx",
+			    (unsigned long)nested_vmcs12_region[vcpu->vcpuid]);
+			handled = HANDLED;
+			break;
+		}
+		SDT_PROBE3(vmm, vmx, exit, vminsn, vmx, vcpuid, vmexit);
+		vmexit->exitcode = VM_EXITCODE_VMINSN;
+		break;
+	case EXIT_REASON_VMXOFF:
+		/*
+		 * Mirror of VMXON handling: when a nested-enabled L1
+		 * issues VMXOFF, clear the per-vCPU shadow VMCS12
+		 * region GPA and advance past the instruction. Do
+		 * not actually execute VMXOFF. Non-nested VMs keep
+		 * the existing VM_EXITCODE_VMINSN behavior.
+		 */
+		if (vcpu->vm->nested_enabled && vmm_nested_enable) {
+			KASSERT(vcpu->vcpuid >= 0 && vcpu->vcpuid < MAXCPU,
+			    ("vcpuid %d out of bounds", vcpu->vcpuid));
+			nested_vmcs12_region[vcpu->vcpuid] = 0;
+			VMX_CTR0(vcpu, "nested VMXOFF: vmcs12 cleared");
+			handled = HANDLED;
+			break;
+		}
+		SDT_PROBE3(vmm, vmx, exit, vminsn, vmx, vcpuid, vmexit);
+		vmexit->exitcode = VM_EXITCODE_VMINSN;
+		break;
 	case EXIT_REASON_VMCALL:
 	case EXIT_REASON_VMCLEAR:
 	case EXIT_REASON_VMLAUNCH:
@@ -2833,8 +2903,6 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 	case EXIT_REASON_VMREAD:
 	case EXIT_REASON_VMRESUME:
 	case EXIT_REASON_VMWRITE:
-	case EXIT_REASON_VMXOFF:
-	case EXIT_REASON_VMXON:
 		SDT_PROBE3(vmm, vmx, exit, vminsn, vmx, vcpuid, vmexit);
 		vmexit->exitcode = VM_EXITCODE_VMINSN;
 		break;
