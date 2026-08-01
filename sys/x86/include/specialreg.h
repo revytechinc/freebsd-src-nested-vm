@@ -1272,6 +1272,12 @@
 #define	MSR_SMM_MASK	0xc0010113	/* SMM TSEG address mask */
 #define	MSR_VM_CR	0xc0010114	/* SVM: feature control */
 #define	MSR_VM_HSAVE_PA 0xc0010117	/* SVM: host save area address */
+#define	MSR_AMD_LBR_CTL	0xc0010200	/* AMD LBR virtualization control */
+#define	MSR_AMD_LBR_SELECT 0xc0010201	/* AMD LBR virtualization select */
+#define	MSR_AMD_LBR_DATA	0xc0010202	/* AMD LBR virtualization data lo */
+#define	MSR_AMD_LBR_DATA_HI 0xc0010203	/* AMD LBR virtualization data hi */
+#define	MSR_AMD_LBR_INFO	0xc0010204	/* AMD LBR info lo */
+#define	MSR_AMD_LBR_INFO_HI 0xc0010205	/* AMD LBR info hi */
 #define	MSR_AMD_CPUID07	0xc0011002	/* CPUID 07 %ebx override */
 #define	MSR_AMD_CPUID01	0xc0011004	/* CPUID 01 %ecx override */
 #define	MSR_EXTFEATURES	0xc0011005	/* Extended CPUID Features override */
