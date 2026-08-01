@@ -175,6 +175,32 @@ options 	KSTACK_PAGES=5
 options 	PV_STATS
 
 #####################################################################
+# NESTED VIRTUALIZATION (bhyve)
+
+#
+# hw.vmm.nested.enable controls the nested-virt feature gate for the
+# vmm(4) module on amd64.  The default is 0; while the value reads 0,
+# no nested VMCS or VMCB shadow state is allocated and no extra
+# branches are taken on the bhyve fast path.
+#
+# Setting it to 1 (in /boot/loader.conf, or via sysctl(8) at runtime)
+# permits guests created through the VMMCTL_CREATE_NESTED ioctl or the
+# VMMAPI_OPEN_CREATE_NESTED libvmmapi flag to run with the per-VM
+# nested_enabled flag set.  The per-VM flag is the source of truth at
+# run time, so a VM created through the legacy ioctl never sees nested
+# code paths even when the sysctl is left on.
+#
+# The facility is experimental.  It does not cover live migration of
+# nested VMs, IOMMU virtualization, Last Branch Record virtualization,
+# SMM virtualization, or any code derived from GPL-licensed
+# hypervisors; see vmm_nested(9) for the current scope.
+#
+# To enable at boot, copy the following line into /boot/loader.conf:
+#
+#envvar	hw.vmm.nested.enable=1
+#
+
+#####################################################################
 # Kernel sanitizers
 
 #options	COVERAGE		# Generic kernel coverage. Used by KCOV
