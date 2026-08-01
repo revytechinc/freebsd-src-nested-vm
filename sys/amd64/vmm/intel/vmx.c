@@ -2856,7 +2856,7 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 		 * generic VM_EXITCODE_VMINSN reporting so userland
 		 * handles it as before.
 		 */
-		if (vcpu->vm->nested_enabled && vmm_nested_enable) {
+		if (vcpu->vcpu->vm->nested_enabled && vmm_nested_enable) {
 			/*
 			 * L1 is running outside VMX operation by
 			 * definition; a double-VMXON at L1 is a #GP
@@ -2884,7 +2884,7 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 		 * not actually execute VMXOFF. Non-nested VMs keep
 		 * the existing VM_EXITCODE_VMINSN behavior.
 		 */
-		if (vcpu->vm->nested_enabled && vmm_nested_enable) {
+		if (vcpu->vcpu->vm->nested_enabled && vmm_nested_enable) {
 			KASSERT(vcpu->vcpuid >= 0 && vcpu->vcpuid < MAXCPU,
 			    ("vcpuid %d out of bounds", vcpu->vcpuid));
 			nested_vmcs12_region[vcpu->vcpuid] = 0;

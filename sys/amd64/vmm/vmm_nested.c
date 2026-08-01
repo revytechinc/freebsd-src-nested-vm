@@ -8,6 +8,7 @@
 #include <sys/param.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
+#include <sys/kernel.h>
 
 #include <machine/vmm.h>
 

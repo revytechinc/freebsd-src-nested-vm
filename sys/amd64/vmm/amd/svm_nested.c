@@ -15,6 +15,7 @@
 #include <sys/errno.h>
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/kernel.h>
 #include <sys/types.h>
 
 #include <machine/cpufunc.h>
