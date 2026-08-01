@@ -28,6 +28,7 @@
 
 #include "svm_softc.h"
 #include "svm_nested.h"
+#include "svm_nested_stubs.h"
 #include "vmcb.h"
 
 int
