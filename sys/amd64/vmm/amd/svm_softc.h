@@ -33,6 +33,9 @@
 #include "svm.h"
 
 
+#define SVM_MSR_BITMAP_SIZE (2 * PAGE_SIZE)
+#define SVM_IO_BITMAP_SIZE (3 * PAGE_SIZE)
+
 struct svm_softc;
 
 struct dbg {
