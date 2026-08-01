@@ -24,11 +24,11 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
-# T52b / Wave 9: aggregator runner for the 10 multi-device
-# stress scripts. Iterates over each stress script, sources
-# each via Kyua's atf-run, and aggregates pass/fail. On non-
-# FreeBSD dev boxes it short-circuits to SKIP for every
-# script, matching the established T42-T51 wave pattern.
+# T52a / Wave 9: aggregator runner for the 14 EXIT-plumbing device
+# tests. Iterates over the device class scripts, sources each
+# via Kyua's atf-run, and aggregates pass/fail. The runner is a
+# plain sh driver: on Linux dev boxes it short-circuits to SKIP
+# for every script, matching the existing T42-T51 wave pattern.
 
 # shellcheck shell=sh
 set -u
@@ -36,22 +36,25 @@ set -o pipefail
 
 PROGRAM="${0##*/}"
 
-DIR_HW_STRESS="${DIR_HW_STRESS:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}"
-DIR_PARENT="${DIR_PARENT:-$(CDPATH= cd -- "${DIR_HW_STRESS}/../.." && pwd)}"
+DIR_HW="${DIR_HW:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}"
+DIR_PARENT="${DIR_PARENT:-$(CDPATH= cd -- "${DIR_HW}/.." && pwd)}"
 
 : "${NESTED_TEST_DRIVER:=auto}"
 
-SCRIPTS="
-virtio_net_stress_test.sh
-virtio_scsi_stress_test.sh
-ahci_stress_test.sh
-nvme_stress_test.sh
-e1000_stress_test.sh
-xhci_stress_test.sh
-hda_stress_test.sh
-dma_nested_paging_stress_test.sh
-pci_hotplug_stress_test.sh
-acpi_powerbutton_stress_test.sh
+DEVICES="
+virtio_blk_test.sh
+virtio_console_test.sh
+virtio_rnd_test.sh
+uart_test.sh
+pci_cfg_test.sh
+pic_test.sh
+ioapic_test.sh
+msi_test.sh
+hpet_test.sh
+pit_test.sh
+rtc_test.sh
+lapic_test.sh
+acpi_pm_test.sh
 "
 
 runner_unsupported()
@@ -68,13 +71,13 @@ runner_unsupported()
 runner_run_one()
 {
 	local script="$1"
-	local path="${DIR_HW_STRESS}/${script}"
+	local path="${DIR_HW}/${script}"
 
 	if [ ! -r "${path}" ]; then
 		echo "${PROGRAM}: missing script ${path}" >&2
 		return 1
 	fi
-	echo "T52b: ${script}"
+	echo "T52a: ${script}"
 	if command -v kyua >/dev/null 2>&1; then
 		kyua test -k "${DIR_PARENT}/Kyuafile" "${script}" || \
 		    echo "${PROGRAM}: kyua failed on ${script}"
@@ -92,13 +95,13 @@ runner_main()
 
 	if runner_unsupported; then
 		echo "${PROGRAM}: SKIP (vmm(4) not present, NESTED_TEST_DRIVER=${NESTED_TEST_DRIVER})"
-		echo "${PROGRAM}: enumerated $(echo ${SCRIPTS} | wc -w) stress scripts for validation only"
+		echo "${PROGRAM}: enumerated $(echo ${DEVICES} | wc -w) device classes for validation only"
 		exit 0
 	fi
-	for script in ${SCRIPTS}; do
+	for script in ${DEVICES}; do
 		runner_run_one "${script}" || rc=$?
 	done
-	echo "${PROGRAM}: PASS (all stress scripts enumerated)"
+	echo "${PROGRAM}: PASS (all device classes enumerated)"
 	return "${rc}"
 }
 

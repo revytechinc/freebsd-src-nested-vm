@@ -5,13 +5,9 @@
  * All rights reserved.
  *
  * Nested virtualization support for bhyve on AMD SVM.
- * MSR bitmap primitives backing the per-vCPU MSRPM (T7), and nSVM
- * launch emulation: T25 / T26 / T27 / T28 (VMRUN / VMSAVE / VMLOAD /
- * CLGI / STGI / SKINIT / VMCB-shadow). Layout follows AMD APM Vol 2
- * §15.11; this is original BSD code that implements the primitive
- * set/clear/test operations on a shared 'nested_bitmap' and the
- * per-vCPU VMRUN / VMSAVE / VMLOAD / CLGI / STGI / SKINIT /
- * VMCB-shadow state machine.
+ * MSR bitmap primitives backing the per-vCPU MSRPM. Layout follows
+ * AMD APM Vol 2 §15.11; this is original BSD code that implements the
+ * primitive set/clear/test operations on a shared 'nested_bitmap'.
  */
 
 #include <sys/cdefs.h>
@@ -22,6 +18,7 @@
 #include <sys/types.h>
 
 #include <machine/cpufunc.h>
+#include <machine/specialreg.h>
 #include <machine/vmm.h>
 
 #include "svm_softc.h"
@@ -29,6 +26,10 @@
 #include "vmm_nested.h"
 #include "vmcb.h"
 
+/*
+ * MSR_BITMAP_ACCESS_* values come from intel/vmx_msr.h. Re-declare here
+ * locally so this file does not need to pull in VMX-only headers.
+ */
 #ifndef MSR_BITMAP_ACCESS_NONE
 #define	MSR_BITMAP_ACCESS_NONE	0x0
 #endif
@@ -43,48 +44,16 @@
 #endif
 
 /*
- * Per-vCPU L1 HSAVE GPA. The T8 commit (svm_msr.c) owns this same
- * concept; we declare a parallel copy here so the wave5 branch stays
- * self-contained until wave2 lands. When the two branches merge the
- * storage here will be removed in favour of the canonical T8 array.
- */
-static uint64_t nested_hsave_gpa[MAXCPU];
-
-uint64_t
-svm_nested_get_l1_hsave_gpa(int vcpuid)
-{
-
-	if (vcpuid < 0 || vcpuid >= MAXCPU)
-		return (0);
-	return (nested_hsave_gpa[vcpuid]);
-}
-
-/*
- * Per-vCPU nested-virt state for AMD SVM. T25-T28.
+ * Translate an MSR number into the (page_base, msr_within_page) pair
+ * used by the rest of the bitmap primitives. Returns 0 on success,
+ * EINVAL if the MSR falls outside both AMD-supported ranges
+ * (0x00000000-0x00001FFF and 0xC0000000-0xC001FFFF).
  *
- * File-scope array indexed by vcpuid. We cannot add fields to
- * 'struct svm_vcpu' (out-of-scope for this branch) without disrupting
- * unrelated callers, so a parallel lookup table is the cleanest
- * non-invasive answer.
+ * On success:
+ *   *page_base   = absolute byte offset of the 2 KB read map for the
+ *                  chosen page (0 for page 0, 0x1000 for page 1)
+ *   *msr_in_page = MSR index within that 2 KB region (0 .. 0x1FFF)
  */
-static struct svm_nested nested_state[MAXCPU];
-
-static struct svm_nested *
-svm_nested_lookup(struct svm_vcpu *vcpu)
-{
-	struct svm_nested *ns;
-
-	if (vcpu == NULL || vcpu->vcpuid < 0 || vcpu->vcpuid >= MAXCPU)
-		return (NULL);
-	ns = &nested_state[vcpu->vcpuid];
-	if (ns->nested_asid_generation == 0 &&
-	    !ns->nested_in_l2 && !ns->nested_vmrun_pending &&
-	    ns->npt12_root_gpa == 0) {
-		ns->nested_asid_generation = 1;
-	}
-	return (ns);
-}
-
 static int
 svm_msr_bitmap_locate(uint32_t msr, size_t *page_base, uint32_t *msr_in_page)
 {
@@ -96,12 +65,10 @@ svm_msr_bitmap_locate(uint32_t msr, size_t *page_base, uint32_t *msr_in_page)
 		return (0);
 	}
 	if (msr >= SVM_MSR_BITMAP_PAGE1_BASE &&
-	    msr < SVM_MSR_BITMAP_PAGE1_BASE + SVM_MSR_BITMAP_PAGE1_MSRS) {
+	    msr <= SVM_MSR_BITMAP_PAGE1_END) {
 		offset = msr - SVM_MSR_BITMAP_PAGE1_BASE;
-		if (offset >= SVM_MSR_BITMAP_PAGE1_MSRS)
-			return (EINVAL);
 		*page_base = SVM_MSR_BITMAP_PAGE1_BASE_OFF;
-		*msr_in_page = offset;
+		*msr_in_page = offset & SVM_MSR_BITMAP_PAGE1_INDEX_MASK;
 		return (0);
 	}
 	return (EINVAL);
@@ -116,6 +83,11 @@ svm_msr_bitmap_init(struct nested_bitmap *nb, void *backing)
 
 	nb->map = backing;
 	nb->size = SVM_MSR_BITMAP_SIZE;
+	/*
+	 * AMD-default semantics: every MSR access is intercepted. Bits
+	 * are cleared (allowed) by svm_msr_bitmap_clear_intercept(). This
+	 * matches the initialization in sys/amd64/vmm/amd/svm.c.
+	 */
 	memset(nb->map, 0xff, SVM_MSR_BITMAP_SIZE);
 }
 
@@ -210,229 +182,43 @@ svm_msr_bitmap_test_intercept(const struct nested_bitmap *nb, uint32_t msr,
 	return (intercepted);
 }
 
+/*
+ * Builder placeholder. Composes the per-vCPU MSRPM by walking the list
+ * of MSR ranges that the L1 hypervisor must NOT access directly when
+ * nested-virt is enabled. Currently a no-op so that T8-T11 can extend
+ * it incrementally; intentionally empty (rather than absent) so that
+ * the build always links to a single composed bitmap site.
+ */
 void
 svm_nested_build_msrpm(struct svm_softc *sc, struct svm_vcpu *vcpu)
 {
+	struct nested_bitmap nb;
 
-	(void)sc;
-	(void)vcpu;
+	KASSERT(sc != NULL, ("%s: sc is NULL", __func__));
+	KASSERT(vcpu != NULL, ("%s: vcpu is NULL", __func__));
+	nb.map = sc->msr_bitmap;
+	nb.size = SVM_MSR_BITMAP_SIZE;
+	(void)svm_msr_bitmap_set_intercept(&nb, MSR_VM_HSAVE_PA,
+	    MSR_BITMAP_ACCESS_RW);
 }
 
-/*
- * ===========================================================================
- * T28: VMCB shadow apply/check
- * ===========================================================================
- *
- * 'l1_vmcb' is the L1-physical VMCB (already mapped via vm_gpa_hold
- * by the caller). Validate every field against L0 host capabilities
- * and mark each dirty field in the per-vCPU bitmap so a later
- * svm_nested_vmcb_shadow_sync can re-validate after L1 modifies the
- * VMCB again.
- *
- * Cap-and-mask per AMD APM Vol 2 §15.5: features the host does not
- * advertise must be cleared; features the host advertises but L1
- * disables must be honoured by setting the corresponding intercept.
- */
-int
-svm_nested_vmcb_shadow_check(struct svm_vcpu *vcpu, const struct vmcb *l1_vmcb)
+#ifdef SVM_NESTED_TEST
+void
+svm_nested_test_msrpm_range(void)
 {
-	const struct vmcb_ctrl *ctrl;
-	uint32_t inst1, inst2;
+	struct nested_bitmap nb;
+	uint8_t backing[SVM_MSR_BITMAP_SIZE];
 
-	if (vcpu == NULL || l1_vmcb == NULL)
-		return (EINVAL);
-
-	ctrl = &l1_vmcb->ctrl;
-
-	inst1 = ctrl->intercept[VMCB_CTRL1_INTCPT];
-	inst2 = ctrl->intercept[VMCB_CTRL2_INTCPT];
-
-	if (inst2 & ~(VMCB_INTCPT_VMRUN | VMCB_INTCPT_VMMCALL |
-	    VMCB_INTCPT_VMLOAD | VMCB_INTCPT_VMSAVE | VMCB_INTCPT_STGI |
-	    VMCB_INTCPT_CLGI | VMCB_INTCPT_SKINIT | VMCB_INTCPT_RDTSCP))
-		return (EINVAL);
-
-	if ((ctrl->lbr_virt_en & ~0x1ULL) != 0)
-		return (EINVAL);
-
-	if (ctrl->np_enable & ~0x1ULL)
-		return (EINVAL);
-
-	return (0);
+	memset(backing, 0, sizeof(backing));
+	nb.map = backing;
+	nb.size = sizeof(backing);
+	KASSERT(svm_msr_bitmap_set_intercept(&nb, 0xC0010117U,
+	    MSR_BITMAP_ACCESS_READ) == 0, ("HSAVE_PA was rejected"));
+	KASSERT(backing[0x1045] == (1U << 6),
+	    ("HSAVE_PA did not land in page 1 byte 0x45 bit 6"));
+	KASSERT(svm_msr_bitmap_set_intercept(&nb, 0xC0010200U,
+	    MSR_BITMAP_ACCESS_READ) == 0, ("LBR MSR was rejected"));
+	KASSERT(backing[0x1080] == (1U << 0),
+	    ("LBR MSR did not land in page 1 byte 0x80 bit 0"));
 }
-
-int
-svm_nested_vmcb_shadow_sync(struct svm_vcpu *vcpu, struct vmcb *l1_vmcb)
-{
-	struct svm_nested *ns;
-
-	if (vcpu == NULL || l1_vmcb == NULL)
-		return (EINVAL);
-
-	ns = svm_nested_lookup(vcpu);
-	if (ns == NULL)
-		return (EINVAL);
-
-	if (svm_nested_vmcb_shadow_check(vcpu, l1_vmcb) != 0) {
-		ns->vmcb12_dirty |= SVM_NESTED_VMCB_DIRTY_ALL;
-		return (EINVAL);
-	}
-
-	ns->vmcb12_dirty = SVM_NESTED_VMCB_DIRTY_ALL;
-	return (0);
-}
-
-/*
- * ===========================================================================
- * T25: VMRUN exit handling
- * ===========================================================================
- *
- * Called from the SVM #VMEXIT dispatcher when L1 has executed VMRUN
- * and bhyve wants to honour the nested intent. Validates the L1-stated
- * VMCB12 via T28 shadow check.
- *
- * Returns 1 on success (L1 re-enters with the validated VMCB12 in
- * place), 0 if the operation must be reflected back to L1 as a
- * generic VMEXIT.
- */
-int
-svm_nested_vmrun(struct svm_vcpu *vcpu, struct vmcb *l1_vmcb)
-{
-	struct svm_nested *ns;
-	int error;
-
-	if (vcpu == NULL || l1_vmcb == NULL)
-		return (0);
-
-	ns = svm_nested_lookup(vcpu);
-	if (ns == NULL)
-		return (0);
-
-	error = svm_nested_vmcb_shadow_sync(vcpu, l1_vmcb);
-	if (error != 0) {
-		SVM_CTR0(vcpu, "vmrun: VMCB12 shadow check failed");
-		ns->nested_vmrun_pending = true;
-		return (0);
-	}
-
-	ns->nested_in_l2 = true;
-	ns->nested_vmrun_pending = false;
-	ns->nested_vmsave_load_gpa = svm_nested_get_l1_hsave_gpa(vcpu->vcpuid);
-
-	SVM_CTR0(vcpu, "vmrun: L1->L2 transition OK");
-	return (1);
-}
-
-/*
- * ===========================================================================
- * T26: VMSAVE / VMLOAD interception
- * ===========================================================================
- *
- * AMD VMSAVE/VMLOAD move the eight segment-base MSRs (FS, GS, TR, LDTR,
- * KernelGSBase, STAR, LSTAR, CSTAR, SFMASK, SYSENTER_CS/ESP/EIP) between
- * the host state and the VMCB. In nested mode L1's view of "host"
- * differs from L0's, so the MSR save/restore area must be at L1's
- * preferred GPA (MSR_VM_HSAVE_PA).
- */
-int
-svm_nested_vmsave(struct svm_vcpu *vcpu)
-{
-	struct svm_nested *ns;
-	uint64_t hsave;
-
-	if (vcpu == NULL)
-		return (0);
-	ns = svm_nested_lookup(vcpu);
-	if (ns == NULL)
-		return (0);
-
-	hsave = svm_nested_get_l1_hsave_gpa(vcpu->vcpuid);
-	ns->nested_vmsave_load_gpa = hsave;
-
-	if (hsave == 0) {
-		SVM_CTR0(vcpu, "vmsave: L1 HSAVE GPA unset");
-		return (0);
-	}
-
-	SVM_CTR1(vcpu, "vmsave: 8 MSRs preserved at L1 GPA %#lx",
-	    (unsigned long)hsave);
-	return (1);
-}
-
-int
-svm_nested_vmload(struct svm_vcpu *vcpu)
-{
-	struct svm_nested *ns;
-	uint64_t hsave;
-
-	if (vcpu == NULL)
-		return (0);
-	ns = svm_nested_lookup(vcpu);
-	if (ns == NULL)
-		return (0);
-
-	hsave = ns->nested_vmsave_load_gpa;
-	if (hsave == 0)
-		hsave = svm_nested_get_l1_hsave_gpa(vcpu->vcpuid);
-	if (hsave == 0) {
-		SVM_CTR0(vcpu, "vmload: L1 HSAVE GPA unset");
-		return (0);
-	}
-
-	SVM_CTR1(vcpu, "vmload: 8 MSRs restored from L1 GPA %#lx",
-	    (unsigned long)hsave);
-	return (1);
-}
-
-/*
- * ===========================================================================
- * T27: CLGI / STGI / SKINIT emulation
- * ===========================================================================
- *
- * CLGI (CLear Global Interrupt) and STGI (SeT Global Interrupt) toggle
- * L1's view of IF. The hardware bit that CLGI/STGI manipulate is in
- * the host EFLAGS state on the VMCB stack; nested L2 has its own
- * EFLAGS so toggling L1's view does not affect L2.
- *
- * SKINIT (Secure Key INIT) is a firmware instruction: it disables
- * interrupts, sets a secure environment, and resets the CPU. It is
- * not legal from inside an L1 hypervisor; the safe answer is to
- * inject VMEXIT_INVALID so bhyve can terminate the L1 guest.
- */
-int
-svm_nested_clgi(struct svm_vcpu *vcpu)
-{
-
-	if (vcpu == NULL)
-		return (0);
-	SVM_CTR0(vcpu, "clgi: L1 masked, L2 unmasked");
-	return (1);
-}
-
-int
-svm_nested_stgi(struct svm_vcpu *vcpu)
-{
-
-	if (vcpu == NULL)
-		return (0);
-	SVM_CTR0(vcpu, "stgi: L1 unmasked");
-	return (1);
-}
-
-int
-svm_nested_skinit(struct svm_vcpu *vcpu)
-{
-	struct vmcb_ctrl *ctrl;
-
-	if (vcpu == NULL)
-		return (0);
-
-	ctrl = svm_get_vmcb_ctrl(vcpu);
-	if (ctrl == NULL)
-		return (0);
-
-	ctrl->exitcode = VMCB_EXIT_INVALID;
-	SVM_CTR0(vcpu, "skinit: VMEXIT_INVALID returned to L1, host "
-	    "unmodified");
-	return (1);
-}
+#endif
