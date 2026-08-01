@@ -148,6 +148,10 @@
 #define	VMCB_EXIT_DR7_READ		0x96
 #define	VMCB_EXIT_DR7_WRITE		0x97
 
+#define	VMCB_EXIT_RDTSC		0x87
+#define	VMCB_EXIT_RDPMC		0x88
+#define	VMCB_EXIT_RDTSCP		0x89
+
 #define	VMCB_EXIT_MC			0x52
 #define	VMCB_EXIT_INTR			0x60
 #define	VMCB_EXIT_NMI			0x61
