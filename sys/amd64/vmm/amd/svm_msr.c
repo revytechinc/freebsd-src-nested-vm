@@ -428,7 +428,6 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		}
 		*result = rdtsc();
 		break;
-<<<<<<< HEAD
 	case MSR_VM_HSAVE_PA:
 		/*
 		 * T8: nested-virt L1 HSAVE GPA read.
