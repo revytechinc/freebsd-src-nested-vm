@@ -100,6 +100,7 @@ bhyve_usage(int code)
 	    "       -M: monitor mode\n"
 	    "       -m: memory size\n"
 	    "       -n: NUMA domain specification\n"
+	    "       -N: allow this VM to host nested (L2) guest VMs\n"
 	    "       -o: set config 'var' to 'value'\n"
 	    "       -P: vmexit from the guest on pause\n"
 	    "       -p: pin 'vcpu' to 'hostcpu'\n"
@@ -126,9 +127,9 @@ bhyve_optparse(int argc, char **argv)
 	int c;
 
 #ifdef BHYVE_SNAPSHOT
-	optstr = "aehuwxACDHIMPSWYk:f:o:p:G:c:s:m:n:l:K:U:r:";
+	optstr = "aehuwxACDHIMNPSWYk:f:o:p:G:c:s:m:n:l:K:U:r:";
 #else
-	optstr = "aehuwxACDHIMPSWYk:f:o:p:G:c:s:m:n:l:K:U:";
+	optstr = "aehuwxACDHIMNPSWYk:f:o:p:G:c:s:m:n:l:K:U:";
 #endif
 	while ((c = getopt(argc, argv, optstr)) != -1) {
 		switch (c) {
@@ -214,6 +215,9 @@ bhyve_optparse(int argc, char **argv)
 				    optarg);
 			if (!get_config_bool("acpi_tables"))
 				errx(EX_USAGE, "NUMA emulation requires ACPI");
+			break;
+		case 'N':
+			nesting_enabled = true;
 			break;
 		case 'o':
 			if (!bhyve_parse_config_option(optarg)) {
