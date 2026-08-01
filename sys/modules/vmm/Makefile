@@ -18,6 +18,7 @@ SRCS+=	vmm.c			\
 	vmm_dev_machdep.c	\
 	vmm_instruction_emul.c	\
 	vmm_mem.c		\
+	vmm_nested.c		\
 	vmm_stat.c		\
 	vmm_vm.c
 
