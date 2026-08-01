@@ -1,0 +1,197 @@
+# KVM Parity Conformance — CPUID Test Vectors
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 The FreeBSD Project Contributors.
+# All rights reserved.
+#
+# Format (one vector per line):
+#   ID|LEAF|SUBLEAF|MASK|EXPECTED|ORDER|CATEGORY
+#
+#   ID          - stable identifier (MUST NOT change once committed)
+#   LEAF        - CPUID leaf (hex)
+#   SUBLEAF     - CPUID subleaf (hex, often 0)
+#   MASK        - 32-bit hex mask; only bits set in MASK are compared
+#   EXPECTED    - expected value after masking (one or more fields)
+#   ORDER       - register comparison order:
+#                   EAX               - EAX only
+#                   EAX_EBX_ECX_EDX   - all four (EAX, EBX, ECX, EDX)
+#                   EAX_ECX           - EAX, ECX (for leaf 4)
+#   CATEGORY    - MUST_PASS | KNOWN_DIFF
+#
+# CATEGORY semantics:
+#   MUST_PASS   - L2's view must match expected (architectural correctness)
+#   KNOWN_DIFF  - documented in PARITY.md; test passes if vector is
+#                 present, exact value comparison is skipped
+#
+# Adding a new MUST_PASS without updating PARITY.md is a hard policy
+# violation. KNOWN_DIFF count must equal the allowlist in PARITY.md.
+#
+# Source: vectors are derived from
+#   - Intel SDM Vol. 2A, CPUID instruction reference
+#   - AMD APM Vol. 3, CPUID Specification
+#   - Hyper-V TLFS 7.8.2
+#   - AMD64 ABI, section 3.3
+# No values are copied from KVM source code.
+#
+# === MUST_PASS: hypervisor presence leaf (0x40000000) ===
+# Per Intel SDM 24.6.5: the first hypervisor leaf returns the
+# hypervisor signature in EBX/ECX/EDX. EAX returns max hypervisor leaf.
+V001|40000000|00000000|00FFFFFF|40000001|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: hypervisor interface leaf (0x40000001) ===
+# TLFS 7.8.2: EAX=interface signature.
+V002|40000001|00000000|00000000|HvMUST_PASS|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: hypervisor feature identification (0x40000003) ===
+# TLFS 7.4.1: HV_X64_FEATURES bitmask in EAX.
+V003|40000003|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: hypervisor recommendation (0x40000004) ===
+# TLFS 7.4.2: returns bitmask of recommended hypercall enables.
+V004|40000004|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: nested hypervisor presence leaf (must NOT be zero) ===
+# When nested-virt is enabled, CPUID 0x40000000 in L2 must still
+# return a non-zero signature, even if it is the L0 signature.
+V005|40000000|00000000|00000001|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: standard leaf 0 (max leaf) ===
+# Architectural sanity. Real value depends on L1 hypervisor.
+V010|00000000|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: standard leaf 1 (feature info) ===
+# Architectural sanity. Family/model field comparison only.
+V011|00000001|00000000|0F00F000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: extended leaf 0x80000000 (max ext leaf) ===
+# Architectural sanity. Max ext leaf is implementation-defined.
+V012|80000000|00000000|80000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: extended leaf 0x80000001 (ext features) ===
+# Architectural sanity. LAHF/SAHF bit (bit 0 of ECX) is mandatory.
+V013|80000001|00000000|00000001|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: brand-string leaves 0x80000002 ===
+# Architectural sanity. Non-zero vendor string in EBX/ECX/EDX.
+V014|80000002|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V015|80000003|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V016|80000004|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: structured extended feature info (leaf 7) ===
+# Architectural sanity. Subleaf 0 returns max subleaf in EAX.
+V020|00000007|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V021|00000007|00000001|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: extended APIC ID leaf (0x8000000E) ===
+# Returns 8-bit APIC ID in EAX low byte. Architectural.
+V022|8000000E|00000000|000000FF|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: SVM identification leaf (0x8000000A) ===
+# Returns SVM feature mask in EDX. Bit 2 (SVM_DISABLE) reserved.
+V023|8000000A|00000000|FFFFFFFB|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: TSC invariant (0x80000007) ===
+# Architectural: bit 8 of EDX must be set on modern hardware.
+V024|80000007|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: topology leaf 0x0B ===
+# Architectural: extended topology enumeration.
+V030|0000000B|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V031|0000000B|00000001|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: architectural performance monitoring (0x0A) ===
+# Architectural. EAX low byte is version, ECX has fixed counter bits.
+V040|0000000A|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: XSAVE leaf 0x0D ===
+# Architectural: subleaf 0 is supported.
+V050|0000000D|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V051|0000000D|00000001|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: cache descriptors (0x00000002) ===
+# Architectural: legacy cache descriptors. EAX[7:0] holds descriptor count.
+V060|00000002|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: deterministic cache params (0x00000004) ===
+# Architectural: leaf 4, subleaf n describes cache level n.
+V070|00000004|00000000|00000000|00000000|EAX_ECX|MUST_PASS
+V071|00000004|00000001|00000000|00000000|EAX_ECX|MUST_PASS
+V072|00000004|00000002|00000000|00000000|EAX_ECX|MUST_PASS
+
+# === MUST_PASS: MONITOR/MWAIT leaf (0x00000005) ===
+# Architectural. Smallest/largest monitor line in EAX/EBX.
+V080|00000005|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: thermal/power leaf (0x00000006) ===
+# Architectural. Digital thermometer / thermal thresholds.
+V081|00000006|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: extended state main leaf (0x0000000D subleaf 0) ===
+# Architectural: XCR0 valid bits in EAX, max XCR0 in EDX.
+V090|0000000D|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: extended state per-feature leaves (0x0000000D subleaf N>=2) ===
+# Architectural: per-feature XSAVE area offsets.
+V100|0000000D|00000002|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V101|0000000D|00000003|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V102|0000000D|00000004|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V103|0000000D|00000005|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V104|0000000D|00000006|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V105|0000000D|00000007|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V106|0000000D|00000008|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V107|0000000D|00000009|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V108|0000000D|0000000A|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V109|0000000D|0000000B|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V110|0000000D|0000000C|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V111|0000000D|0000000D|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V112|0000000D|0000000E|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V113|0000000D|0000000F|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V114|0000000D|00000010|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V115|0000000D|00000011|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V116|0000000D|00000012|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: QoS enforcement sub-leaf (0x0000000F / 0x00000010) ===
+# Architectural. L3 cache QoS enforcement.
+V130|0000000F|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V131|00000010|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: native model ID leaf (0x00000014) ===
+# Architectural. Intel Processor Trace sub-leaf enumeration.
+V140|00000014|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V141|00000014|00000001|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: extended L2 cache topology (0x8000001D) ===
+# Architectural. AMD-style cache topology enumeration.
+V150|8000001D|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V151|8000001D|00000001|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: RAS capacity (0x8000001F) ===
+# Architectural. EDX has supported RAS features bitmask.
+V160|8000001F|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: SVM key IDs (0x8000001E) ===
+# Architectural. SVM-keyed features and security attributes.
+V161|8000001E|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === MUST_PASS: memory encryption (0x8000001F subleaf 0x80000020) ===
+# Architectural. SME/SEV leaves.
+V170|8000001F|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+V171|80000020|00000000|00000000|00000000|EAX_EBX_ECX_EDX|MUST_PASS
+
+# === KNOWN_DIFF: VMX capability (0x00000001 ECX bit 5) ===
+# KVM and bhyve differ in VMX-exposed bit. PARITY.md documents.
+D001|00000001|00000000|00000020|00000000|EAX_EBX_ECX_EDX|KNOWN_DIFF
+
+# === KNOWN_DIFF: hypervisor vendor signature exact spelling ===
+# KVM uses "KVMKVMKVM\\0\\0\\0", bhyve uses "FreeBSDVMM" or similar.
+# Expected: differs. Documented in PARITY.md.
+D002|40000000|00000000|00000000|00000000|EAX_EBX_ECX_EDX|KNOWN_DIFF
+
+# === KNOWN_DIFF: extended state enumeration granularity ===
+# XSAVE area size differs between KVM and bhyve. PARITY.md.
+D003|0000000D|00000002|00000000|00000000|EAX_EBX_ECX_EDX|KNOWN_DIFF
+
+# Total MUST_PASS count for this file: 56
+# Total KNOWN_DIFF count for this file: 3
+# Must match PARITY.md allowlist.

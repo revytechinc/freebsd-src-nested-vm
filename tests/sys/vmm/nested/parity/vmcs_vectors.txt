@@ -1,0 +1,130 @@
+# KVM Parity Conformance — VMCS12 Test Vectors
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 The FreeBSD Project Contributors.
+# All rights reserved.
+#
+# Format (one vector per line):
+#   ID|FIELD_NAME|ENCODING|BITS|EXPECTED_VALUE|MASK|CATEGORY
+#
+#   ID              - stable identifier
+#   FIELD_NAME      - architectural VMCS12 field name (Intel SDM Vol. 3,
+#                     Appendix B)
+#   ENCODING        - hex field encoding (high 16 bits = width, low 16 =
+#                     index, per Intel SDM 24.11.2)
+#   BITS            - decimal number of significant bits in field
+#   EXPECTED_VALUE  - expected L2-viewable value (with MASK applied)
+#   MASK            - bitmask applied before comparison
+#   CATEGORY        - MUST_PASS | KNOWN_DIFF
+#
+# CATEGORY semantics:
+#   MUST_PASS   - VMCS12 field must round-trip L1<->L2 unchanged
+#   KNOWN_DIFF  - documented diff vs KVM in PARITY.md
+#
+# Source: Intel SDM Vol. 3, Appendix B (VMCS field encoding)
+# No values copied from KVM source.
+#
+# === MUST_PASS: guest-state VMCS12 fields (subset) ===
+# These are the guest-state fields L1 must be able to read/write.
+# Field encodings: high word = 0x0800 (16-bit), 0x1000 (32-bit), etc.
+# Per Intel SDM Table 24-7.
+
+# Guest ES selector (16-bit, 0x0800)
+M001|guest_es_selector|00000800|16|0000|FFFFFFFFFFFF|MUST_PASS
+# Guest CS selector (16-bit, 0x0802)
+M002|guest_cs_selector|00000802|16|0000|FFFFFFFFFFFF|MUST_PASS
+# Guest SS selector (16-bit, 0x0804)
+M003|guest_ss_selector|00000804|16|0000|FFFFFFFFFFFF|MUST_PASS
+# Guest DS selector (16-bit, 0x0806)
+M004|guest_ds_selector|00000806|16|0000|FFFFFFFFFFFF|MUST_PASS
+# Guest FS selector (16-bit, 0x0808)
+M005|guest_fs_selector|00000808|16|0000|FFFFFFFFFFFF|MUST_PASS
+# Guest GS selector (16-bit, 0x080A)
+M006|guest_gs_selector|0000080A|16|0000|FFFFFFFFFFFF|MUST_PASS
+# Guest LDTR selector (16-bit, 0x080C)
+M007|guest_ldtr_selector|0000080C|16|0000|FFFFFFFFFFFF|MUST_PASS
+# Guest TR selector (16-bit, 0x080E)
+M008|guest_tr_selector|0000080E|16|0000|FFFFFFFFFFFF|MUST_PASS
+
+# Guest ES limit (32-bit, 0x4800)
+M010|guest_es_limit|00004800|32|00000000FFFFFFFF|FFFFFFFF|MUST_PASS
+# Guest CS limit (32-bit, 0x4802)
+M011|guest_cs_limit|00004802|32|00000000FFFFFFFF|FFFFFFFF|MUST_PASS
+# Guest SS limit (32-bit, 0x4804)
+M012|guest_ss_limit|00004804|32|00000000FFFFFFFF|FFFFFFFF|MUST_PASS
+# Guest DS limit (32-bit, 0x4806)
+M013|guest_ds_limit|00004806|32|00000000FFFFFFFF|FFFFFFFF|MUST_PASS
+# Guest FS limit (32-bit, 0x4808)
+M014|guest_fs_limit|00004808|32|00000000FFFFFFFF|FFFFFFFF|MUST_PASS
+# Guest GS limit (32-bit, 0x480A)
+M015|guest_gs_limit|0000480A|32|00000000FFFFFFFF|FFFFFFFF|MUST_PASS
+# Guest GDTR limit (32-bit, 0x4810)
+M016|guest_gdtr_limit|00004810|32|00000000FFFFFFFF|FFFFFFFF|MUST_PASS
+# Guest IDTR limit (32-bit, 0x4812)
+M017|guest_idtr_limit|00004812|32|00000000FFFFFFFF|FFFFFFFF|MUST_PASS
+# Guest TR limit (32-bit, 0x4814)
+M018|guest_tr_limit|00004814|32|00000000FFFFFFFF|FFFFFFFF|MUST_PASS
+
+# Guest ES base (natural-width, 0x6800)
+M020|guest_es_base|00006800|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest CS base (natural-width, 0x6802)
+M021|guest_cs_base|00006802|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest SS base (natural-width, 0x6804)
+M022|guest_ss_base|00006804|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest DS base (natural-width, 0x6806)
+M023|guest_ds_base|00006806|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest FS base (natural-width, 0x6808)
+M024|guest_fs_base|00006808|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest GS base (natural-width, 0x680A)
+M025|guest_gs_base|0000680A|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest LDTR base (natural-width, 0x680C)
+M026|guest_ldtr_base|0000680C|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest TR base (natural-width, 0x680E)
+M027|guest_tr_base|0000680E|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest GDTR base (natural-width, 0x6810)
+M028|guest_gdtr_base|00006810|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest IDTR base (natural-width, 0x6812)
+M029|guest_idtr_base|00006812|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest RIP (natural-width, 0x681E)
+M030|guest_rip|0000681E|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest RSP (natural-width, 0x681C)
+M031|guest_rsp|0000681C|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# Guest RFLAGS (natural-width, 0x6818)
+M032|guest_rflags|00006818|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+
+# === MUST_PASS: control VMCS12 fields (subset) ===
+# Pin-based VM-execution controls (32-bit, 0x4000)
+M040|pin_based_vmexec_control|00004000|32|00000000|FFFFFFFF|MUST_PASS
+# Processor-based VM-execution controls (32-bit, 0x4002)
+M041|proc_based_vmexec_control|00004002|32|00000000|FFFFFFFF|MUST_PASS
+# Exception bitmap (32-bit, 0x4004)
+M042|exception_bitmap|00004004|32|00000000|FFFFFFFF|MUST_PASS
+# VM-exit controls (32-bit, 0x400C)
+M043|vmexit_control|0000400C|32|00000000|FFFFFFFF|MUST_PASS
+# VM-entry controls (32-bit, 0x4012)
+M044|vmentry_control|00004012|32|00000000|FFFFFFFF|MUST_PASS
+
+# CR0/CR3/CR4 guest (natural-width, 0x6800/0x6802/0x6804)
+M050|guest_cr0|00006800|64|0000000000000030|FFFFFFFFFFFFFFFF|MUST_PASS
+M051|guest_cr3|00006802|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+M052|guest_cr4|00006804|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+
+# === KNOWN_DIFF: secondary proc-based controls ===
+# KVM exposes a different set of secondary proc-based controls
+# than bhyve. Documented in PARITY.md.
+D001|proc_based_vmexec_control2|0000401E|32|00000000|FFFFFFFF|KNOWN_DIFF
+
+# === KNOWN_DIFF: VMCS12 revision identifier ===
+# Architectural: must be 1, but KVM and bhyve may differ in shadow
+# VMCS support bits. PARITY.md.
+D002|vmcs_revision_id|00000000|32|00000001|FFFFFFFF|KNOWN_DIFF
+
+# === KNOWN_DIFF: EPT pointer width ===
+# KVM uses 64-bit EPTP, bhyve uses similar but with cap-and-mask
+# differences. PARITY.md.
+D003|ept_pointer|0000201A|64|0000000000000000|FFFFFFFFFFFFFFFF|KNOWN_DIFF
+
+# Total MUST_PASS count for this file: 38
+# Total KNOWN_DIFF count for this file: 3
+# Must match PARITY.md allowlist.
