@@ -18,6 +18,7 @@
 #include <sys/types.h>
 
 #include <machine/cpufunc.h>
+#include <machine/specialreg.h>
 #include <machine/vmm.h>
 
 #include "svm_softc.h"
@@ -46,7 +47,7 @@
  * Translate an MSR number into the (page_base, msr_within_page) pair
  * used by the rest of the bitmap primitives. Returns 0 on success,
  * EINVAL if the MSR falls outside both AMD-supported ranges
- * (0x00000000-0x00001FFF and 0xC0000000-0xC0001FFF).
+ * (0x00000000-0x00001FFF and 0xC0000000-0xC001FFFF).
  *
  * On success:
  *   *page_base   = absolute byte offset of the 2 KB read map for the
@@ -64,12 +65,10 @@ svm_msr_bitmap_locate(uint32_t msr, size_t *page_base, uint32_t *msr_in_page)
 		return (0);
 	}
 	if (msr >= SVM_MSR_BITMAP_PAGE1_BASE &&
-	    msr < SVM_MSR_BITMAP_PAGE1_BASE + SVM_MSR_BITMAP_PAGE1_MSRS) {
+	    msr <= SVM_MSR_BITMAP_PAGE1_END) {
 		offset = msr - SVM_MSR_BITMAP_PAGE1_BASE;
-		if (offset >= SVM_MSR_BITMAP_PAGE1_MSRS)
-			return (EINVAL);
 		*page_base = SVM_MSR_BITMAP_PAGE1_BASE_OFF;
-		*msr_in_page = offset;
+		*msr_in_page = offset & SVM_MSR_BITMAP_PAGE1_INDEX_MASK;
 		return (0);
 	}
 	return (EINVAL);
@@ -193,7 +192,33 @@ svm_msr_bitmap_test_intercept(const struct nested_bitmap *nb, uint32_t msr,
 void
 svm_nested_build_msrpm(struct svm_softc *sc, struct svm_vcpu *vcpu)
 {
+	struct nested_bitmap nb;
 
-	(void)sc;
-	(void)vcpu;
+	KASSERT(sc != NULL, ("%s: sc is NULL", __func__));
+	KASSERT(vcpu != NULL, ("%s: vcpu is NULL", __func__));
+	nb.map = sc->msr_bitmap;
+	nb.size = SVM_MSR_BITMAP_SIZE;
+	(void)svm_msr_bitmap_set_intercept(&nb, MSR_VM_HSAVE_PA,
+	    MSR_BITMAP_ACCESS_RW);
 }
+
+#ifdef SVM_NESTED_TEST
+void
+svm_nested_test_msrpm_range(void)
+{
+	struct nested_bitmap nb;
+	uint8_t backing[SVM_MSR_BITMAP_SIZE];
+
+	memset(backing, 0, sizeof(backing));
+	nb.map = backing;
+	nb.size = sizeof(backing);
+	KASSERT(svm_msr_bitmap_set_intercept(&nb, 0xC0010117U,
+	    MSR_BITMAP_ACCESS_READ) == 0, ("HSAVE_PA was rejected"));
+	KASSERT(backing[0x1045] == (1U << 6),
+	    ("HSAVE_PA did not land in page 1 byte 0x45 bit 6"));
+	KASSERT(svm_msr_bitmap_set_intercept(&nb, 0xC0010200U,
+	    MSR_BITMAP_ACCESS_READ) == 0, ("LBR MSR was rejected"));
+	KASSERT(backing[0x1080] == (1U << 0),
+	    ("LBR MSR did not land in page 1 byte 0x80 bit 0"));
+}
+#endif
