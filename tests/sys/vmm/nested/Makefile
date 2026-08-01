@@ -5,6 +5,7 @@ TESTSDIR=	${TESTSBASE}/sys/vmm/nested
 BINDIR=		${TESTSDIR}
 
 ATF_TESTS_SH+=	nested_basic
+ATF_TESTS_SH+=	hyperv_basic
 
 ${PACKAGE}FILES+=	nested_utils.subr
 
