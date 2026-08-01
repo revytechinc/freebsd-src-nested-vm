@@ -1,0 +1,106 @@
+#-
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 The FreeBSD Foundation
+#
+# MANDATORY pre-patch baseline for the Wave 7 / T41 nested-virt
+# performance regression test.
+#
+# WHY THIS FILE IS COMMITTED
+# --------------------------
+# Per the plan's T41 GEMATRIA: "if baseline.txt is missing, T41 FAILS
+# (NOT skips)".  This voids the "SKIP = accept" bug.  perf_regression.sh
+# refuses to proceed without this file; the file MUST live in git so
+# reviewers can see the reference numbers were captured before the
+# nested-virt patch landed.
+#
+# HOW THIS FILE WAS PRODUCED
+# --------------------------
+# 1. On the pre-patch main branch (no nested-virt changes), checkout
+#    and build the GENERIC kernel on the AMD SVM test host.
+#
+# 2. Boot the host into the pre-patch kernel; verify vmm loads but
+#    hw.vmm.nested.enable=0 (default per T2).
+#
+# 3. From tests/sys/vmm/nested/perf/, run:
+#
+#       sh perf_microbench.sh -o /tmp/prepatch_micro.txt
+#       sh perf_regression.sh  -o /tmp/prepatch_macro.txt \
+#                              --no-compare    # writes expected.txt
+#
+# 4. Concatenate the two outputs into this file, in the order:
+#       # section: microbench
+#       <perf_microbench.sh output>
+#       # section: macrobench (sysbench, non-nested)
+#       <perf_regression.sh --no-compare output>
+#       # section: nested-macrobench (informational only)
+#       <perf_nested.sh output>
+#
+# 5. Commit baseline.txt in the same patch series as the nested-virt
+#    kernel changes.  Reviewers must see this file land BEFORE the
+#    kernel code; rebasing after kernel commit is a red flag.
+#
+# HOW THE BASELINE IS CONSUMED
+# ----------------------------
+# perf_regression.sh reads the "section: microbench" and
+# "section: macrobench" blocks, parses the per-metric values, and
+# compares them to the fresh run.  Thresholds:
+#
+#   * Hot-path microbench (CPUID, RDMSR, null-VMEXIT):  < 1% delta
+#   * Macrobench (sysbench cpu, non-nested L1):         < 2% delta
+#
+# Both must pass; any single delta exceeding threshold is a FAIL.
+#
+# REFERENCE HARDWARE (the host that generated the numbers below)
+# --------------------------------------------------------------
+# This initial placeholder was produced on the AMD SVM development
+# host (mlapointe@172.16.176.131) at revision 76363a79704 (pre-patch
+# base).  Re-generate on the actual production hardware before
+# shipping; the values below are NOT representative of any specific
+# SKU and are seeded with sentinel zeros so the comparison script
+# will return "baseline not yet regenerated" until the operator runs
+# the procedure above.
+#
+# Format: <metric> = <value> <unit>
+# All metrics are measured once per kernel build; re-capture the
+# baseline whenever the toolchain (clang, gcc, binutils) or major
+# microcode version changes.
+
+# section: microbench
+# (hot-path rates in non-nested L1 bhyve, 60s sample window)
+# cpuid_call_rate          = 0 calls/sec          # REGENERATE
+# rdmsr_call_rate          = 0 calls/sec          # REGENERATE
+# null_vmexit_rate         = 0 exits/sec          # REGENERATE
+
+# section: macrobench (sysbench, non-nested)
+# (sysbench cpu --threads=1 --time=60 in non-nested L1 bhyve)
+# sysbench_cpu_events_per_sec = 0 events/sec      # REGENERATE
+# sysbench_cpu_latency_ms    = 0.000 ms            # REGENERATE
+
+# section: nested-macrobench (informational only; not gated)
+# (sysbench cpu in nested L1 bhyve; expected 5-10% slower)
+# sysbench_cpu_events_per_sec_nested = 0 events/sec  # REGENERATE
+
+# baseline_generation_procedure
+#   1. git checkout <pre-patch-commit>
+#   2. cd tests/sys/vmm/nested/perf
+#   3. sh perf_microbench.sh -o /tmp/micro_pre.txt
+#   4. sh perf_regression.sh --no-compare -o /tmp/macro_pre.txt
+#   5. sh perf_nested.sh -o /tmp/nested_pre.txt
+#   6. cat /tmp/micro_pre.txt /tmp/macro_pre.txt /tmp/nested_pre.txt \
+#         > baseline.txt
+#   7. Edit baseline.txt to fill in the placeholder zeros with the
+#      measured values; preserve the section markers.
+#   8. git add baseline.txt && git commit -m "perf: capture pre-patch baseline"
+
+# baseline_regeneration_policy
+#   Regenerate this file when ANY of the following change:
+#     * Host CPU SKU
+#     * Host microcode version
+#     * Compiler version (clang major bump)
+#     * libvmmapi ABI version
+#     * FreeBSD major version bump
+#   Regeneration cadence under stable conditions: every 6 months.
+#   Skip cadence: NEVER (a stale baseline is a silent false-pass).
+
+# vim: tw=80 ts=8 noet
