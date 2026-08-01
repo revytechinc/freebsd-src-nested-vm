@@ -31,6 +31,7 @@
 
 #include "x86.h"
 #include "svm.h"
+#include "vmcb.h"
 
 
 #define SVM_MSR_BITMAP_SIZE (2 * PAGE_SIZE)
