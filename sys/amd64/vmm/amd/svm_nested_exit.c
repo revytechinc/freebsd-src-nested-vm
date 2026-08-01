@@ -56,7 +56,7 @@ void
 svm_nested_reflect_exit_info_to_vmcb12(struct svm_vcpu *vcpu,
     struct vmcb *vmcb12, uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2)
 {
-	struct vmcb *vmcb12;
+
 	struct vmcb_ctrl *ctrl;
 
 	(void)vcpu;
