@@ -38,7 +38,7 @@ PROGRAM="${0##*/}"
 : "${NESTED_TEST_DRIVER:=auto}"
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
-repo_root=$(cd "${script_dir}/../../../../.." && pwd)
+repo_root=$(cd "${script_dir}/../../../../../.." && pwd)
 PREFLIGHT="${repo_root}/tools/preflight.sh"
 
 preflight_unit_classify_unsupported()
