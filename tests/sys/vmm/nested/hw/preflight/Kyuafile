@@ -1,0 +1,20 @@
+# Auto-generated Kyuafile fragment for tests/sys/vmm/nested/hw/preflight.
+#
+# The bsd.test.mk framework regenerates a full Kyuafile at build time from
+# the ATF_TESTS_SH/ATF_TESTS_C lists in the sibling Makefile, so this file
+# is provided for source-tree `kyua test` discovery only.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+syntax(2)
+
+atf_test_program{
+	name = "preflight_integrity",
+	test_programs = { "run_preflight_tests.sh" },
+	required_files = {
+		"preflight_unit_help.sh",
+		"preflight_unit_classify.sh",
+		"preflight_sysctl_paths.sh",
+		"preflight_intel_ivybridge.sh",
+	},
+}
