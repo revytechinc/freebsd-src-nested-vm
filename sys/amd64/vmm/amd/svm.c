@@ -88,32 +88,81 @@
  * canonical headers.
  */
 extern int vmm_nested_enable;	/* declared in sys/amd64/vmm/vmm.c */
+int	 svm_nested_status;
 void	 svm_nested_handle_vmexit(struct svm_vcpu *vcpu, uint64_t exitcode,
-	    uint64_t exitinfo1, uint64_t exitinfo2);
+    uint64_t exitinfo1, uint64_t exitinfo2);
 int	 svm_nested_drain_pir(struct svm_vcpu *vcpu);
+
+static int svm_nested_l0_warned;
 
 static inline bool
 svm_nested_active(struct svm_softc *svm_sc)
 {
 
 	/*
-	 * Both gates must be on for the nested dispatcher to fire.
-	 * Per-VM nested_enabled is set by VMMCTL_CREATE_NESTED at VM
-	 * creation; the global vmm_nested_enable sysctl is the master
-	 * switch. Returning false here short-circuits the nested
+	 * The global vmm_nested_enable sysctl and per-VM nested_enabled
+	 * flag must both be on, and the hardware/L0 preflight status must
+	 * be nonzero.  Returning false here short-circuits the nested
 	 * dispatcher and falls through to the legacy handler (which
 	 * injects #UD for VMRUN-family and consumes INTR/NMI/NPF).
 	 */
 	if (vmm_nested_enable == 0)
 		return (false);
+	if (svm_nested_status == 0)
+		return (false);
 	if (svm_sc->vm == NULL || svm_sc->vm->nested_enabled == false)
 		return (false);
+	if (vm_guest != VM_GUEST_NO) {
+		const char *vm_guest_str;
+
+		switch (vm_guest) {
+		case VM_GUEST_VM:
+			vm_guest_str = "generic";
+			break;
+		case VM_GUEST_XEN:
+			vm_guest_str = "xen";
+			break;
+		case VM_GUEST_HV:
+			vm_guest_str = "hv";
+			break;
+		case VM_GUEST_VMWARE:
+			vm_guest_str = "vmware";
+			break;
+		case VM_GUEST_KVM:
+			vm_guest_str = "kvm";
+			break;
+		case VM_GUEST_BHYVE:
+			vm_guest_str = "bhyve";
+			break;
+		case VM_GUEST_VBOX:
+			vm_guest_str = "vbox";
+			break;
+		case VM_GUEST_PARALLELS:
+			vm_guest_str = "parallels";
+			break;
+		case VM_GUEST_NVMM:
+			vm_guest_str = "nvmm";
+			break;
+		default:
+			vm_guest_str = "unknown";
+			break;
+		}
+		if (atomic_cmpset_int(&svm_nested_l0_warned, 0, 1))
+			printf("SVM: refusing nested-virt - L0 hypervisor already present (%s)\n",
+			    vm_guest_str);
+		return (false);
+	}
 	return (true);
 }
 
 SYSCTL_DECL(_hw_vmm);
+SYSCTL_DECL(_hw_vmm_nested);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, svm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     NULL);
+
+SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm, CTLFLAG_RD,
+    &svm_nested_status, 0,
+    "SVM nested virtualization preflight status (0=unsupported, 1=L0 conflict, 2=ready)");
 
 /*
  * SVM CPUID function 0x8000_000A, edx bit decoding.
@@ -288,12 +337,15 @@ svm_modinit(int ipinum)
 {
 	int error, cpu;
 
+	svm_nested_status = 0;
 	if (!svm_available())
 		return (ENXIO);
 
 	error = check_svm_features();
 	if (error)
 		return (error);
+
+	svm_nested_status = vm_guest == VM_GUEST_NO ? 2 : 1;
 
 	vmcb_clean &= VMCB_CACHE_DEFAULT;
 
