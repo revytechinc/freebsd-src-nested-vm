@@ -133,7 +133,7 @@ int vmx_nested_status;
 SYSCTL_DECL(_hw_vmm);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, vmx, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     NULL);
-SYSCTL_INT(_hw_vmm, OID_AUTO, nested_vmx, CTLFLAG_RD,
+SYSCTL_INT(_hw_vmm_nested, OID_AUTO, vmx, CTLFLAG_RD,
     &vmx_nested_status, 0,
     "VMX nested virtualization preflight status (0=unsupported, 1=L0 conflict, 2=ready)");
 
