@@ -182,8 +182,41 @@ SYSCTL_INT(_hw_vmm, OID_AUTO, trap_wbinvd, CTLFLAG_RDTUN, &trap_wbinvd, 0,
     "WBINVD triggers a VM-exit");
 
 int vmm_nested_enable;
-SYSCTL_INT(_hw_vmm, OID_AUTO, nested_enable, CTLFLAG_RWTUN,
-    &vmm_nested_enable, 0,
+static int vmm_nested_enable_sysctl(SYSCTL_HANDLER_ARGS);
+extern int svm_nested_status;
+extern int vmx_nested_status;
+
+bool
+vmm_nested_supported(void)
+{
+
+	return (vm_guest == VM_GUEST_NO &&
+	    ((vmm_is_intel() && vmx_nested_status == 2) ||
+	    (vmm_is_svm() && svm_nested_status == 2)));
+}
+
+static int
+vmm_nested_enable_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	int error, value;
+
+	value = vmm_nested_enable;
+	error = sysctl_handle_int(oidp, &value, 0, req);
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+	if (value != 0 && !vmm_nested_supported()) {
+		printf("VMM: refusing nested-virt enable - CPU/platform preflight gate failed\n");
+		return (EOPNOTSUPP);
+	}
+	vmm_nested_enable = value;
+	return (0);
+}
+
+SYSCTL_NODE(_hw_vmm, OID_AUTO, nested, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
+    NULL);
+SYSCTL_PROC(_hw_vmm, OID_AUTO, nested_enable,
+    CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
+    vmm_nested_enable_sysctl, "I",
     "Enable nested virtualization support (per-VM opt-in via VMMCTL_CREATE_NESTED)");
 
 /* global statistics */
@@ -286,6 +319,8 @@ vm_exitinfo_cpuset(struct vcpu *vcpu)
 int
 vmm_modinit(void)
 {
+	int error;
+
 	if (!vmm_is_hw_supported())
 		return (ENXIO);
 
@@ -299,7 +334,16 @@ vmm_modinit(void)
 	vmm_suspend_p = vmmops_modsuspend;
 	vmm_resume_p = vmmops_modresume;
 
-	return (vmmops_modinit(vmm_ipinum));
+	error = vmmops_modinit(vmm_ipinum);
+	if (error != 0)
+		return (error);
+
+	TUNABLE_INT_FETCH("hw.vmm.nested.enable", &vmm_nested_enable);
+	if (vmm_nested_enable != 0 && !vmm_nested_supported()) {
+		printf("VMM: refusing nested-virt enable - CPU/platform preflight gate failed\n");
+		vmm_nested_enable = 0;
+	}
+	return (0);
 }
 
 int
