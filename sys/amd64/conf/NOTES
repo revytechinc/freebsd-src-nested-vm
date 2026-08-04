@@ -190,6 +190,10 @@ options 	PV_STATS
 # run time, so a VM created through the legacy ioctl never sees nested
 # code paths even when the sysctl is left on.
 #
+# The kernel reports vendor-specific preflight results through the read-only
+# integer sysctls hw.vmm.nested.svm and hw.vmm.nested.vmx (0 = unsupported,
+# 1 = L0 hypervisor conflict, 2 = all gates clear).
+#
 # The facility is experimental.  It does not cover live migration of
 # nested VMs, IOMMU virtualization, Last Branch Record virtualization,
 # SMM virtualization, or any code derived from GPL-licensed
