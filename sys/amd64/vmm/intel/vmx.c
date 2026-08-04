@@ -128,10 +128,15 @@ static MALLOC_DEFINE(M_VMX, "vmx", "vmx");
 static MALLOC_DEFINE(M_VLAPIC, "vlapic", "vlapic");
 
 bool vmx_have_msr_tsc_aux;
+int vmx_nested_status;
 
 SYSCTL_DECL(_hw_vmm);
+SYSCTL_DECL(_hw_vmm_nested);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, vmx, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     NULL);
+SYSCTL_INT(_hw_vmm_nested, OID_AUTO, vmx, CTLFLAG_RD,
+    &vmx_nested_status, 0,
+    "VMX nested virtualization preflight status (0=unsupported, 1=L0 conflict, 2=ready)");
 
 int vmxon_enabled[MAXCPU];
 static uint8_t *vmxon_region;
@@ -153,6 +158,60 @@ static uint64_t	nested_vmcs12_region[MAXCPU];
  * file-scope restriction.
  */
 extern int vmm_nested_enable;
+
+#define VMX_NESTED_VMCS_SHADOWING	(1U << 14)
+
+static int vmx_nested_l0_warned;
+
+static inline bool
+vmx_nested_active(struct vmx *vmx)
+{
+	const char *vm_guest_str;
+
+	if (vmm_nested_enable == 0 || vmx_nested_status == 0)
+		return (false);
+	if (vmx == NULL || vmx->vm == NULL || !vmx->vm->nested_enabled)
+		return (false);
+	if (vm_guest == VM_GUEST_NO)
+		return (true);
+
+	switch (vm_guest) {
+	case VM_GUEST_VM:
+		vm_guest_str = "generic";
+		break;
+	case VM_GUEST_XEN:
+		vm_guest_str = "xen";
+		break;
+	case VM_GUEST_HV:
+		vm_guest_str = "hv";
+		break;
+	case VM_GUEST_VMWARE:
+		vm_guest_str = "vmware";
+		break;
+	case VM_GUEST_KVM:
+		vm_guest_str = "kvm";
+		break;
+	case VM_GUEST_BHYVE:
+		vm_guest_str = "bhyve";
+		break;
+	case VM_GUEST_VBOX:
+		vm_guest_str = "vbox";
+		break;
+	case VM_GUEST_PARALLELS:
+		vm_guest_str = "parallels";
+		break;
+	case VM_GUEST_NVMM:
+		vm_guest_str = "nvmm";
+		break;
+	default:
+		vm_guest_str = "unknown";
+		break;
+	}
+	if (atomic_cmpset_int(&vmx_nested_l0_warned, 0, 1))
+		printf("VMX: refusing nested-virt - L0 hypervisor already present (%s)\n",
+		    vm_guest_str);
+	return (false);
+}
 
 static uint32_t pinbased_ctls, procbased_ctls, procbased_ctls2;
 static uint32_t exit_ctls, entry_ctls;
@@ -690,7 +749,10 @@ vmx_modinit(int ipinum)
 	int error;
 	uint64_t basic, fixed0, fixed1, feature_control;
 	uint32_t tmp, procbased2_vid_bits;
+	int nested_hw;
 
+	vmx_nested_status = 0;
+	nested_hw = 0;
 	/* CPUID.1:ECX[bit 5] must be 1 for processor to support VMX */
 	if (!(cpu_feature2 & CPUID2_VMX)) {
 		printf("vmx_modinit: processor does not support VMX "
@@ -744,6 +806,10 @@ vmx_modinit(int ipinum)
 		    "secondary processor-based controls\n");
 		return (error);
 	}
+	nested_hw = vmx_set_ctlreg(MSR_VMX_PROCBASED_CTLS2,
+	    MSR_VMX_PROCBASED_CTLS2,
+	    PROCBASED2_UNRESTRICTED_GUEST | VMX_NESTED_VMCS_SHADOWING,
+	    0, &tmp) == 0;
 
 	/* Check support for VPID */
 	error = vmx_set_ctlreg(MSR_VMX_PROCBASED_CTLS2, MSR_VMX_PROCBASED_CTLS2,
@@ -1009,6 +1075,7 @@ vmx_modinit(int ipinum)
 	smp_rendezvous(NULL, vmx_enable, NULL, NULL);
 
 	vmx_initialized = 1;
+	vmx_nested_status = nested_hw ? (vm_guest == VM_GUEST_NO ? 2 : 1) : 0;
 
 	return (0);
 }
@@ -2856,7 +2923,7 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 		 * generic VM_EXITCODE_VMINSN reporting so userland
 		 * handles it as before.
 		 */
-		if (vcpu->vcpu->vm->nested_enabled && vmm_nested_enable) {
+		if (vmx_nested_active(vmx)) {
 			/*
 			 * L1 is running outside VMX operation by
 			 * definition; a double-VMXON at L1 is a #GP
@@ -2884,7 +2951,7 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 		 * not actually execute VMXOFF. Non-nested VMs keep
 		 * the existing VM_EXITCODE_VMINSN behavior.
 		 */
-		if (vcpu->vcpu->vm->nested_enabled && vmm_nested_enable) {
+		if (vmx_nested_active(vmx)) {
 			KASSERT(vcpu->vcpuid >= 0 && vcpu->vcpuid < MAXCPU,
 			    ("vcpuid %d out of bounds", vcpu->vcpuid));
 			nested_vmcs12_region[vcpu->vcpuid] = 0;
