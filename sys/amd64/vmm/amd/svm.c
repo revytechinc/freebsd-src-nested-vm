@@ -155,8 +155,14 @@ svm_nested_active(struct svm_softc *svm_sc)
 	return (true);
 }
 
+#ifndef _hw_vmm_nested_
+#define _hw_vmm_nested_
+SYSCTL_NODE(_hw_vmm, OID_AUTO, nested, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
+    "Nested virtualization preflight status");
+#endif
 SYSCTL_DECL(_hw_vmm);
 SYSCTL_DECL(_hw_vmm_nested);
+
 SYSCTL_NODE(_hw_vmm, OID_AUTO, svm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     NULL);
 

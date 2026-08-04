@@ -212,8 +212,6 @@ vmm_nested_enable_sysctl(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
-SYSCTL_NODE(_hw_vmm, OID_AUTO, nested, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
-    NULL);
 SYSCTL_PROC(_hw_vmm, OID_AUTO, nested_enable,
     CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
     vmm_nested_enable_sysctl, "I",
