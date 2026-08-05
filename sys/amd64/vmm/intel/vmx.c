@@ -1317,13 +1317,25 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 	 * Set up the CR0/4 shadows, and init the read shadow
 	 * to the power-on register value from the Intel Sys Arch.
 	 *  CR0 - 0x60000010
-	 *  CR4 - 0
+	 *  CR4 - 0  (or CR4_VMXE if nested, see comment below)
 	 */
 	error = vmx_setup_cr0_shadow(vmcs, 0x60000010);
 	if (error != 0)
 		panic("vmx_setup_cr0_shadow %d", error);
 
-	error = vmx_setup_cr4_shadow(vmcs, 0);
+	/*
+	 * Nested-VMX (T14): if this VM is a nested-enabled L1, seed
+	 * the CR4 read shadow with CR4_VMXE set.  The shadow is what
+	 * the guest reads back on `mov %cr4, %rxx`, so seeding it
+	 * with VMXE means an L1 that reads CR4 before writing it
+	 * already sees VMX available — exactly the preconditions
+	 * for an L1 hypervisor to proceed with VMXON.  L1 writes that
+	 * try to clear VMXE are caught in vmx_emulate_cr4_access().
+	 */
+	if (vmx->vm->nested_enabled)
+		error = vmx_setup_cr4_shadow(vmcs, CR4_VMXE);
+	else
+		error = vmx_setup_cr4_shadow(vmcs, 0);
 	if (error != 0)
 		panic("vmx_setup_cr4_shadow %d", error);
 
@@ -2009,6 +2021,26 @@ vmx_emulate_cr4_access(struct vmx_vcpu *vcpu, uint64_t exitqual)
 		return (UNHANDLED);
 
 	regval = vmx_get_guest_reg(vcpu, (exitqual >> 8) & 0xf);
+
+	/*
+	 * Nested-VMX (T14): when L1 is a nested hypervisor, L1 must
+	 * never be allowed to clear CR4.VMXE in its own (visible)
+	 * CR4 — that would prevent it from executing VMPTRLD/VMXON
+	 * for L2.  Clearing VMXE in the *real* (host) CR4 would
+	 * also be catastrophic: it would disable VMX on the L0 host
+	 * and require a CPU reset to recover.  OR VMXE into both the
+	 * L1-visible shadow and the effective CR4 so that L1's
+	 * attempt to clear the bit is silently masked (RFLAGS shows
+	 * success, but the bit remains set on the next read).
+	 *
+	 * For non-nested VMs we must NOT add VMXE: a non-nested
+	 * guest that legitimately wants CR4.VMXE=0 (e.g. Linux KVM
+	 * clients that probe but don't use VMX) should still get
+	 * the architectural CR4 it wrote.
+	 */
+	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
+	    vcpu->vmx->vm->nested_enabled)
+		regval |= CR4_VMXE;
 
 	vmcs_write(VMCS_CR4_SHADOW, regval);
 
