@@ -632,6 +632,29 @@ vmx_rdmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t *val, bool *retu)
 		return (vmx_nested_cap_msr_read(vcpu, num, val));
 	}
 
+	/*
+	 * Nested-VMX (T13): the IA32_FEATURE_CONTROL MSR reports
+	 * whether VMXON is allowed outside SMX and whether the MSR
+	 * itself is locked.  A real BIOS that has enabled VMX
+	 * typically locks the MSR with both bits set, so a nested L1
+	 * expecting to see VMX available must see:
+	 *   bit 0 (Lock)         = 1
+	 *   bit 2 (VMX outside)  = 1
+	 *   bit 1 (VMX in SMX)   = 0  (we don't emulate SMX)
+	 * Returning 0x00000005 mirrors typical BIOS behaviour and
+	 * keeps L1's VMPTRLD path consistent with what it would see
+	 * on bare metal.  Do NOT let the L1 view reflect the actual
+	 * host value: that would leak L0 BIOS state into the L1
+	 * view and could confuse L1's own VMX-bring-up logic.
+	 */
+	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
+	    vcpu->vmx->vm->nested_enabled &&
+	    num == MSR_IA32_FEATURE_CONTROL) {
+		*val = IA32_FEATURE_CONTROL_LOCK |
+		    IA32_FEATURE_CONTROL_VMX_EN;
+		return (0);
+	}
+
 	switch (num) {
 	case MSR_MCG_CAP:
 	case MSR_MCG_STATUS:
@@ -684,6 +707,21 @@ vmx_wrmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
 	    vcpu->vmx->vm->nested_enabled &&
 	    num >= MSR_VMX_BASIC && num <= MSR_VMX_TRUE_ENTRY_CTLS) {
+		vm_inject_gp(vcpu->vcpu);
+		return (0);
+	}
+
+	/*
+	 * Nested-VMX (T13): L1's attempt to write IA32_FEATURE_CONTROL
+	 * must surface as #GP.  The MSR is locked from L1's view
+	 * (we returned Lock=1 in vmx_rdmsr above), so any WRMSR is
+	 * by definition illegal at L1.  Inject #GP and skip the
+	 * write so we neither persist the value nor advance L1's
+	 * state machine.
+	 */
+	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
+	    vcpu->vmx->vm->nested_enabled &&
+	    num == MSR_IA32_FEATURE_CONTROL) {
 		vm_inject_gp(vcpu->vcpu);
 		return (0);
 	}
