@@ -125,30 +125,11 @@ svm_nested_handle_vmexit(struct svm_vcpu *vcpu, struct vmcb *vmcb12,
 		 */
 		break;
 
-	case VMCB_EXIT_CR0_READ:
-	case VMCB_EXIT_CR0_WRITE:
-	case VMCB_EXIT_CR0_SEL_WRITE:
-	case VMCB_EXIT_CR3_READ:
-	case VMCB_EXIT_CR3_WRITE:
-	case VMCB_EXIT_CR4_READ:
-	case VMCB_EXIT_CR4_WRITE:
-		/*
-		 * CR access intercepts. EXITINFO1 carries the CR
-		 * number; EXITINFO2 carries the value (for writes) or
-		 * the old value (for reads). Both are written verbatim.
-		 */
-		break;
-
 	case 0x20 ... 0x2F:	/* DR0..DR7 read */
 	case 0x30 ... 0x3F:	/* DR0..DR7 write */
 		break;
 
 	case VMCB_EXIT_CPUID:
-		reflected_exitinfo2 = 0;
-		break;
-
-	case VMCB_EXIT_RDTSC:
-	case VMCB_EXIT_RDPMC:
 		reflected_exitinfo2 = 0;
 		break;
 
