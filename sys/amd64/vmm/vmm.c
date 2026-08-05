@@ -183,6 +183,7 @@ SYSCTL_INT(_hw_vmm, OID_AUTO, trap_wbinvd, CTLFLAG_RDTUN, &trap_wbinvd, 0,
 
 int vmm_nested_enable;
 static int vmm_nested_enable_sysctl(SYSCTL_HANDLER_ARGS);
+bool vmm_nested_supported(void);
 extern int svm_nested_status;
 extern int vmx_nested_status;
 

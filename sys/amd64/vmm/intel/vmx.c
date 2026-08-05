@@ -131,6 +131,7 @@ bool vmx_have_msr_tsc_aux;
 int vmx_nested_status;
 
 SYSCTL_DECL(_hw_vmm);
+SYSCTL_DECL(_hw_vmm_nested);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, vmx, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     NULL);
 SYSCTL_INT(_hw_vmm_nested, OID_AUTO, vmx, CTLFLAG_RD,
