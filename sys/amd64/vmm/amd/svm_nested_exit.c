@@ -188,7 +188,7 @@ svm_nested_handle_vmexit(struct svm_vcpu *vcpu, struct vmcb *vmcb12,
 	if (ns != NULL)
 		ns->nested_in_l2 = false;
 
-	svm_nested_reflect_exit_info_to_vmcb12(vcpu, exitcode,
+	svm_nested_reflect_exit_info_to_vmcb12(vcpu, vmcb12, exitcode,
 	    reflected_exitinfo1, reflected_exitinfo2);
 
 	/*
