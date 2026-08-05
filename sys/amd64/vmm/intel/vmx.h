@@ -37,6 +37,7 @@
 
 struct pmap;
 struct vmx;
+struct vmx_nested_state;
 
 struct vmxctx {
 	register_t	guest_rdi;		/* Guest state */
@@ -141,6 +142,14 @@ struct vmx_vcpu {
 	struct vmcs	*nvmcs12;
 	struct apic_page *apic_page;
 	struct pir_desc	*pir_desc;
+	/*
+	 * Wave 4 (T18-T23b): per-vCPU nested-VMX state.  Allocated
+	 * lazily by vmx_vcpu_init() when the owning VM has
+	 * nested_enabled set; read-only access via vmx_nested_state().
+	 * NULL for non-nested VMs and for nested-enabled VMs that
+	 * have not yet installed a VMCS12.
+	 */
+	struct vmx_nested_state *nested_state;
 	uint64_t	guest_msrs[GUEST_MSR_NUM];
 	struct vmxctx	ctx;
 	struct vmxcap	cap;

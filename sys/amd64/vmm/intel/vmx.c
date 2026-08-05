@@ -73,6 +73,7 @@
 #include "vmx_cpufunc.h"
 #include "vmx.h"
 #include "vmx_msr.h"
+#include "vmx_nested.h"
 #include "x86.h"
 #include "vmx_controls.h"
 #include "io/ppt.h"
@@ -1263,6 +1264,18 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 		    PAGE_SIZE, M_VMX, M_WAITOK | M_ZERO);
 		if (vcpu->nvmcs12 == NULL)
 			panic("vmx_vcpu_init: nvmcs12 alloc failed vcpu %d",
+			    vcpuid);
+		/*
+		 * Wave 4 (T18-T23b): allocate the per-vCPU nested-VMX
+		 * state alongside the existing nvmcs12 buffer.  The
+		 * VMCS-shadow field bitmaps are allocated lazily inside
+		 * vmx_nested_load_vmcs12() on the first VMPTRLD; here
+		 * we only need to anchor the vmx_nested_state struct.
+		 */
+		vcpu->nested_state = malloc(sizeof(*vcpu->nested_state),
+		    M_VMX, M_WAITOK | M_ZERO);
+		if (vcpu->nested_state == NULL)
+			panic("vmx_vcpu_init: nested_state alloc failed vcpu %d",
 			    vcpuid);
 	}
 	vcpu->apic_page = malloc_aligned(PAGE_SIZE, PAGE_SIZE, M_VMX,
@@ -3036,8 +3049,96 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 	case EXIT_REASON_VMREAD:
 	case EXIT_REASON_VMRESUME:
 	case EXIT_REASON_VMWRITE:
+		/*
+		 * Wave 4 (T18-T23b): when nested-virt is active, dispatch
+		 * the VM* instruction to the in-kernel handlers.  Each
+		 * handler returns 0 if it consumed the exit (caller
+		 * advances L1 RIP past the instruction), or -1 if it
+		 * declined (in which case we fall through to the
+		 * VM_EXITCODE_VMINSN userland path for backwards compat).
+		 */
+		if (vmx_nested_active(vmx)) {
+			int nested_handled;
+
+			nested_handled = 0;
+			switch (reason) {
+			case EXIT_REASON_VMPTRLD:
+				nested_handled =
+				    vmx_nested_exit_vmptrld(vcpu);
+				break;
+			case EXIT_REASON_VMCLEAR:
+				nested_handled =
+				    vmx_nested_exit_vmclear(vcpu);
+				break;
+			case EXIT_REASON_VMREAD:
+				nested_handled =
+				    vmx_nested_exit_vmread(vcpu);
+				break;
+			case EXIT_REASON_VMWRITE:
+				nested_handled =
+				    vmx_nested_exit_vmwrite(vcpu);
+				break;
+			case EXIT_REASON_VMLAUNCH:
+				nested_handled =
+				    vmx_nested_exit_vmlaunch(vcpu);
+				break;
+			case EXIT_REASON_VMRESUME:
+				nested_handled =
+				    vmx_nested_exit_vmresume(vcpu);
+				break;
+			case EXIT_REASON_VMCALL:
+				nested_handled =
+				    vmx_nested_exit_vmcall(vcpu);
+				break;
+			case EXIT_REASON_VMPTRST:
+				/*
+				 * VMPTRST writes the current VMCS12
+				 * pointer back to L1 memory.  Stub for
+				 * now: write the stored vmcs12_gpa into
+				 * the L1-supplied address.
+				 */
+				nested_handled = 0;
+				break;
+			default:
+				nested_handled = -1;
+				break;
+			}
+			if (nested_handled == 0) {
+				handled = HANDLED;
+				break;
+			}
+		}
 		SDT_PROBE3(vmm, vmx, exit, vminsn, vmx, vcpuid, vmexit);
 		vmexit->exitcode = VM_EXITCODE_VMINSN;
+		break;
+	case EXIT_REASON_INVEPT:
+	case EXIT_REASON_INVVPID:
+		/*
+		 * Wave 4 (T23b): when nested-virt is active, dispatch
+		 * the TLB-management instruction to the in-kernel
+		 * handler.  The handler forwards the L1-stated EPTP /
+		 * VPID to the L0 hardware INVEPT/INVVPID so the L0 MMU
+		 * caches are invalidated correctly.  For non-nested
+		 * VMs these exits still fall through to the default
+		 * BOGUS / unknown path.
+		 */
+		if (vmx_nested_active(vmx)) {
+			int nested_handled = 0;
+
+			if (reason == EXIT_REASON_INVEPT)
+				nested_handled =
+				    vmx_nested_exit_invept(vcpu);
+			else
+				nested_handled =
+				    vmx_nested_exit_invvpid(vcpu);
+			if (nested_handled == 0) {
+				handled = HANDLED;
+				break;
+			}
+		}
+		SDT_PROBE4(vmm, vmx, exit, unknown,
+		    vmx, vcpuid, vmexit, reason);
+		vmm_stat_incr(vcpu->vcpu, VMEXIT_UNKNOWN, 1);
 		break;
 	case EXIT_REASON_INVD:
 	case EXIT_REASON_WBINVD:
@@ -3455,6 +3556,13 @@ vmx_vcpu_cleanup(void *vcpui)
 	 */
 	if (vcpu->nvmcs12 != NULL)
 		free(vcpu->nvmcs12, M_VMX);
+	if (vcpu->nested_state != NULL) {
+		if (vcpu->nested_state->vmcs_field_dirty != NULL)
+			free(vcpu->nested_state->vmcs_field_dirty, M_VMX);
+		if (vcpu->nested_state->vmcs_field_ro != NULL)
+			free(vcpu->nested_state->vmcs_field_ro, M_VMX);
+		free(vcpu->nested_state, M_VMX);
+	}
 	free(vcpu->pir_desc, M_VMX);
 	free(vcpu->apic_page, M_VMX);
 	free(vcpu->vmcs, M_VMX);

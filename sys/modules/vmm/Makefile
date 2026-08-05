@@ -111,6 +111,16 @@ SRCS+=	iommu.c		\
 SRCS+=	ept.c		\
 	vmcs.c		\
 	vmx_msr.c	\
+	vmx_nested.c		\
+	vmx_nested_vmptrld.c	\
+	vmx_nested_vmread.c	\
+	vmx_nested_vmclear.c	\
+	vmx_nested_vmlaunch.c	\
+	vmx_nested_vmresume.c	\
+	vmx_nested_vmcall.c	\
+	vmx_nested_shadow.c	\
+	vmx_nested_ept12.c	\
+	vmx_nested_invept.c	\
 	vmx_support.S	\
 	vmx.c		\
 	vtd.c
