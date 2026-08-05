@@ -103,6 +103,12 @@ void	 svm_nested_build_msrpm(struct svm_softc *sc, struct svm_vcpu *vcpu);
  */
 void	 svm_nested_set_vmcb12(struct vmcb *vmcb12);
 
+/*
+ * Drop L2-translated TLB entries so L1 cannot observe them. Called
+ * from the svm_nested_handle_vmexit epilogue (T29b).
+ */
+void	 svm_nested_tlb_flush(struct svm_vcpu *vcpu);
+
 #ifdef SVM_NESTED_TEST
 void	 svm_nested_test_msrpm_range(void);
 #endif
