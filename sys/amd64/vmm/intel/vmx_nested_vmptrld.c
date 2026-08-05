@@ -17,7 +17,9 @@
 #include <sys/systm.h>
 
 #include <vm/vm.h>
+#include <vm/pmap.h>
 
+#include <machine/cpufunc.h>
 #include <machine/vmm.h>
 
 #include <dev/vmm/vmm_ktr.h>
