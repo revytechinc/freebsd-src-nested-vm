@@ -41,6 +41,21 @@
 #include "vmx_msr.h"
 #include "x86.h"
 
+#include <dev/vmm/vmm_vm.h>
+
+/*
+ * VMX capability MSR numbers not yet named in <machine/specialreg.h>.
+ * These are referenced from the nested-VMX capability masking path
+ * below (T12); once <machine/specialreg.h> is updated to add them,
+ * these local defines become redundant and can be removed.
+ */
+#ifndef	MSR_VMX_MISC
+#define	MSR_VMX_MISC		0x485
+#endif
+#ifndef	MSR_VMX_VMFUNC
+#define	MSR_VMX_VMFUNC		0x491
+#endif
+
 static bool
 vmx_ctl_allows_one_setting(uint64_t msr_val, int bitpos)
 {
@@ -308,6 +323,204 @@ vmx_msr_init(void)
 		turbo_ratio_limit = (turbo_ratio_limit << 8) | ratio;
 }
 
+/*
+ * Nested-VMX capability MSR shadow masks (T12).
+ *
+ * For each capability MSR in the 0x480-0x48F range we cache a pair
+ * (and_mask, or_mask) computed from the L0 host MSR values at
+ * module-init time.  Reads from L1 are answered as:
+ *
+ *     result = (host_value & and_mask) | or_mask
+ *
+ * The masks are picked so that the value advertised to L1 is
+ * a valid VMX capability for a hypothetical CPU whose behaviour
+ * is at most as expressive as L0's.  Specifically:
+ *
+ *  - True-control MSRs (e.g. MSR_VMX_TRUE_*_CTLS at 0x48D-0x490)
+ *    advertise their existence via bit 55 of MSR_VMX_BASIC; if L0
+ *    does not have them, the and_mask clears the corresponding
+ *    capability bit in the legacy control MSRs so L1 cannot
+ *    silently observe the L0 microarchitecture details.
+ *  - Bits that L0 reserves (zeros in the legacy MSR) must remain
+ *    zero in the value L1 sees.
+ *  - Bits that the architecturally-required minimums force on
+ *    (e.g. CR0.PE in MSR_VMX_CR0_FIXED0) are preserved.
+ *
+ * Implementation note: we cache host values at init time and do
+ * not refresh them at runtime; the assumption is that all of
+ * these MSRs are CR0/CR4/VMCS/VPMCID-fixed per L0 and do not
+ * change while bhyve is running.
+ */
+static uint64_t vmx_cap_and_mask[16];
+static uint64_t vmx_cap_or_mask[16];
+static bool vmx_cap_masks_initialized;
+
+static inline uint64_t
+vmx_cap_host_read(u_int msr)
+{
+	switch (msr) {
+	case MSR_VMX_BASIC:		return (rdmsr(MSR_VMX_BASIC));
+	case MSR_VMX_PINBASED_CTLS:	return (rdmsr(MSR_VMX_PINBASED_CTLS));
+	case MSR_VMX_PROCBASED_CTLS:	return (rdmsr(MSR_VMX_PROCBASED_CTLS));
+	case MSR_VMX_EXIT_CTLS:		return (rdmsr(MSR_VMX_EXIT_CTLS));
+	case MSR_VMX_ENTRY_CTLS:	return (rdmsr(MSR_VMX_ENTRY_CTLS));
+	case MSR_VMX_MISC:		return (rdmsr(MSR_VMX_MISC));
+	case MSR_VMX_CR0_FIXED0:	return (rdmsr(MSR_VMX_CR0_FIXED0));
+	case MSR_VMX_CR0_FIXED1:	return (rdmsr(MSR_VMX_CR0_FIXED1));
+	case MSR_VMX_CR4_FIXED0:	return (rdmsr(MSR_VMX_CR4_FIXED0));
+	case MSR_VMX_CR4_FIXED1:	return (rdmsr(MSR_VMX_CR4_FIXED1));
+	case MSR_VMX_VMCS_ENUM:		return (rdmsr(MSR_VMX_VMCS_ENUM));
+	case MSR_VMX_PROCBASED_CTLS2:	return (rdmsr(MSR_VMX_PROCBASED_CTLS2));
+	case MSR_VMX_EPT_VPID_CAP:	return (rdmsr(MSR_VMX_EPT_VPID_CAP));
+	case MSR_VMX_TRUE_PINBASED_CTLS:
+		return (rdmsr(MSR_VMX_TRUE_PINBASED_CTLS));
+	case MSR_VMX_TRUE_PROCBASED_CTLS:
+		return (rdmsr(MSR_VMX_TRUE_PROCBASED_CTLS));
+	case MSR_VMX_TRUE_EXIT_CTLS:	return (rdmsr(MSR_VMX_TRUE_EXIT_CTLS));
+	case MSR_VMX_TRUE_ENTRY_CTLS:	return (rdmsr(MSR_VMX_TRUE_ENTRY_CTLS));
+	default:
+		return (0);
+	}
+}
+
+static int
+vmx_cap_msr_index(u_int msr, u_int *idx)
+{
+
+	if (msr < MSR_VMX_BASIC || msr > MSR_VMX_TRUE_ENTRY_CTLS)
+		return (EINVAL);
+	/*
+	 * Index 0 corresponds to MSR_VMX_BASIC; the range is
+	 * contiguous apart from MSR_VMX_MISC (0x485) and
+	 * MSR_VMX_VMCS_ENUM (0x48a), which we simply treat as
+	 * one slot each.
+	 */
+	*idx = msr - MSR_VMX_BASIC;
+	if (*idx >= nitems(vmx_cap_and_mask))
+		return (EINVAL);
+	return (0);
+}
+
+static void
+vmx_cap_masks_init(void)
+{
+	uint64_t basic, host_val;
+	u_int i;
+	bool has_true_ctls;
+
+	basic = rdmsr(MSR_VMX_BASIC);
+	has_true_ctls = (basic & (1UL << 55)) != 0;
+
+	for (i = 0; i < nitems(vmx_cap_and_mask); i++) {
+		u_int msr = MSR_VMX_BASIC + i;
+		uint64_t zeros, ones;
+
+		host_val = vmx_cap_host_read(msr);
+		if (msr == MSR_VMX_MISC ||
+		    msr == MSR_VMX_VMCS_ENUM) {
+			/*
+			 * MISC and VMCS_ENUM are pure reporting MSRs;
+			 * pass them through unmodified.
+			 */
+			vmx_cap_and_mask[i] = ~(uint64_t)0;
+			vmx_cap_or_mask[i] = 0;
+			continue;
+		}
+
+		/*
+		 * The capability MSR layout (per Intel SDM §25.1):
+		 *   bits 0-31   -> 0 indicates which bits MUST be 1
+		 *   bits 32-63  -> 1 indicates which bits MAY be 1
+		 * i.e. for a control MSR (the ctl-fixed pattern),
+		 * the AND mask must keep the forced-zero bits at 0
+		 * and the OR mask must turn on the forced-one bits.
+		 *
+		 * For data-only MSRs (VMCS_ENUM, MISC, EPT/VPID,
+		 * VMFUNC) the host value is meaningful verbatim.
+		 */
+		zeros = ~host_val & 0xffffffff;
+		ones = host_val & 0xffffffff00000000ULL;
+
+		/*
+		 * For the legacy control MSRs, if L0 does not provide
+		 * the corresponding TRUE control MSR (no bit 55 in
+		 * MSR_VMX_BASIC), then the legacy MSR cannot have any
+		 * 1-bits in the upper 32 because the upper 32 is
+		 * architecturally 0 for a legacy MSR.
+		 */
+		if (!has_true_ctls && msr != MSR_VMX_BASIC) {
+			switch (msr) {
+			case MSR_VMX_PINBASED_CTLS:
+			case MSR_VMX_PROCBASED_CTLS:
+			case MSR_VMX_EXIT_CTLS:
+			case MSR_VMX_ENTRY_CTLS:
+			case MSR_VMX_PROCBASED_CTLS2:
+				ones = 0;
+				break;
+			default:
+				break;
+			}
+		}
+
+		vmx_cap_and_mask[i] = (uint64_t)0xffffffff & ~zeros;
+		vmx_cap_or_mask[i] = ones & 0xffffffff00000000ULL;
+	}
+	vmx_cap_masks_initialized = true;
+}
+
+int
+vmx_nested_cap_msr_read(struct vmx_vcpu *vcpu __unused, u_int msr, uint64_t *val)
+{
+	u_int idx;
+	uint64_t host_val;
+
+	if (!vmx_cap_masks_initialized)
+		vmx_cap_masks_init();
+	if (vmx_cap_msr_index(msr, &idx) != 0)
+		return (EINVAL);
+
+	host_val = vmx_cap_host_read(msr);
+	*val = (host_val & vmx_cap_and_mask[idx]) | vmx_cap_or_mask[idx];
+	return (0);
+}
+
+void
+vmx_nested_msr_intercept_init(struct vmx *vmx, struct vmx_vcpu *vcpu)
+{
+	u_int msr;
+
+	if (vmx == NULL || vmx->vm == NULL || !vmx->vm->nested_enabled)
+		return;
+
+	/*
+	 * The MSR bitmap is shared between vcpus; install the L1
+	 * range once at vBSP time, before VMPTRLD.
+	 */
+	if (vcpu->vcpuid != 0)
+		return;
+
+	/*
+	 * Intercept all reads of the VMX capability range so L1 sees
+	 * the nested-safe values rather than the raw L0 capability
+	 * MSRs.  Writes remain intercepted too: the architecture
+	 * requires #GP on WRMSR to any VMX capability MSR.
+	 */
+	for (msr = MSR_VMX_BASIC; msr <= MSR_VMX_TRUE_ENTRY_CTLS; msr++) {
+		if (msr_bitmap_change_access(vmx->msr_bitmap, msr,
+		    MSR_BITMAP_ACCESS_RW) != 0) {
+			/*
+			 * MSRs outside the two bitmap ranges
+			 * (0..0x1FFF and 0xC0000000..0xC0001FFF)
+			 * cannot be intercepted; the VMX capability
+			 * range sits inside 0..0x1FFF so this branch
+			 * is unreachable in practice.  Log anyway.
+			 */
+			printf("vmx_nested_msr_intercept_init: cannot "
+			    "intercept msr %#x\n", msr);
+		}
+	}
+}
+
 void
 vmx_msr_guest_init(struct vmx *vmx, struct vmx_vcpu *vcpu)
 {
@@ -321,6 +534,7 @@ vmx_msr_guest_init(struct vmx *vmx, struct vmx_vcpu *vcpu)
 		guest_msr_rw(vmx, MSR_STAR);
 		guest_msr_rw(vmx, MSR_SF_MASK);
 		guest_msr_rw(vmx, MSR_KGSBASE);
+		vmx_nested_msr_intercept_init(vmx, vcpu);
 	}
 
 	/*
@@ -405,6 +619,19 @@ vmx_rdmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t *val, bool *retu)
 
 	error = 0;
 
+	/*
+	 * Nested-VMX: when the L1 hypervisor reads a VMX capability
+	 * MSR, answer with the nested-safe masked value rather than
+	 * the raw L0 host value.  The bitmap interception installed
+	 * by vmx_nested_msr_intercept_init() ensures this branch is
+	 * taken for every L1 access to 0x480-0x48F.
+	 */
+	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
+	    vcpu->vmx->vm->nested_enabled &&
+	    num >= MSR_VMX_BASIC && num <= MSR_VMX_TRUE_ENTRY_CTLS) {
+		return (vmx_nested_cap_msr_read(vcpu, num, val));
+	}
+
 	switch (num) {
 	case MSR_MCG_CAP:
 	case MSR_MCG_STATUS:
@@ -447,6 +674,19 @@ vmx_wrmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 	int error;
 
 	error = 0;
+
+	/*
+	 * Nested-VMX: any WRMSR to the VMX capability range must
+	 * be reported as #GP to L1.  The architecture mandates that
+	 * these MSRs are read-only; an emulation that silently
+	 * ignored the write would let L1 corrupt its view of L0.
+	 */
+	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
+	    vcpu->vmx->vm->nested_enabled &&
+	    num >= MSR_VMX_BASIC && num <= MSR_VMX_TRUE_ENTRY_CTLS) {
+		vm_inject_gp(vcpu->vcpu);
+		return (0);
+	}
 
 	switch (num) {
 	case MSR_MCG_CAP:
