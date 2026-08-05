@@ -159,6 +159,7 @@ SYSCTL_DECL(_hw_vmm);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, svm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     NULL);
 
+SYSCTL_DECL(_hw_vmm_nested);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, nested, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
     "Nested virtualization preflight status");
 SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm, CTLFLAG_RD,
