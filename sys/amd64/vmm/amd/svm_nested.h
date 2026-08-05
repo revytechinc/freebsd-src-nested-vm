@@ -12,7 +12,6 @@
 #define _VMM_SVM_NESTED_H_
 
 #include <sys/types.h>
-#include <stdbool.h>
 
 #include "vmm_nested.h"
 
