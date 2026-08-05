@@ -6,31 +6,16 @@
  *
  * Nested interrupt controller (T25b) prototype declarations for
  * sys/amd64/vmm/amd/svm_nested_intr.c.
+ *
+ * The per-L2-vCPU PIR (pending interrupt register) helpers
+ * (svm_nested_pir_set/clear/highest) are file-local to
+ * svm_nested_intr.c and are NOT exposed here.
  */
 
 #ifndef _VMM_SVM_NESTED_INTR_H_
 #define _VMM_SVM_NESTED_INTR_H_
 
 struct svm_vcpu;
-
-/*
- * Record a pending interrupt vector for vCPU 'vcpuid' so the
- * next L2 entry can re-deliver it through the interrupt-window
- * path.
- */
-void	 svm_nested_pir_set(int vcpuid, uint8_t vector);
-
-/*
- * Clear a previously-recorded pending vector (typically after a
- * successful inject).
- */
-void	 svm_nested_pir_clear(int vcpuid, uint8_t vector);
-
-/*
- * Return the highest-priority pending vector for vcpuid, or -1
- * if the PIR is empty or vcpuid is out of range.
- */
-int	 svm_nested_pir_highest(int vcpuid);
 
 /*
  * Inject the pending vector into L2 via the EventInjection field
