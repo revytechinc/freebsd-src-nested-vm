@@ -12,6 +12,7 @@
 #define _VMM_SVM_NESTED_H_
 
 #include <sys/types.h>
+#include <stdbool.h>
 
 #include "vmm_nested.h"
 
@@ -53,6 +54,16 @@
 
 struct svm_softc;
 struct svm_vcpu;
+
+/*
+ * Per-vCPU nested-virt state. Currently a minimal stub sufficient for
+ * the wave-5 vmexit dispatcher to clear 'nested_in_l2' on
+ * SHUTDOWN/exit; future waves extend it with the L1-stated VMCB12
+ * pointer, the cached L2 VMCB, and the L2 IDT/GDT/CR state.
+ */
+struct svm_nested {
+	bool	nested_in_l2;
+};
 
 /*
  * Attach a backing buffer (already page-aligned and SVM_MSR_BITMAP_SIZE
