@@ -94,6 +94,15 @@ int	 svm_msr_bitmap_test_intercept(const struct nested_bitmap *nb,
  */
 void	 svm_nested_build_msrpm(struct svm_softc *sc, struct svm_vcpu *vcpu);
 
+/*
+ * Install the per-thread 'current VMCB12' pointer that the
+ * svm_nested_handle_vmexit dispatcher writes to. The wave-5 entry
+ * path calls this once on each L2 entry; if no VMCB12 is installed,
+ * the reflection helpers degrade to no-ops so the unit tests can
+ * exercise the dispatcher without a real L1 mapping.
+ */
+void	 svm_nested_set_vmcb12(struct vmcb *vmcb12);
+
 #ifdef SVM_NESTED_TEST
 void	 svm_nested_test_msrpm_range(void);
 #endif
