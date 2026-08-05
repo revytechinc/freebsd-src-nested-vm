@@ -14,3 +14,8 @@ atf_test_program{
 	test_programs = { "nested_basic.sh" },
 	required_files = { "nested_utils.subr" },
 }
+
+atf_test_program{
+	name = "vmx_basic",
+	test_programs = { "vmx_basic.sh" },
+}
