@@ -45,4 +45,11 @@ void	 svm_nested_inject_nmi(struct svm_vcpu *vcpu);
 void	 svm_nested_inject_exception(struct svm_vcpu *vcpu, uint8_t vector,
 	     uint32_t error_code, bool has_error);
 
+/*
+ * Drain the per-L2-vCPU PIR into the VMCB EventInjection field on
+ * L2 entry (T25 VMRUN). Returns the vector delivered, or -1 if the
+ * PIR was empty.
+ */
+int	 svm_nested_drain_pir(struct svm_vcpu *vcpu);
+
 #endif /* _VMM_SVM_NESTED_INTR_H_ */
