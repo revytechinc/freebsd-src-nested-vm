@@ -23,6 +23,7 @@
 #include "vmm_host.h"
 #include "vmcs.h"
 #include "vmx.h"
+#include "vmx_cpufunc.h"
 #include "vmx_nested.h"
 
 void
