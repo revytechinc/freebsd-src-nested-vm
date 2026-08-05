@@ -20,11 +20,14 @@
 
 #include <machine/vmm.h>
 
+#include <dev/vmm/vmm_ktr.h>
 #include <dev/vmm/vmm_vm.h>
 
 #include "vmm_host.h"
 #include "vmcs.h"
 #include "vmx.h"
+#include "vmx_cpufunc.h"
+#include "vmx_msr.h"
 #include "vmx_nested.h"
 
 extern int vmm_nested_enable;
@@ -112,7 +115,7 @@ vmx_nested_load_vmcs12(struct vmx_vcpu *vcpu, uint64_t gpa)
 	ns->state = VMCS12_STATE_CLEAR;
 	ns->vmcs12_active = true;
 
-	VMX_CTR1(vcpu, "nested VMPTRLD: vmcs12 GPA=%#lx revision=%#x",
+	VMX_CTR2(vcpu, "nested VMPTRLD: vmcs12 GPA=%#lx revision=%#x",
 	    (unsigned long)gpa, l0_revision);
 
 	return (VM_SUCCESS);
