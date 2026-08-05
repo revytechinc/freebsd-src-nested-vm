@@ -1077,6 +1077,22 @@ vmx_modinit(int ipinum)
 	vmx_initialized = 1;
 	vmx_nested_status = nested_hw ? (vm_guest == VM_GUEST_NO ? 2 : 1) : 0;
 
+	/*
+	 * Nested-VMX (T15): if the host CPU supports VMCS shadowing
+	 * (which is part of the `nested_hw` gate we just used to set
+	 * vmx_nested_status), enable the VMCS-shadowing bit in the
+	 * global PROCBASED_CTLS2 so every VMCS we activate has the
+	 * shadowing control on.  This is safe because the VMCS12
+	 * shadow region is allocated lazily per-VM (see
+	 * vmx_vcpu_init() below); a non-nested VM never references
+	 * the shadow and so pays no runtime cost.
+	 *
+	 * Note: VMCS shadowing REQUIRES CR4.VMXE in the guest, which
+	 * T14 now forces on for any nested-enabled L1.
+	 */
+	if (nested_hw)
+		procbased_ctls2 |= VMX_NESTED_VMCS_SHADOWING;
+
 	return (0);
 }
 
@@ -1231,6 +1247,24 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 	vcpu->vcpuid = vcpuid;
 	vcpu->vmcs = malloc_aligned(sizeof(*vmcs), PAGE_SIZE, M_VMX,
 	    M_WAITOK | M_ZERO);
+	/*
+	 * Nested-VMX (T15): allocate the 4KB VMCS12 shadow region
+	 * only for nested-enabled VMs.  The region is plain
+	 * zero-initialised memory at this point; the actual VMCS12
+	 * field bitmap, RDTSCP intercept, and shadow-pointer wiring
+	 * land with later Wave-3/Wave-4 tasks (T18 VMREAD/VMWRITE,
+	 * T19 VMLAUNCH).  We intentionally do not vmwrite the
+	 * shadow address into the VMCS here because doing so without
+	 * a correctly-populated field bitmap would generate
+	 * VM-entry failures on every nested-enabled launch.
+	 */
+	if (vmx->vm->nested_enabled) {
+		vcpu->nvmcs12 = malloc_aligned(sizeof(*vcpu->nvmcs12),
+		    PAGE_SIZE, M_VMX, M_WAITOK | M_ZERO);
+		if (vcpu->nvmcs12 == NULL)
+			panic("vmx_vcpu_init: nvmcs12 alloc failed vcpu %d",
+			    vcpuid);
+	}
 	vcpu->apic_page = malloc_aligned(PAGE_SIZE, PAGE_SIZE, M_VMX,
 	    M_WAITOK | M_ZERO);
 	vcpu->pir_desc = malloc_aligned(sizeof(*vcpu->pir_desc), 64, M_VMX,
@@ -3414,6 +3448,13 @@ vmx_vcpu_cleanup(void *vcpui)
 	struct vmx_vcpu *vcpu = vcpui;
 
 	vpid_free(vcpu->state.vpid);
+	/*
+	 * Nested-VMX (T15): free the VMCS12 shadow if vmx_vcpu_init
+	 * allocated it.  The field is left NULL for non-nested VMs,
+	 * so the free() on NULL is a safe no-op.
+	 */
+	if (vcpu->nvmcs12 != NULL)
+		free(vcpu->nvmcs12, M_VMX);
 	free(vcpu->pir_desc, M_VMX);
 	free(vcpu->apic_page, M_VMX);
 	free(vcpu->vmcs, M_VMX);
