@@ -33,7 +33,7 @@
 #include "svm_nested.h"
 #include "svm_nested_exit.h"
 #include "vmm_nested.h"
-#include "vmm_stat.h"
+#include <dev/vmm/vmm_ktr.h>
 #include "vmcb.h"
 
 /*

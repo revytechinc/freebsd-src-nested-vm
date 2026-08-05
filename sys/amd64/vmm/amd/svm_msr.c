@@ -47,7 +47,7 @@
 #include "svm_softc.h"
 #include "svm_msr.h"
 #include "vmm_nested.h"
-#include "vmm_stat.h"
+#include <dev/vmm/vmm_ktr.h>
 
 #ifndef MSR_AMDK8_IPM
 #define	MSR_AMDK8_IPM	0xc0010055
