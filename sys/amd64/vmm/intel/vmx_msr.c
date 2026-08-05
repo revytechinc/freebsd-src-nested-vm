@@ -633,6 +633,33 @@ vmx_rdmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t *val, bool *retu)
 	}
 
 	/*
+	 * Nested-VMX (T16): the VMX-fixed and VMCS-enumeration MSRs
+	 * are reporting-only — they tell L1 which bits of CR0/CR4
+	 * the architecture forces 1 or 0 in VMX operation, and which
+	 * VMCS encoding values are supported.  Returning 0 would be
+	 * architecturally invalid (L1 would conclude that no CR0/CR4
+	 * bit is forced, which is impossible).  Return the L0 host
+	 * value verbatim.
+	 *
+	 * This branch is logically redundant with the
+	 * vmx_nested_cap_msr_read() path above (T12's AND/OR mask
+	 * happens to preserve the FIXED MSR host value because the
+	 * mask is identity for the lower-32-bits-only data layout
+	 * of these MSRs) but is kept as an explicit fast-path so
+	 * the FIXED-MSR contract is obvious in the source and
+	 * cannot regress if the T12 mask derivation is later
+	 * tightened.
+	 */
+	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
+	    vcpu->vmx->vm->nested_enabled &&
+	    (num == MSR_VMX_CR0_FIXED0 || num == MSR_VMX_CR0_FIXED1 ||
+	     num == MSR_VMX_CR4_FIXED0 || num == MSR_VMX_CR4_FIXED1 ||
+	     num == MSR_VMX_VMCS_ENUM)) {
+		*val = rdmsr(num);
+		return (0);
+	}
+
+	/*
 	 * Nested-VMX (T13): the IA32_FEATURE_CONTROL MSR reports
 	 * whether VMXON is allowed outside SMX and whether the MSR
 	 * itself is locked.  A real BIOS that has enabled VMX
