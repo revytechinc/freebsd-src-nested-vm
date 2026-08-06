@@ -38,6 +38,20 @@ extern int vmm_nested_enable;
  * short-circuit cleanly on non-nested VMs (the existing
  * vmx_nested_active() check in vmx.c continues to gate the
  * higher-level dispatch).
+ *
+ * Handover contract:
+ *  - vmx.c allocates the struct with M_WAITOK | M_ZERO so every
+ *    field (state, vmcs12_gpa, vmcs12_active, ept12_pte, in_l2,
+ *    vmcs_field_dirty, vmcs_field_ro) is initialised to 0/NULL.
+ *    Per-task readers therefore never see uninitialised fields.
+ *  - The state->vmcs_field_dirty / vmcs_field_ro pointers stay
+ *    NULL until a later Wave task allocates them lazily; the
+ *    shadow helpers below guard against NULL.
+ *  - A non-NULL return guarantees that nested_enabled was true
+ *    and vmm_nested_enable was non-zero at the moment of the
+ *    access; if either flips between this check and the caller's
+ *    use the worst case is an early return -1 from the per-task
+ *    handler (which bubbles up as VM_EXITCODE_VMINSN to userland).
  */
 struct vmx_nested_state *
 vmx_nested_state(struct vmx_vcpu *vcpu)
@@ -57,7 +71,15 @@ vmx_nested_state(struct vmx_vcpu *vcpu)
 	 * nested-enabled VMs; vcpu->nested_state is initialised to
 	 * NULL at malloc-time.  vmx.c owns the lifecycle (alloc /
 	 * free); the per-task files are read-only consumers.
+	 *
+	 * KASSERT the lifecycle invariant: a nested-enabled VM must
+	 * have a non-NULL nested_state.  If this fires the vCPU
+	 * init path forgot to allocate the struct, which would let
+	 * the per-task handlers silently dereference garbage.
 	 */
+	KASSERT(vcpu->nested_state != NULL,
+	    ("vmx_nested_state: nested_enabled but nested_state is NULL"));
+
 	return (vcpu->nested_state);
 }
 
