@@ -26,8 +26,8 @@
 #
 # T0a / Wave 0a: preflight unit classify. Pipes synthetic dmesg.boot
 # payloads through tools/preflight.sh and asserts the microarchitecture
-# and verdict lines for four representative CPUs (Intel Ivy Bridge +
-# Haswell, AMD Bulldozer + Zen1+/Zen4+). No root, no vmm.ko.
+# and verdict lines for five representative CPUs (Intel Ivy Bridge +
+# Haswell, AMD Bulldozer + Zen1+/Zen5). No root, no vmm.ko.
 
 # shellcheck shell=sh
 set -u
@@ -75,9 +75,16 @@ make_amd_dmesg()
 	_svm_line="$2"
 	_amdfn2_hex="$3"
 
+	# _extfam is the hex family suffix (e.g., "15", "17", "1a").  Convert
+	# to decimal for the Id arithmetic, since bash $((expr)) treats "1a"
+	# as invalid.
+	_extfam_dec=$(printf '%d' "0x${_extfam}" 2>/dev/null)
+	[ -z "${_extfam_dec}" ] && _extfam_dec=0
+	_id_hex=$(printf '%x' "$((_extfam_dec * 256))")
+
 	cat <<DMESG_EOF
 CPU: AuthenticAMD synthetic (family 0x${_extfam})
-  Origin="AuthenticAMD"  Id=0x$(printf '%x' "$((_extfam * 256))")  Family=0x${_extfam}  Model=0x00  Stepping=0x0
+  Origin="AuthenticAMD"  Id=0x${_id_hex}  Family=0x${_extfam}  Model=0x00  Stepping=0x0
   Features=0x178bfbff  <FPU,VME,DE,PSE,TSC,MSR,PAE,MCE,CX8,APIC,SEP,MTRR,PGE,MCA,CMOV,PAT,PSE36,CLFLUSH,MMX,FXSR,SSE,SSE2>
   Features2=0x75a237ff  <SSE3,PCLMULQDQ,MONITOR,SSSE3,FMA,CX16,xTPR,AESNI,XSAVE,OSXSAVE,AVX,F16C>
   AMD Features=0x2f03f7ff  <FPU,VME,DE,PSE,TSC,MSR,PAE,MCE,CX8,APIC,SYSCALL,MP,MMX,FXSR,SSE,SSE2,RDTSCP,LM,3DNOWP>
@@ -132,10 +139,6 @@ preflight_classify_one()
 		exit 1
 	fi
 
-	# Accept either the ideal classification marker (when the classifier
-	# is correct) or the current-output marker exposed by a known bug
-	# in tools/preflight.sh's Family= decoder.  See the
-	# "known classifier bug" entry in the notepad for details.
 	classify_assert "${_label}" "${_out_arch}" "${tmp}"
 
 	rm -rf "${tmp}" "${tmpdir}"
@@ -147,38 +150,40 @@ preflight_unit_classify_main()
 		exit 0
 	fi
 
-	# Intel Ivy Bridge: family=6 model=0x3a -> model hi=3 lo=10.
+	# Intel Ivy Bridge: family=6 model=0x3a -> microarch key 6.3a.
 	intel_ivy=$(make_intel_dmesg 6 3 10)
 	preflight_classify_one "Intel Ivy Bridge" \
 	    "${intel_ivy}" \
-	    "Ivy Bridge|key=0\.a"
+	    "Ivy Bridge"
 
-	# Intel Haswell: family=6 model=0x3c -> model hi=3 lo=12.
+	# Intel Haswell: family=6 model=0x3c -> microarch key 6.3c.
 	intel_has=$(make_intel_dmesg 6 3 12)
 	preflight_classify_one "Intel Haswell" \
 	    "${intel_has}" \
-	    "Haswell|key=0\.c"
+	    "Haswell"
 
 	# AMD Bulldozer: family=0x15 with SVM features line.  amdfn2 EDX[2]
 	# is the SVM bit; include it for the SVM PRESENT line.
 	amd_bulldozer=$(make_amd_dmesg 15 "  SVM: NP,NRIP,VClean" "70010201")
 	preflight_classify_one "AMD Bulldozer" \
 	    "${amd_bulldozer}" \
-	    "Bulldozer|family=0x0"
+	    "Bulldozer"
 
-	# AMD Zen1+ (Family 17h): VIABLE/FULLY VIABLE path.
+	# AMD Zen1+ (Family 17h): FULLY VIABLE path.
 	amd_zen=$(make_amd_dmesg 17 "  SVM: NP,NRIP,VClean,AFlush,DAssist,NAsids=64" "75a337ff")
 	preflight_classify_one "AMD Zen1+" \
 	    "${amd_zen}" \
-	    "Zen1|family=0x0"
+	    "Zen1+"
 
-	# AMD Zen4+ (Family 18h): VIABLE/FULLY VIABLE path.
-	amd_zen4=$(make_amd_dmesg 18 "  SVM: NP,NRIP,VClean,AFlush,DAssist,NAsids=64" "75a337ff")
-	preflight_classify_one "AMD Zen4+" \
-	    "${amd_zen4}" \
-	    "Zen4|family=0x0"
+	# AMD Zen5 (Family 1ah): FULLY VIABLE path; the prior test used
+	# Family=0x12 (Llano) under the bug-fallback, so this case now
+	# exercises the corrected effective-family arithmetic.
+	amd_zen5=$(make_amd_dmesg 1a "  SVM: NP,NRIP,VClean,AFlush,DAssist,AVIC,NAsids=512" "75a337ff")
+	preflight_classify_one "AMD Zen5" \
+	    "${amd_zen5}" \
+	    "Zen4/Zen5"
 
-	echo "PASS: preflight_unit_classify 5 CPU microarch pairs (accepts bug-fallback markers)"
+	echo "PASS: preflight_unit_classify 5 CPU microarch pairs"
 }
 
 preflight_unit_classify_main "$@"
