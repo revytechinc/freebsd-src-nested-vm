@@ -1247,15 +1247,17 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 	vcpu->vmcs = malloc_aligned(sizeof(*vmcs), PAGE_SIZE, M_VMX,
 	    M_WAITOK | M_ZERO);
 	/*
-	 * Nested-VMX (T15): allocate the 4KB VMCS12 shadow region
-	 * only for nested-enabled VMs.  The region is plain
-	 * zero-initialised memory at this point; the actual VMCS12
-	 * field bitmap, RDTSCP intercept, and shadow-pointer wiring
-	 * land with later Wave-3/Wave-4 tasks (T18 VMREAD/VMWRITE,
-	 * T19 VMLAUNCH).  We intentionally do not vmwrite the
-	 * shadow address into the VMCS here because doing so without
-	 * a correctly-populated field bitmap would generate
-	 * VM-entry failures on every nested-enabled launch.
+	 * Nested-VMX (T15): allocate the 4KB VMCS12 image only for
+	 * nested-enabled VMs.  The region is plain zero-initialised
+	 * memory at this point; the actual L1-visible content is
+	 * filled in by vmx_nested_load_vmcs12() on the first
+	 * VMPTRLD, which also flips on VMCS shadowing in the
+	 * per-vCPU VMCS and writes this page's HPA into
+	 * VMCS_LINK_POINTER.  We intentionally do not touch the
+	 * shadow bit or link pointer here -- doing so would break
+	 * every nested-enabled VMCS that has not yet installed a
+	 * VMCS12 (Intel SDM Vol 3 §25.4.2 requires a valid link
+	 * pointer when shadowing is on).
 	 */
 	if (vmx->vm->nested_enabled) {
 		vcpu->nvmcs12 = malloc_aligned(sizeof(*vcpu->nvmcs12),

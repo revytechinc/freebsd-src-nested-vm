@@ -213,7 +213,7 @@ vmx_nested_vmread(struct vmx_vcpu *vcpu, uint32_t encoding, uint64_t *val)
 	if (f == NULL)
 		return (-1);
 
-	vmcs12 = (struct vmcs12 *)vcpu->nvmcs12;
+	vmcs12 = vcpu->nvmcs12;
 
 	/*
 	 * Read up to 8 bytes little-endian.  All supported widths
@@ -267,7 +267,7 @@ vmx_nested_vmwrite(struct vmx_vcpu *vcpu, uint32_t encoding, uint64_t val)
 	if ((f->flags & VMCS12_F_READONLY) != 0)
 		return (-1);
 
-	vmcs12 = (struct vmcs12 *)vcpu->nvmcs12;
+	vmcs12 = vcpu->nvmcs12;
 
 	switch (f->width) {
 	case VMCS_W_16: {

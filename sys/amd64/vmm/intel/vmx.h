@@ -38,6 +38,7 @@
 struct pmap;
 struct vmx;
 struct vmx_nested_state;
+struct vmcs12;
 
 struct vmxctx {
 	register_t	guest_rdi;		/* Guest state */
@@ -129,17 +130,21 @@ struct vmx_vcpu {
 	struct vmx	*vmx;
 	struct vcpu	*vcpu;
 	struct vmcs	*vmcs;
-	/*
-	 * Nested-VMX (T15): a 4KB shadow VMCS12 region used by L1's
+/*
+	 * Nested-VMX (T15): a 4KB VMCS12 region used by L1's
 	 * VMPTRLD / VMREAD / VMWRITE when the VMCS-shadowing control
 	 * is active.  Allocated by vmx_vcpu_init() when the owning
 	 * VM has nested_enabled set; freed by vmx_vcpu_cleanup().
-	 * The actual VMCS12 encoding, RDTSCP-through-shadow support,
-	 * and bitmap-based field interception will be wired up by
-	 * later Wave-3/Wave-4 tasks; this commit only reserves the
-	 * per-vCPU region.
+	 *
+	 * Typed `struct vmcs12 *` (not `struct vmcs *`): the L1-
+	 * facing VMCS12 image has its own revision_id/abort_code
+	 * header layout that matches the L1-stated region, NOT the
+	 * on-hardware `struct vmcs` used for the L0 VMCS.  Code
+	 * that treats nvmcs12 as a struct vmcs (e.g. accessing the
+	 * shadow field bitmap) is wrong -- it confuses two
+	 * architecturally distinct data structures.
 	 */
-	struct vmcs	*nvmcs12;
+	struct vmcs12	*nvmcs12;
 	struct apic_page *apic_page;
 	struct pir_desc	*pir_desc;
 	/*
