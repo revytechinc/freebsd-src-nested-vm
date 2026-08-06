@@ -223,3 +223,50 @@ vmx_nested_exit_vmptrld(struct vmx_vcpu *vcpu)
 	    rc, (unsigned long)gpa);
 	return (0);
 }
+
+/*
+ * Top-level dispatch for EXIT_REASON_VMPTRST.  VMPTRST writes the
+ * current VMCS-pointer into a memory operand supplied by L1
+ * (Intel SDM Vol 3 §30.3 / §27.2.1).  For nested VMX we write the
+ * L1-stated VMCS12 GPA that vmx_nested_load_vmcs12() stored in
+ * the per-vCPU nested state; if no VMCS12 is currently installed
+ * we write 0xFFFFFFFFFFFFFFFF (the architecturally-defined
+ * "VMCS not currently in use" sentinel).
+ *
+ * The L1 memory operand GPA is taken from the VM-exit
+ * qualification field; the write is performed via vm_gpa_hold()
+ * with VM_PROT_WRITE so the L1 page is paged in / validated.
+ */
+int
+vmx_nested_exit_vmptrst(struct vmx_vcpu *vcpu)
+{
+	struct vmx_nested_state *ns;
+	uint64_t dst_gpa;
+	uint64_t current_vmcs12;
+	void *mapping;
+	void *cookie;
+
+	ns = vmx_nested_state(vcpu);
+	if (ns == NULL)
+		return (-1);
+
+	dst_gpa = vmcs_exit_qualification();
+
+	current_vmcs12 = ns->vmcs12_active ? ns->vmcs12_gpa :
+	    0xFFFFFFFFFFFFFFFFULL;
+
+	mapping = vm_gpa_hold(vcpu->vcpu, dst_gpa, sizeof(uint64_t),
+	    VM_PROT_WRITE, &cookie);
+	if (mapping == NULL) {
+		VMX_CTR1(vcpu, "nested VMPTRST: vm_gpa_hold failed for "
+		    "dst=%#lx", (unsigned long)dst_gpa);
+		return (-1);
+	}
+
+	memcpy(mapping, &current_vmcs12, sizeof(current_vmcs12));
+	vm_gpa_release(cookie);
+
+	VMX_CTR2(vcpu, "nested VMPTRST: wrote %#lx to L1 dst=%#lx",
+	    (unsigned long)current_vmcs12, (unsigned long)dst_gpa);
+	return (0);
+}

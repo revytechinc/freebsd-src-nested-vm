@@ -3089,13 +3089,8 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 				    vmx_nested_exit_vmcall(vcpu);
 				break;
 			case EXIT_REASON_VMPTRST:
-				/*
-				 * VMPTRST writes the current VMCS12
-				 * pointer back to L1 memory.  Stub for
-				 * now: write the stored vmcs12_gpa into
-				 * the L1-supplied address.
-				 */
-				nested_handled = 0;
+				nested_handled =
+				    vmx_nested_exit_vmptrst(vcpu);
 				break;
 			default:
 				nested_handled = -1;
