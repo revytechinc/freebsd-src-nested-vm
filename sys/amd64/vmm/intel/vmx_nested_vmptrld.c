@@ -35,14 +35,16 @@
 extern int vmm_nested_enable;
 
 /*
- * Translate an L1-stated VMCS12 GPA to its HPA and copy the first
- * 4 bytes (revision ID) into *revision.  Returns NULL on failure
- * with the cookie stored so the caller can release.  On success the
- * caller MUST release the cookie via vm_gpa_release().
+ * Translate an L1-stated VMCS12 GPA to its HPA.  Returns NULL on
+ * failure with the cookie stored so the caller can release.  On
+ * success the caller MUST release the cookie via vm_gpa_release().
+ *
+ * The revision ID lives in the first 4 bytes of the returned
+ * mapping; the caller reads it directly from vmcs12->revision_id
+ * when it needs to validate it against the L0 host.
  */
 static const struct vmcs12 *
-vmx_nested_probe_vmcs12(struct vmx_vcpu *vcpu, uint64_t gpa,
-    void **cookie, uint32_t *revision)
+vmx_nested_probe_vmcs12(struct vmx_vcpu *vcpu, uint64_t gpa, void **cookie)
 {
 	const struct vmcs12 *vmcs12;
 	void *mapping;
@@ -56,7 +58,6 @@ vmx_nested_probe_vmcs12(struct vmx_vcpu *vcpu, uint64_t gpa,
 		return (NULL);
 
 	vmcs12 = mapping;
-	*revision = vmcs12->revision_id;
 	return (vmcs12);
 }
 
@@ -94,7 +95,7 @@ vmx_nested_load_vmcs12(struct vmx_vcpu *vcpu, uint64_t gpa)
 		return (VM_FAIL_INVALID);
 
 	l0_revision = vmx_revision();
-	vmcs12 = vmx_nested_probe_vmcs12(vcpu, gpa, &cookie, NULL);
+	vmcs12 = vmx_nested_probe_vmcs12(vcpu, gpa, &cookie);
 	if (vmcs12 == NULL)
 		return (VM_FAIL_VALID);
 
