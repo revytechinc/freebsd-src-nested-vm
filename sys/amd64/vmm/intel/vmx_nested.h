@@ -89,27 +89,16 @@ struct vmx_nested_state {
 struct vmx_nested_state *vmx_nested_state(struct vmx_vcpu *vcpu);
 
 /*
- * T18: emulate VMPTRLD.  'gpa' is the L1-stated GPA of the VMCS12
- * region.  Translates the GPA to an HPA via vm_gpa_hold, validates
- * the page alignment and revision ID, and installs 'vmcs12' as the
- * current VMCS12 for 'vcpu'.
- *
- * Returns VM_SUCCESS on success, VM_FAIL_INVALID on a
- * non-page-aligned or otherwise invalid GPA, VM_FAIL_VALID with an
- * VM-instruction error code in 'verr' if the GPA is page-aligned
- * but the VMCS12 header is not loadable (revision mismatch).
- *
- * The caller is responsible for advancing L1 RIP past the VMPTRLD
- * instruction on both success and failure.
- */
-int	vmx_nested_vmptrld_handle(struct vmx_vcpu *vcpu, uint64_t gpa,
-	    uint64_t *verr);
-
-/*
  * T18 builder entry point.  Reads the VMCS12 header from 'gpa',
  * validates the revision ID against the L0 host revision, then
  * copies the L1 VMCS12 image into vcpu->nvmcs12 and installs it as
- * the current VMCS12.  Returns VM_SUCCESS or VM_FAIL_VALID.
+ * the current VMCS12.  Returns VM_SUCCESS, VM_FAIL_VALID, or
+ * VM_FAIL_INVALID.  On VM_FAIL_VALID the VM-instruction error code
+ * is written into the active VMCS's VMCS_INSTRUCTION_ERROR field.
+ *
+ * The caller is responsible for advancing L1 RIP past the VMPTRLD
+ * instruction and reflecting VMFAIL back through RFLAGS (CF for
+ * valid, ZF for invalid).
  */
 int	vmx_nested_load_vmcs12(struct vmx_vcpu *vcpu, uint64_t gpa);
 
