@@ -694,7 +694,15 @@ Critical Path: 1A → 1B → 1E → 2A → 2B → 4A → 4B → 5A → 6A → 7A
 
   **What to do**: Build `tools/efi-console-harness/` covering all five EFI observability improvements (see Appendix F for full design):
 
-  1. **Force serial console on every nested layer** — bhyve `-s 31,lpc -l com1,stdio` on L0; `-l com1,stdio` on L1; L2 kernel loader.conf with `boot_serial="YES"` and `console="comconsole,vidconsole"`. Result: every byte from L2 bootloader through kernel login is visible in L0's tmux pane; no framebuffer mode change can drop it.
+  1. **Force serial console via virtio-console chain + nmdm pairs (NOT auto-propagating)** — the previous plan claim that `bhyve -l com1,stdio` "propagates through L1's virtio-console" was incorrect. The honest model: each layer's bhyve userspace must explicitly bridge its comport to the parent layer's virtio-console. Concrete chain for L0→L1→L2:
+   - **L2 bhyve**: `-l com1,/dev/nmdm2A` (L2's com1 → nmdm pair 2)
+   - **L2 proxy** (userspace process): reads `/dev/nmdm2B`, writes to L2's virtio-console PCI device
+   - **L1 bhyve**: `-s virtio-console,L2 -l com1,/dev/nmdm1A` (L1's com1 → nmdm pair 1; virtio-console exposed as PCI device to L2)
+   - **L1 proxy**: reads `/dev/nmdm1B`, writes to L1's virtio-console PCI device
+   - **L0 bhyve**: `-s virtio-console,L1 -l com1,stdio` (L0's com1 → host stdio = your tmux; virtio-console exposed to L1)
+   - **L0 proxy**: not needed — com1=stdio is host-direct
+
+   Result: every byte from L2 firmware → L2 kernel login is visible in L0's tmux. Requires N nmdm pairs for N nesting levels and (N-1) userspace proxies (L0 layer is direct). L2 kernel loader.conf: `boot_serial="YES"`, `console="comconsole,vidconsole"`. **FLAG**: if virtio-console chaining does not work as designed, this channel fails entirely and surfaces as a FINDING (highest-priority).
   2. **Null-modem pairs for non-tmux bhyve launches (CI-friendly)** — `kldload nmdm`; bhyve uses `/dev/nmdm0A`; harness captures via `cu -l /dev/nmdm0B` with `tee` for evidence. Survives process disconnect/reconnect; CI-runner compatible.
   3. **Boot log to memory disk (post-mortem on hang)** — small virtual disk backed by md/tmpfs; L2's `/etc/rc.conf` runs `tee /var/log/boot.log` from first rc.d; harness mounts the disk from L0 on test failure. Catches hangs that null-modem alone cannot.
   4. **Framebuffer snapshot at boot milestones** — bhyve's `-s 29,fbuf,...` exposes framebuffer as raw device; `dd` at known checkpoints (post-`ExitBootServices`, post-`StartImage`, post-kernel `console_switch`); compare against golden framebuffers for "reached EFI shell" / "kernel framebuffer active".
@@ -1103,6 +1111,7 @@ include GENERIC
 
 ident		L2-AUDIT
 
+# Debug + observability
 options		KDB
 options		DDB
 options		INVARIANTS
@@ -1114,6 +1123,12 @@ options		DEBUG_VFS_LOCKS
 options		DEBUG_VFS
 options		MALLOC_DEBUG_MAXZ=16384
 
+# Console: FORCE serial so KDB breaks to serial, not VGA
+options		CONS_COMCONSOLE
+options		CONS_RECEIVE_INTR
+options		EARLY_PRINTF
+
+# VirtIO + nested-virt in-guest support
 options		VIMAGE
 device		bhyve
 device		virtio_pci
@@ -1123,7 +1138,29 @@ device		virtio_console
 device		ntb
 ```
 
-Built once via `tools/efi-console-harness/build-l2-kernel.sh`, output to `/lab/images/l2-kernel-AUDIT/kernel`. Reused across all 40+ tests.
+Reference `/boot/loader.conf` baked into the L2 image:
+```
+boot_serial="YES"
+console="comconsole,vidconsole"
+boot_verbose="YES"
+debug.kdb.panic=1
+debug.kdb.enter=1
+hw.ktr.dump=1
+autoboot_delay="3"
+```
+
+Plus a post-init health marker (added to `/etc/rc.d/audit-ready.sh`):
+```sh
+#!/bin/sh
+# PROVIDE: audit-ready
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+logger -p auth.info "audit-ready: L2-AUDIT kernel at multi-user"
+```
+
+This marker is what the harness greps for in the nmdm capture to disambiguate "L2 reached login" (exit 0) from "L2 hangs but kernel alive" (exit 4). See wrapper exit-code section below.
+
+**Build path caveat**: `make buildkernel KERNCONF=L2-AUDIT` runs against `/usr/src` which on lab hosts is the working tree with uncommitted `sys/amd64/vmm/*` changes from `nested-virt/wave5-fix-t25-stub-functions`. Build will pick up those changes — expected to compile cleanly because the vmm changes are in nested-virt files that L2 doesn't exercise, but **must be verified** in P7A-OBS smoke test before claiming the kernel config works. If it fails to build, FINDING file documenting the conflict, plus a workaround config that excludes the stub-touching files.
 
 ### Reference bhyve launch wrapper
 
@@ -1141,44 +1178,92 @@ Built once via `tools/efi-console-harness/build-l2-kernel.sh`, output to `/lab/i
 #   -h                        this help
 
 # Exit codes:
-#   0  L2 reached login (test passed — VM still running after timeout)
-#   1  harness setup failure
-#   2  bhyve launch failure
-#   3  L2 kernel panic (KDB break observed)
-#   4  L2 hang (timeout reached, no panic)
+#   0  L2 reached audit-ready marker (logger -p auth.info "audit-ready: ...")
+#      — test passed, VM still running after timeout
+#   1  harness setup failure (nmdm not loadable, image missing, etc.)
+#   2  bhyve launch failure (any layer's bhyve returned non-zero on startup)
+#   3  L2 kernel panic (KDB break observed in nmdm capture, or
+#      "panic:" string matched before timeout)
+#   4  L2 hang (timeout reached, no panic string, no audit-ready marker)
 #   5  unexpected VM-exit (test-specific assertion mismatch)
+#   6  L1 bhyve exit (L1 crashed before L2 could boot) — captured from
+#      L0's process exit status
+#   7  L0 bhyve exit (harness itself failed at the outermost layer)
+#   8  pre-init failure (L2 firmware ExitBootServices succeeded but no
+#      kernel console output within boot_verbose window — distinguished
+#      from exit 4 by checking for OVMF "Welcome to loader" + missing
+#      kernel banner)
 ```
 
-The wrapper handles all five observability channels. Each test script in P6A/P6B sources `tests/sys/vmm/nested/lib/nested_obs.sh` and calls this wrapper via the ATF framework.
+The wrapper implements the **virtio-console chain** described in channel 1: for each nesting level, it instantiates an nmdm pair and a userspace proxy that bridges the nmdm to the parent layer's virtio-console PCI device. The proxy is a small C/Python program (`tools/efi-console-harness/nmdm-to-virtio-console.py`) that:
+- Opens `/dev/nmdmXB` for read
+- Opens the parent layer's virtio-console control fd (exposed by bhyve via `-s virtio-console,slot`)
+- Pumps bytes bidirectionally
+
+The wrapper also captures **additional L0/L1 diagnostics** that supplement the L2 channels:
+- **L0's bhyve exit code** (catches L1 crashes that the L2 channels miss)
+- **L0's vCPU state dump** via `bhyvectl --get-vcpu-state` if L1/L2 hung
+- **L0's ktr buffer** via `sysctl debug.ktr.dump=1` if the L0 kernel is the audit kernel
+- **L1's bhyve exit code** (captured via the L0-side virtio-console metadata)
+- **L1 bhyve stderr** (forwarded to L0's log dir)
+
+Each test script in P6A/P6B sources `tests/sys/vmm/nested/lib/nested_obs.sh` and calls this wrapper via the ATF framework.
+
+### Golden framebuffer strategy
+
+Per-host first-run capture:
+1. Boot L2 in the harness, snapshot framebuffer at four checkpoints: (a) pre-ExitBootServices, (b) post-ExitBootServices, (c) OVMF shell loaded, (d) kernel framebuffer active
+2. Save as `tools/efi-console-harness/golden/{host}-{ovmf-version}-{checkpoint}.raw`
+3. CI compares future captures against golden using ImageMagick `compare -metric AE` with threshold ≤ 1% pixel drift
+4. **OVMF version pinning**: each lab host records its OVMF build hash in `/lab/ovmf-version.txt`; harness checks this matches the golden's expected OVMF version
+5. **Drift detection**: if pixel drift > 1%, fail CI with "OVMF framebuffer drifted — regenerate golden or investigate OVMF update"
+6. **First-time setup**: `tools/efi-console-harness/generate-golden.sh` generates per-host goldens on demand; checked into git per-host
+
+### Known uncertainties flagged as FINDING candidates
+
+These are real technical risks; the harness's job is to surface them as concrete findings with file:line + reproduction steps:
+
+1. **`-s 29,fbuf` in nested L1 bhyve**: uncertain whether L1's framebuffer device is instantiated correctly when L1 is itself a bhyve guest. If it fails, the L2 framebuffer snapshot channel fails for any test running in nested L1. **Reproduction**: launch L1 bhyve with `-s 29,fbuf`, check if `/dev/fb0` exists in L1, check if L2 sees a usable GOP.
+2. **Virtio-console chained passthrough**: the nmdm-to-virtio-console.py proxy is unproven. If bhyve's virtio-console implementation doesn't expose a clean userspace fd, this channel fails entirely.
+3. **OVMF serial-on-GOP-switch drop**: known issue on some OVMF versions; serial output drops when kernel takes over framebuffer. If lab hosts show this, FINDING documents it.
+4. **L1 bhyve KDB chained passthrough**: not in v1. L1's KDB can only be observed if L0's virtio-console chain handles a bhyve userspace crash, which is out of scope.
+5. **Pre-init L2 failures**: between ExitBootServices and first `audit-ready` rc.d, no console output is captured (loader.conf `boot_verbose` helps but doesn't cover all kernel early-print paths). Mitigated by exit-code 8 (pre-init failure) but the failure mode itself may be invisible.
+
+
 
 ### Failure-mode coverage matrix
 
-| Failure mode | Serial | nmdm | boot.log | fb snapshot | KDB | Captured as |
-|---|---|---|---|---|---|---|
-| L2 EFI shell corruption | ✓ | ✓ | n/a | ✓ | n/a | `.sisyphus/evidence/P{n}-efi-shell-{corrupt,fail}.txt` + fb raw |
-| L2 kernel panic pre-console | ✗ | ✗ | ✓ | partial | ✓ | `.sisyphus/evidence/P{n}-panic-preconsole.txt` + boot.log + KDB backtrace |
-| L2 kernel panic post-console | ✓ | ✓ | ✓ | ✓ | ✓ | All five channels |
-| L2 infinite loop / hang | partial | partial | ✓ | ✓ | n/a | boot.log + framebuffer (no KDB — never panicked) |
-| L2 silent fail (no panic, no output) | ✗ | ✗ | partial | ✓ | n/a | fb snapshot only (rare; investigated as highest-priority FINDING) |
-| L1 bhyve crashes mid-test | ✓ (until crash) | ✓ (until disconnect) | partial | partial | n/a | whatever was captured pre-crash |
-| L0 bhyve / harness crashes | partial | partial | partial | partial | n/a | harness itself has bugs → FINDING |
+| Failure mode | Serial (chained) | nmdm | boot.log | fb snapshot | KDB | L0 exit | L0 vCPU dump | L0 ktr | Captured as |
+|---|---|---|---|---|---|---|---|---|---|
+| L2 EFI shell corruption | ✓ | ✓ | n/a | ✓ | n/a | 0 | n/a | n/a | `.sisyphus/evidence/P{n}-efi-shell-{corrupt,fail}.txt` + fb raw |
+| L2 kernel panic pre-console | ✗ | ✗ | ✓ | partial | ✓ | 0 | n/a | n/a | `.sisyphus/evidence/P{n}-panic-preconsole.txt` + boot.log + KDB backtrace |
+| L2 kernel panic post-console | ✓ | ✓ | ✓ | ✓ | ✓ | 0 | n/a | n/a | All five channels |
+| L2 infinite loop / hang | partial | partial | ✓ | ✓ | n/a | 0 | n/a | n/a | boot.log + framebuffer (exit 4) |
+| L2 silent fail (no panic, no output) | ✗ | ✗ | partial | ✓ | n/a | 0 | n/a | n/a | fb snapshot only; exit 5 (rare; highest-priority FINDING) |
+| L2 pre-init failure (post-ExitBootServices, no kernel banner) | ✗ | ✗ | ✗ | partial | ✗ | 0 | n/a | n/a | exit 8; fb snapshot; OVMF/loader evidence only |
+| L1 bhyve crashes mid-test | ✓ (until crash) | ✓ (until disconnect) | partial | partial | n/a | 6 | ✓ | partial | L0 exit code 6 + L0 vCPU dump + whatever L1 forwarded |
+| L0 bhyve / harness crashes | partial | partial | partial | partial | n/a | 7 | ✓ | ✓ | exit 7; full L0 vCPU + ktr; harness bug → FINDING |
 
 ### Acceptance criteria for P7A-OBS
 
-- Smoke test (P7A-OBS QA scenario 1) passes: EFI shell visible in L0 tmux
-- Smoke test (P7A-OBS QA scenario 2) passes: L2 panic breaks to KDB, capture complete
-- Smoke test (P7A-OBS QA scenario 3) passes: hang → boot.log present after timeout
-- Smoke test (P7A-OBS QA scenario 4) passes: fb snapshots at distinct checkpoints
-- All four channels produce evidence files at the documented paths
+- Smoke test (P7A-OBS QA scenario 1) passes: EFI shell visible in L0 tmux **via virtio-console chain** (verify by killing L2 and observing the chain's intermediary fds)
+- Smoke test (P7A-OBS QA scenario 2) passes: L2 panic breaks to KDB, KDB prompt visible in nmdm capture
+- Smoke test (P7A-OBS QA scenario 3) passes: hang → boot.log present after timeout + harness exit 4
+- Smoke test (P7A-OBS QA scenario 4) passes: fb snapshots at distinct checkpoints + per-host golden comparison passes
+- All four L2 channels + all four L0/L1 supplemental channels produce evidence files at the documented paths
 - One FINDING file per observed channel-failure (e.g. "OVMF drops serial on GOP switch on commit X" → FINDING-NNN-ovmf-serial-gop-loss.md)
-- The L2 audit kernel config builds cleanly via `make buildkernel KERNCONF=L2-AUDIT`
-- The bhyve-nested.sh wrapper has a `--help` and a man page under `tools/efi-console-harness/MANUAL.txt`
+- The L2 audit kernel config builds cleanly via `make buildkernel KERNCONF=L2-AUDIT` against `/usr/src` on `nested-virt/wave5-fix-t25-stub-functions`
+- The bhyve-nested.sh wrapper has a `--help`, exit codes 0-8 documented, and a man page under `tools/efi-console-harness/MANUAL.txt`
+- The `nmdm-to-virtio-console.py` proxy round-trips bytes correctly (verified by a synthetic echo test)
 
 ### Known gaps to flag in plan / future work
 
-- **Pre-init L2 kernel failures** (between EFI ExitBootServices and first rc.d script) have no console and no boot.log. These are caught only by framebuffer snapshot showing "kernel never took over" — a coarse signal. Mitigation in plan: any negative test that triggers pre-init failures must be specifically tagged and the FINDING must include a note about the observability gap.
-- **OVMF version drift** between lab hosts may produce different console behavior. Mitigation: pin OVMF build per host in P7A-OBS config; flag drift as a CI failure.
-- **L1 bhyve (inside L0) has no KDB** by default; if L1's bhyve crashes, the harness can only capture what L1 had time to forward. Mitigation: L1 also runs an audit kernel with debug flags; however, capturing L1's KDB from L0's bhyve requires chained serial passthrough — implementable but not in v1.
+- **Pre-init L2 kernel failures** (between EFI ExitBootServices and first rc.d script) have no console and no boot.log. Caught by exit-code 8 (no OVMF "Welcome to loader" + no kernel banner + no audit-ready marker within boot_verbose window) and partial framebuffer snapshot showing kernel never took over. Any negative test triggering pre-init failures must be specifically tagged and the FINDING must include a note about the observability gap.
+- **OVMF version drift** between lab hosts may produce different console behavior. Per-host OVMF build hash recorded in `/lab/ovmf-version.txt`; golden-framebuffer comparison fails CI on drift > 1% pixels.
+- **L1 bhyve (inside L0) has no KDB** by default; if L1's bhyve crashes, the harness can only capture what L1 had time to forward via the virtio-console chain. L1's KDB requires chained serial passthrough (out of scope for v1; flagged as future work).
+- **Virtio-console chained passthrough** is unproven — `nmdm-to-virtio-console.py` is a new component. If it doesn't work as designed, channel 1 (serial) fails entirely for nested tests. Smoke test must verify this on the first run; if it fails, FINDING documents the gap and the wrapper falls back to nmdm-only with `cu` direct capture (loses virtio-console chain but preserves observability).
+- **`-s 29,fbuf` in nested L1 bhyve** is uncertain — may or may not instantiate correctly when L1 is itself a bhyve guest. Smoke test verifies; FINDING if it fails.
+- **L2-AUDIT kernel build with uncommitted vmm changes** from `nested-virt/wave5-fix-t25-stub-functions` — expected to compile (vmm changes don't affect L2 userspace), but smoke test verifies; FINDING if not.
 
 ---
 
