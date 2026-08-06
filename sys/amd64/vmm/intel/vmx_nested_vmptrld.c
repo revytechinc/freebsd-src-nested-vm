@@ -28,9 +28,9 @@
 
 #include "vmm_host.h"
 #include "vmx_controls.h"
+#include "vmx_cpufunc.h"
 #include "vmcs.h"
 #include "vmx.h"
-#include "vmx_cpufunc.h"
 #include "vmx_msr.h"
 #include "vmx_nested.h"
 
@@ -157,11 +157,11 @@ vmx_nested_load_vmcs12(struct vmx_vcpu *vcpu, uint64_t gpa)
 
 		vmcs = vcpu->vmcs;
 		VMPTRLD(vmcs);
-		ctl2 = vmread(VMCS_SEC_PROC_BASED_CTLS);
+		ctl2 = vmcs_read(VMCS_SEC_PROC_BASED_CTLS);
 		ctl2 |= PROCBASED2_VMCS_SHADOWING;
-		vmwrite(VMCS_SEC_PROC_BASED_CTLS, ctl2);
+		vmcs_write(VMCS_SEC_PROC_BASED_CTLS, ctl2);
 		shadow_hpa = vtophys((vm_offset_t)vcpu->nvmcs12);
-		vmwrite(VMCS_LINK_POINTER, shadow_hpa);
+		vmcs_write(VMCS_LINK_POINTER, shadow_hpa);
 		VMCLEAR(vmcs);
 	}
 
