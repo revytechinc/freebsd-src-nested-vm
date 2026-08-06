@@ -60,6 +60,23 @@
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
+#include <machine/vmm.h>
+
+/*
+ * Forward-declare struct seg_desc and struct vcpu before pulling in
+ * vmcs.h / x86.h.  vmcs.h declares prototypes
+ * (vmcs_getdesc/vmcs_setdesc) whose parameter type is
+ * `struct seg_desc *`; x86.h declares x86_emulate_cpuid and
+ * vm_cpuid_capability with `struct vcpu *` parameters.  Both
+ * structs are otherwise defined further along the include chain
+ * (via sys/dev/vmm/vmm_vm.h), but the visibility warning fires at
+ * the prototype site.  Forward declarations keep -Werror
+ * -Wvisibility quiet when the kernel module is built in isolation
+ * (without the full vmm.ko SRCS set).
+ */
+struct seg_desc;
+struct vcpu;
+
 #include "vmcs.h"
 #include "vmx.h"
 
@@ -78,17 +95,19 @@ CTASSERT(sizeof(struct vmcs) == PAGE_SIZE);
 CTASSERT(__offsetof(struct vmx_vcpu, nvmcs12) != __offsetof(struct vmx_vcpu, vmcs));
 
 /*
- * vmx_nested_status lives in sys/amd64/vmm/intel/vmx.c.  It is the
+ * vmx_nested_status lives in sys/amd64/vmm/intel/vmx.c as the
  * canonical read-only gate for "VMCS shadowing is ready to be used
  * by L1 on this host".  Values:
  *   0 = nested virt not supported on this CPU
  *   1 = nested virt supported but L0 hypervisor already running
  *   2 = VMCS shadowing ready (Haswell+/Tiger Lake+ class)
  *
- * Declared extern here rather than promoted to a public header per
- * the wave-3 file-scope restriction; see the matching extern in vmx.c.
+ * We intentionally do not take a hard extern dependency on the
+ * variable: reading it indirectly through the hw.vmm.nested.vmx
+ * sysctl lets the test module load against any vmm.ko (including
+ * an upstream one without nested-virt additions) and SKIP cleanly
+ * when the sysctl is missing.
  */
-extern int vmx_nested_status;
 
 /*
  * vmxtest_vmm_loaded

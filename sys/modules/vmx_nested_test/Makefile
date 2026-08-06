@@ -23,6 +23,13 @@ PACKAGE=	tests
 
 .PATH: ${SRCTOP}/sys/amd64/vmm/intel
 
+# The test module #includes "vmcs.h" and "vmx.h" from the intel vmm
+# tree; vmx.h in turn #includes the parent vmm "x86.h".  Add both
+# directories to CFLAGS so all the headers resolve when compiling
+# the module in isolation (without the vmm.ko SRCS set).
+CFLAGS+= -I${SRCTOP}/sys/amd64/vmm/intel
+CFLAGS+= -I${SRCTOP}/sys/amd64/vmm
+
 KMOD=	vmx_nested_test
 SRCS=	vmx_nested_test.c
 
