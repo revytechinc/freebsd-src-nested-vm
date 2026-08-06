@@ -326,9 +326,10 @@ vmx_msr_init(void)
 /*
  * Nested-VMX capability MSR shadow masks (T12).
  *
- * For each capability MSR in the 0x480-0x48F range we cache a pair
- * (and_mask, or_mask) computed from the L0 host MSR values at
- * module-init time.  Reads from L1 are answered as:
+ * For each capability MSR in the 0x480-0x490 range (17 entries,
+ * 0x480..0x490 inclusive) we cache a pair (and_mask, or_mask)
+ * computed from the L0 host MSR values at module-init time.
+ * Reads from L1 are answered as:
  *
  *     result = (host_value & and_mask) | or_mask
  *
@@ -336,11 +337,11 @@ vmx_msr_init(void)
  * a valid VMX capability for a hypothetical CPU whose behaviour
  * is at most as expressive as L0's.  Specifically:
  *
- *  - True-control MSRs (e.g. MSR_VMX_TRUE_*_CTLS at 0x48D-0x490)
+ *  - True-control MSRs (MSR_VMX_TRUE_*_CTLS at 0x48D-0x490)
  *    advertise their existence via bit 55 of MSR_VMX_BASIC; if L0
- *    does not have them, the and_mask clears the corresponding
- *    capability bit in the legacy control MSRs so L1 cannot
- *    silently observe the L0 microarchitecture details.
+ *    does not have them, the masked value for the TRUE_* MSRs is
+ *    cleared (which makes the legacy ctl-zero path return 0 and
+ *    the caller #GP).
  *  - Bits that L0 reserves (zeros in the legacy MSR) must remain
  *    zero in the value L1 sees.
  *  - Bits that the architecturally-required minimums force on
@@ -351,8 +352,31 @@ vmx_msr_init(void)
  * these MSRs are CR0/CR4/VMCS/VPMCID-fixed per L0 and do not
  * change while bhyve is running.
  */
-static uint64_t vmx_cap_and_mask[16];
-static uint64_t vmx_cap_or_mask[16];
+
+/*
+ * Per-MSR class.  vmx_cap_masks_init() uses this to derive the
+ * (and_mask, or_mask) for each slot in vmx_cap_map below.
+ */
+enum vmx_cap_class {
+	VMX_CAP_CLASS_BASIC,	/* MSR_VMX_BASIC; ctl-fixed pattern. */
+	VMX_CAP_CLASS_CTL,	/* legacy ctl (PIN/PROC/EXIT/ENTRY/CTLS2) */
+	VMX_CAP_CLASS_TRUE_CTL,	/* TRUE_*_CTLS (0x48D..0x490) */
+	VMX_CAP_CLASS_REPORT,	/* MISC, VMCS_ENUM: pass-through verbatim */
+	VMX_CAP_CLASS_FIXED,	/* CR0/CR4_FIXED{0,1}: pass-through AND */
+	VMX_CAP_CLASS_DATA,	/* EPT_VPID_CAP: pass-through AND */
+};
+
+/*
+ * Static map of the VMX capability MSR range.  Indexed by
+ * (msr - MSR_VMX_BASIC).  Covers 0x480..0x490 inclusive (17
+ * entries).  Read_fn performs the type-specific masking for L1.
+ */
+struct vmx_cap_desc {
+	uint64_t	and_mask;
+	uint64_t	or_mask;
+};
+
+static struct vmx_cap_desc vmx_cap_map[17];
 static bool vmx_cap_masks_initialized;
 
 static inline uint64_t
@@ -389,16 +413,50 @@ vmx_cap_msr_index(u_int msr, u_int *idx)
 
 	if (msr < MSR_VMX_BASIC || msr > MSR_VMX_TRUE_ENTRY_CTLS)
 		return (EINVAL);
-	/*
-	 * Index 0 corresponds to MSR_VMX_BASIC; the range is
-	 * contiguous apart from MSR_VMX_MISC (0x485) and
-	 * MSR_VMX_VMCS_ENUM (0x48a), which we simply treat as
-	 * one slot each.
-	 */
 	*idx = msr - MSR_VMX_BASIC;
-	if (*idx >= nitems(vmx_cap_and_mask))
+	if (*idx >= nitems(vmx_cap_map))
 		return (EINVAL);
 	return (0);
+}
+
+/*
+ * Classify an MSR in the 0x480..0x490 range by its architectural
+ * shape.  Used by vmx_cap_masks_init() to pick the right masking
+ * policy and by vmx_nested_cap_msr_read() to apply per-class
+ * restrictions (e.g. TRUE_CTL must be zeroed out when BASIC bit55
+ * is clear).
+ */
+static enum vmx_cap_class
+vmx_cap_classify(u_int msr)
+{
+	switch (msr) {
+	case MSR_VMX_BASIC:
+		return (VMX_CAP_CLASS_BASIC);
+	case MSR_VMX_PINBASED_CTLS:
+	case MSR_VMX_PROCBASED_CTLS:
+	case MSR_VMX_EXIT_CTLS:
+	case MSR_VMX_ENTRY_CTLS:
+	case MSR_VMX_PROCBASED_CTLS2:
+		return (VMX_CAP_CLASS_CTL);
+	case MSR_VMX_TRUE_PINBASED_CTLS:
+	case MSR_VMX_TRUE_PROCBASED_CTLS:
+	case MSR_VMX_TRUE_EXIT_CTLS:
+	case MSR_VMX_TRUE_ENTRY_CTLS:
+		return (VMX_CAP_CLASS_TRUE_CTL);
+	case MSR_VMX_MISC:
+	case MSR_VMX_VMCS_ENUM:
+		return (VMX_CAP_CLASS_REPORT);
+	case MSR_VMX_CR0_FIXED0:
+	case MSR_VMX_CR0_FIXED1:
+	case MSR_VMX_CR4_FIXED0:
+	case MSR_VMX_CR4_FIXED1:
+		return (VMX_CAP_CLASS_FIXED);
+	case MSR_VMX_EPT_VPID_CAP:
+		return (VMX_CAP_CLASS_DATA);
+	default:
+		/* Should not reach -- covered by index range check. */
+		return (VMX_CAP_CLASS_REPORT);
+	}
 }
 
 static void
@@ -411,59 +469,91 @@ vmx_cap_masks_init(void)
 	basic = rdmsr(MSR_VMX_BASIC);
 	has_true_ctls = (basic & (1UL << 55)) != 0;
 
-	for (i = 0; i < nitems(vmx_cap_and_mask); i++) {
+	for (i = 0; i < nitems(vmx_cap_map); i++) {
 		u_int msr = MSR_VMX_BASIC + i;
-		uint64_t zeros, ones;
+		enum vmx_cap_class class;
+		uint64_t and_mask, or_mask;
 
 		host_val = vmx_cap_host_read(msr);
-		if (msr == MSR_VMX_MISC ||
-		    msr == MSR_VMX_VMCS_ENUM) {
+		class = vmx_cap_classify(msr);
+
+		switch (class) {
+		case VMX_CAP_CLASS_BASIC:
 			/*
-			 * MISC and VMCS_ENUM are pure reporting MSRs;
-			 * pass them through unmodified.
+			 * The capability MSR layout (per Intel SDM
+			 * §25.1): bits 0-31 -> 0 indicates which bits
+			 * MUST be 1, bits 32-63 -> 1 indicates which
+			 * bits MAY be 1.  Keep forced-zero bits at 0
+			 * (AND mask); force on the mandatory bits
+			 * (OR mask).
 			 */
-			vmx_cap_and_mask[i] = ~(uint64_t)0;
-			vmx_cap_or_mask[i] = 0;
-			continue;
-		}
+			and_mask = ~(~host_val & 0xffffffff);
+			or_mask = host_val & 0xffffffff00000000ULL;
+			break;
 
-		/*
-		 * The capability MSR layout (per Intel SDM §25.1):
-		 *   bits 0-31   -> 0 indicates which bits MUST be 1
-		 *   bits 32-63  -> 1 indicates which bits MAY be 1
-		 * i.e. for a control MSR (the ctl-fixed pattern),
-		 * the AND mask must keep the forced-zero bits at 0
-		 * and the OR mask must turn on the forced-one bits.
-		 *
-		 * For data-only MSRs (VMCS_ENUM, MISC, EPT/VPID,
-		 * VMFUNC) the host value is meaningful verbatim.
-		 */
-		zeros = ~host_val & 0xffffffff;
-		ones = host_val & 0xffffffff00000000ULL;
+		case VMX_CAP_CLASS_CTL:
+			/*
+			 * Legacy control MSR.  Same ctl-fixed pattern
+			 * as BASIC.  If L0 lacks TRUE_* controls (no
+			 * bit 55 in BASIC), the upper-32 1-bits are
+			 * architecturally zero in the legacy MSR, so
+			 * the OR mask must also be cleared.
+			 */
+			and_mask = ~(~host_val & 0xffffffff);
+			or_mask = host_val & 0xffffffff00000000ULL;
+			if (!has_true_ctls)
+				or_mask = 0;
+			break;
 
-		/*
-		 * For the legacy control MSRs, if L0 does not provide
-		 * the corresponding TRUE control MSR (no bit 55 in
-		 * MSR_VMX_BASIC), then the legacy MSR cannot have any
-		 * 1-bits in the upper 32 because the upper 32 is
-		 * architecturally 0 for a legacy MSR.
-		 */
-		if (!has_true_ctls && msr != MSR_VMX_BASIC) {
-			switch (msr) {
-			case MSR_VMX_PINBASED_CTLS:
-			case MSR_VMX_PROCBASED_CTLS:
-			case MSR_VMX_EXIT_CTLS:
-			case MSR_VMX_ENTRY_CTLS:
-			case MSR_VMX_PROCBASED_CTLS2:
-				ones = 0;
-				break;
-			default:
-				break;
+		case VMX_CAP_CLASS_TRUE_CTL:
+			/*
+			 * TRUE_* CTLS exist only when BASIC.bit55 is
+			 * set.  If L0 has no TRUE_* CTLS the L1 read
+			 * must #GP (we encode that by returning a
+			 * mask of all-zero, which the read path
+			 * detects and surfaces as EINVAL).
+			 */
+			if (has_true_ctls) {
+				and_mask = ~(~host_val & 0xffffffff);
+				or_mask = host_val &
+				    0xffffffff00000000ULL;
+			} else {
+				and_mask = 0;
+				or_mask = 0;
 			}
+			break;
+
+		case VMX_CAP_CLASS_REPORT:
+			/* MISC, VMCS_ENUM: pass through verbatim. */
+			and_mask = ~(uint64_t)0;
+			or_mask = 0;
+			break;
+
+		case VMX_CAP_CLASS_FIXED:
+			/*
+			 * CR0/CR4_FIXED{0,1}: pass through verbatim.
+			 * The architectural content (bits-forced-zero
+			 * in FIXED0, bits-may-be-one in FIXED1) is
+			 * constant per CPU and must be visible to L1.
+			 */
+			and_mask = ~(uint64_t)0;
+			or_mask = 0;
+			break;
+
+		case VMX_CAP_CLASS_DATA:
+			/*
+			 * EPT_VPID_CAP: pass through verbatim.  L1
+			 * reads these to learn EPT/VPID features; we
+			 * mirror L0's view since L2 EPT12 walks run
+			 * on the L0 EPT MMU.
+			 */
+			and_mask = ~(uint64_t)0;
+			or_mask = 0;
+			break;
 		}
 
-		vmx_cap_and_mask[i] = (uint64_t)0xffffffff & ~zeros;
-		vmx_cap_or_mask[i] = ones & 0xffffffff00000000ULL;
+		vmx_cap_map[i].and_mask = and_mask;
+		vmx_cap_map[i].or_mask = or_mask;
 	}
 	vmx_cap_masks_initialized = true;
 }
@@ -473,14 +563,28 @@ vmx_nested_cap_msr_read(struct vmx_vcpu *vcpu __unused, u_int msr, uint64_t *val
 {
 	u_int idx;
 	uint64_t host_val;
+	enum vmx_cap_class class;
 
 	if (!vmx_cap_masks_initialized)
 		vmx_cap_masks_init();
 	if (vmx_cap_msr_index(msr, &idx) != 0)
 		return (EINVAL);
 
+	class = vmx_cap_classify(msr);
+
+	/*
+	 * When BASIC.bit55 is clear, the TRUE_* CTLS MSRs are not
+	 * architecturally defined -- reads must #GP into L1.  The
+	 * init-time mask cleared them; here we detect that and
+	 * surface it as EINVAL so the caller injects #GP.
+	 */
+	if (class == VMX_CAP_CLASS_TRUE_CTL &&
+	    vmx_cap_map[idx].and_mask == 0)
+		return (EINVAL);
+
 	host_val = vmx_cap_host_read(msr);
-	*val = (host_val & vmx_cap_and_mask[idx]) | vmx_cap_or_mask[idx];
+	*val = (host_val & vmx_cap_map[idx].and_mask) |
+	    vmx_cap_map[idx].or_mask;
 	return (0);
 }
 
