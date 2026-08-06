@@ -191,7 +191,7 @@ Wave 6 (Negative tests — 3 paths parallel):
 ├── Path 6B: 40 L1-misbehavior ATF tests for AMD SVM (tests/sys/vmm/nested/negative/)
 └── Path 6C: AMD in-kernel self-tests mirroring Intel's 5-test set (svm_nested_test.c)
 
-Wave 7 (EFI/non-EFI harness + cross-arch CI — 3 paths parallel):
+Wave 7 (EFI/non-EFI harness + observability + cross-arch CI — 5 paths parallel):
 ├── Path 7A: qemu + OVMF (EFI) + SeaBIOS (non-EFI) harness for CI
 ├── Path 7B: Multi-host CI orchestration (fredev001 + fredev002 + fredev003 + fredev004 + fredev005 + fredev006 + 172.16.176.131 — fredev001/fredev004 power-on when available)
 └── Path 7C: Per-CPU-family config matrix (Tiger Lake, Ivy Bridge, EPYC variants)
@@ -678,13 +678,128 @@ Critical Path: 1A → 1B → 1E → 2A → 2B → 4A → 4B → 5A → 6A → 7A
 
 ## Wave 7 — EFI/non-EFI harness + cross-arch CI
 
+> **EFI observability is the highest-risk infrastructure gap.** The 40+ negative tests in Wave 6 (P6A, P6B) cannot produce useful evidence without console observability through the nested boot chain. Wave 7 is structured to make observability land **before** the test harness relies on it.
+>
+> **Wave 7 paths**: P7A (qemu/OVMF/SeaBIOS harness), P7A-OBS (EFI console observability — 5 channels), P7A-OBS-ATF (ATF wrapper for negative tests), P7B (multi-host CI), P7C (per-CPU matrix).
+
 - [ ] P7A. qemu + OVMF (EFI) + SeaBIOS (non-EFI) harness for CI
 
   **What to do**: Create `tools/qemu-ovmf-harness/` with reproducible EFI and non-EFI boot configurations. CI integration via Cirrus CI `.cirrus.yml`.
 
-  **Parallelization**: Wave 7. Blocks P7B, P7C.
+  **Parallelization**: Wave 7. Blocks P7A-OBS, P7B, P7C.
 
   **Commit**: `tools(qemu): add OVMF/SeaBIOS reproducer harness`
+
+- [ ] P7A-OBS. EFI console observability harness (serial forcing + nmdm capture + boot.log tee + framebuffer snapshot)
+
+  **What to do**: Build `tools/efi-console-harness/` covering all five EFI observability improvements (see Appendix F for full design):
+
+  1. **Force serial console on every nested layer** — bhyve `-s 31,lpc -l com1,stdio` on L0; `-l com1,stdio` on L1; L2 kernel loader.conf with `boot_serial="YES"` and `console="comconsole,vidconsole"`. Result: every byte from L2 bootloader through kernel login is visible in L0's tmux pane; no framebuffer mode change can drop it.
+  2. **Null-modem pairs for non-tmux bhyve launches (CI-friendly)** — `kldload nmdm`; bhyve uses `/dev/nmdm0A`; harness captures via `cu -l /dev/nmdm0B` with `tee` for evidence. Survives process disconnect/reconnect; CI-runner compatible.
+  3. **Boot log to memory disk (post-mortem on hang)** — small virtual disk backed by md/tmpfs; L2's `/etc/rc.conf` runs `tee /var/log/boot.log` from first rc.d; harness mounts the disk from L0 on test failure. Catches hangs that null-modem alone cannot.
+  4. **Framebuffer snapshot at boot milestones** — bhyve's `-s 29,fbuf,...` exposes framebuffer as raw device; `dd` at known checkpoints (post-`ExitBootServices`, post-`StartImage`, post-kernel `console_switch`); compare against golden framebuffers for "reached EFI shell" / "kernel framebuffer active".
+  5. **L2 kernel debug flags via loader.conf** — `options KDB DDB INVARIANTS WITNESS DEBUG_LOCKS MALLOC_DEBUG_MAXZ` + loader.conf `debug.kdb.panic=1`, `debug.kdb.enter=1`, `hw.ktr.dump=1`. Break to KDB on L2 panic; dump failing vCPU state; no reboot on panic.
+
+  Reference L2 kernel config at `tools/efi-console-harness/l2-kernel-config-AUDIT` (separate from production kernel); built once, reused across all 40+ negative tests.
+
+  Reference bhyve launch wrapper at `tools/efi-console-harness/bhyve-nested.sh` taking args: `--l0-comport`, `--l1-comport`, `--l2-image`, `--snap-dir`, `--timeout`. Wraps the nested L0→L1→L2 launch with all observability attached.
+
+  RED test: `tools/efi-console-harness/tests/smoke.sh` — launch L2 with intentional hang (e.g. `sysctl debug.kdb.panic=1`); assert harness captures the panic message + framebuffer state + boot.log.
+
+  GREEN: harness captures every byte of the L2 boot chain.
+
+  **Must NOT do**:
+  - Do NOT rely solely on framebuffer/serial capture without the boot.log fallback (one channel is not enough for nested hang detection)
+  - Do NOT skip the kernel debug flags for the audit kernel — INVARIANTS + WITNESS catch what observability alone cannot
+  - Do NOT add Secure Boot or TPM emulation (out of scope per user direction; explicitly skipped)
+
+  **Recommended Agent Profile**: `quick` (bhyve command-line plumbing + rc.d scripting; well-trodden territory)
+
+  **Parallelization**: Wave 7. Depends on P7A (needs the boot harness). Blocks P6A, P6B (must land before negative tests can be instrumented for evidence).
+
+  **References**:
+  - bhyve(8) — `-l com1,stdio`, `-s 31,lpc`, `-s 29,fbuf`
+  - nmdm(4) — null-modem driver
+  - cu(1) — connect to serial
+  - OVMF bhyve port: `stand/uefi-devtree/`, `usr.sbin/bhyve/`
+  - FreeBSD loader.conf(5) — `boot_serial`, `console`
+  - FreeBSD `options KDB DDB INVARIANTS WITNESS DEBUG_LOCKS`
+
+  **Acceptance Criteria**:
+  - `tools/efi-console-harness/bhyve-nested.sh --help` succeeds and prints args
+  - Smoke test `tools/efi-console-harness/tests/smoke.sh` produces:
+    - `evidence/smoke-comport.txt` (full L2 boot capture)
+    - `evidence/smoke-fb-efi-shell.raw` (framebuffer at EFI shell)
+    - `evidence/smoke-fb-kernel.raw` (framebuffer after kernel takes over)
+    - `evidence/smoke-bootlog.txt` (L2 boot.log from memory disk)
+  - At least one FINDING file if any observability gap surfaces (e.g. "framebuffer mode change drops serial on certain OVMF versions" → FINDING-NNN-console-blank-on-gop-switch.md)
+
+  **QA Scenarios**:
+  ```
+  Scenario: EFI shell prompt visible in L0 tmux after L2 boots
+    Tool: tmux + bhyve + harness
+    Preconditions: fredev005 lab host; L2 OVMF image at /lab/images/l2-efi.img; harness built
+    Steps:
+      1. Run bhyve-nested.sh --l0-comport=tmux --l2-image=l2-efi.img --snap-dir=/tmp/smoke --timeout=60
+      2. Wait for L2 OVMF firmware to load
+      3. Capture L0 tmux pane contents after 30s
+    Expected Result: tmux pane contains "Shell>" prompt or boot menu
+    Failure Indicators: blank pane; "no console" in harness log
+    Evidence: .sisyphus/evidence/P7A-OBS-efi-shell-visible.txt
+
+  Scenario: L2 kernel panic breaks to KDB instead of rebooting
+    Tool: tmux + harness
+    Preconditions: L2 audit kernel built with KDB, INVARIANTS, WITNESS
+    Steps:
+      1. Run bhyve-nested.sh with L2 kernel arg `debug.kdb.panic=1`
+      2. Trigger panic: L1 issues VMLAUNCH with intentionally bad VMCS12
+      3. Capture console + framebuffer at the panic moment
+    Expected Result: KDB prompt visible in tmux ("db>"); boot.log contains panic message
+    Failure Indicators: auto-reboot; blank console; missing panic trace
+    Evidence: .sisyphus/evidence/P7A-OBS-kdb-on-panic.txt
+
+  Scenario: Boot log captured to memory disk survives L2 hang
+    Tool: tmux + harness + md config
+    Steps:
+      1. Run bhyve-nested.sh with L2 boot.log tee configured
+      2. L2 kernel configured to spin in scheduler (infinite loop in sched)
+      3. Timeout expires (60s); harness kills bhyve
+      4. Mount L2's memory disk from L0; read /var/log/boot.log
+    Expected Result: boot.log contains lines up to the hang point (not blank)
+    Failure Indicators: empty boot.log (tee never ran); corrupted disk image
+    Evidence: .sisyphus/evidence/P7A-OBS-bootlog-on-hang.txt
+
+  Scenario: Framebuffer snapshot at EFI shell vs kernel active are distinguishable
+    Tool: harness + fb-compare utility
+    Steps:
+      1. Run bhyve-nested.sh --snap-dir=/tmp/fb-test --snap-fb at known checkpoints
+      2. After EFI shell loads: dd framebuffer
+      3. After kernel console_switch: dd framebuffer
+      4. Compare against golden framebuffers
+    Expected Result: shell-fb != kernel-fb; both pass golden comparison
+    Failure Indicators: identical framebuffers (harness didn't capture at right checkpoint); mismatch with golden (OVMF version drift)
+    Evidence: .sisyphus/evidence/P7A-OBS-fb-checkpoint-distinct.txt
+  ```
+
+  **Commit**: `tools(efi-obs): console observability harness (serial + nmdm + boot.log + framebuffer + KDB)`
+
+- [ ] P7A-OBS-ATF. ATF wrapper that instruments every negative test with observability
+
+  **What to do**: Wrap every ATF negative test from P6A and P6B with the harness from P7A-OBS. For each test:
+  1. Pre-test: snapshot framebuffer (baseline), start nmdm capture, mount memory disk
+  2. Run test with `--timeout`, `--l0-comport`, `--l2-image` configured
+  3. On test failure: capture nmdm output, framebuffer, boot.log, KDB backtrace (if panic)
+  4. Save structured evidence to `.sisyphus/evidence/P{n}-{scenario}.txt` with metadata (host, test, expected vs actual, all four captures referenced)
+
+  Helper library at `tests/sys/vmm/nested/lib/nested_obs.sh` exposing:
+  - `nested_obs_start <test_id>` — start capture
+  - `nested_obs_assert_failure <expected_error>` — assert and capture on failure
+  - `nested_obs_capture_all <out_dir>` — bundle all four channels
+  - `nested_obs_teardown` — cleanup
+
+  **Parallelization**: Wave 7. Depends on P6A, P6B, P7A-OBS. Blocks F3 (multi-host QA cannot run without observability).
+
+  **Commit**: `tests(atf): nested_obs.sh library + instrumented negative-test wrappers`
 
 - [ ] P7B. Multi-host CI orchestration (fredev001 Xeon OFF + fredev002 old Intel + fredev003 Tiger Lake i9 + fredev004 Xeon OFF + fredev005 EPYC + fredev006 EPYC + 172.16.176.131 Ryzen 9; 5 active at any time, skip-list for unavailable hosts)
 
@@ -955,7 +1070,121 @@ Mirror of Appendix B for AMD SVM. Key AMD-specific scenarios:
 
 ---
 
+## Appendix F: EFI Console Observability Design (P7A-OBS)
+
+### Why this matters
+
+The 40+ L1-misbehavior negative tests in P6A/P6B need to capture **what the L2 kernel saw** when an attack scenario fails. In nested virt, the L2 console chain is:
+
+```
+L2 kernel → L2 bhyve com-port → L1's virtio-console (if serial) → L1 bhyve com-port → L0's virtio-console → L0 bhyve com-port → your tmux / cu
+```
+
+Any link dropping the console means you lose the boot log. Without observability, a negative test can only assert pass/fail — no useful failure evidence for finding files.
+
+**In-scope**: serial console forcing, nmdm capture, boot.log persistence, framebuffer snapshots, kernel debug flags.
+**Out-of-scope** (per user direction): Secure Boot, TPM, measured boot, attestation.
+
+### Five-channel observability stack
+
+| Channel | Mechanism | Catches | Limitations |
+|---|---|---|---|
+| **Serial console** | bhyve `-l com1,stdio` on every layer; L2 kernel `boot_serial="YES"` `console="comconsole,vidconsole"` | All post-firmware bytes; survives framebuffer mode change | Some OVMF versions drop serial on GOP switch (known issue, captured as a FINDING if it occurs) |
+| **nmdm capture** | `kldload nmdm`; bhyve attaches to `/dev/nmdm0A`; harness reads `/dev/nmdm0B` via `cu` or `script` | Same as serial but process-independent; survives bhyve crashes; CI-friendly | Requires `nmdm` module loaded on host |
+| **Boot log to memory disk** | Virtual disk backed by md/tmpfs; L2 `/etc/rc.conf` runs `tee /var/log/boot.log` from first rc.d; harness mounts disk from L0 on test failure | Kernel panic trace before console available; hangs; silent failures | Requires L2 to boot far enough for rc.d; doesn't catch pre-init failures |
+| **Framebuffer snapshot** | bhyve `-s 29,fbuf,...` exposes raw framebuffer; `dd` at known checkpoints (post-ExitBootServices, post-StartImage, post-kernel-console_switch) | Visual evidence; "did L2 reach EFI shell?"; "did kernel take over framebuffer?" | Cannot capture inside L2 kernel between EFI handoff and framebuffer init (gap) |
+| **L2 kernel debug flags** | `options KDB DDB INVARIANTS WITNESS DEBUG_LOCKS` + loader.conf `debug.kdb.panic=1`, `debug.kdb.enter=1`, `hw.ktr.dump=1` | Stops on panic instead of reboot; lock-order assertions catch what KASSERT misses; KTR trace buffer dumpable from KDB | Requires custom L2 kernel build; increases L2 boot time slightly |
+
+### Reference L2 audit kernel config
+
+`tools/efi-console-harness/l2-kernel-config-AUDIT`:
+```
+include GENERIC
+
+ident		L2-AUDIT
+
+options		KDB
+options		DDB
+options		INVARIANTS
+options		INVARIANT_SUPPORT
+options		WITNESS
+options		WITNESS_SKIPSPIN
+options		DEBUG_LOCKS
+options		DEBUG_VFS_LOCKS
+options		DEBUG_VFS
+options		MALLOC_DEBUG_MAXZ=16384
+
+options		VIMAGE
+device		bhyve
+device		virtio_pci
+device		virtio_scsi
+device		virtio_balloon
+device		virtio_console
+device		ntb
+```
+
+Built once via `tools/efi-console-harness/build-l2-kernel.sh`, output to `/lab/images/l2-kernel-AUDIT/kernel`. Reused across all 40+ tests.
+
+### Reference bhyve launch wrapper
+
+`tools/efi-console-harness/bhyve-nested.sh`:
+```bash
+#!/bin/sh
+# Usage: bhyve-nested.sh [options]
+#   -l LEVEL (0|1|2)         nesting level to launch
+#   -i IMAGE                  path to disk image (L1 or L2)
+#   -c COMPORT                /dev/nmdmXX or "tmux" or "stdio"
+#   -s SNAP_DIR               framebuffer + boot.log evidence dir
+#   -t TIMEOUT_SECONDS        kill bhyve after this
+#   -k KERNEL                 path to L2 kernel (-kernel bhyve option)
+#   -K                        break to KDB on panic (L2 only)
+#   -h                        this help
+
+# Exit codes:
+#   0  L2 reached login (test passed — VM still running after timeout)
+#   1  harness setup failure
+#   2  bhyve launch failure
+#   3  L2 kernel panic (KDB break observed)
+#   4  L2 hang (timeout reached, no panic)
+#   5  unexpected VM-exit (test-specific assertion mismatch)
+```
+
+The wrapper handles all five observability channels. Each test script in P6A/P6B sources `tests/sys/vmm/nested/lib/nested_obs.sh` and calls this wrapper via the ATF framework.
+
+### Failure-mode coverage matrix
+
+| Failure mode | Serial | nmdm | boot.log | fb snapshot | KDB | Captured as |
+|---|---|---|---|---|---|---|
+| L2 EFI shell corruption | ✓ | ✓ | n/a | ✓ | n/a | `.sisyphus/evidence/P{n}-efi-shell-{corrupt,fail}.txt` + fb raw |
+| L2 kernel panic pre-console | ✗ | ✗ | ✓ | partial | ✓ | `.sisyphus/evidence/P{n}-panic-preconsole.txt` + boot.log + KDB backtrace |
+| L2 kernel panic post-console | ✓ | ✓ | ✓ | ✓ | ✓ | All five channels |
+| L2 infinite loop / hang | partial | partial | ✓ | ✓ | n/a | boot.log + framebuffer (no KDB — never panicked) |
+| L2 silent fail (no panic, no output) | ✗ | ✗ | partial | ✓ | n/a | fb snapshot only (rare; investigated as highest-priority FINDING) |
+| L1 bhyve crashes mid-test | ✓ (until crash) | ✓ (until disconnect) | partial | partial | n/a | whatever was captured pre-crash |
+| L0 bhyve / harness crashes | partial | partial | partial | partial | n/a | harness itself has bugs → FINDING |
+
+### Acceptance criteria for P7A-OBS
+
+- Smoke test (P7A-OBS QA scenario 1) passes: EFI shell visible in L0 tmux
+- Smoke test (P7A-OBS QA scenario 2) passes: L2 panic breaks to KDB, capture complete
+- Smoke test (P7A-OBS QA scenario 3) passes: hang → boot.log present after timeout
+- Smoke test (P7A-OBS QA scenario 4) passes: fb snapshots at distinct checkpoints
+- All four channels produce evidence files at the documented paths
+- One FINDING file per observed channel-failure (e.g. "OVMF drops serial on GOP switch on commit X" → FINDING-NNN-ovmf-serial-gop-loss.md)
+- The L2 audit kernel config builds cleanly via `make buildkernel KERNCONF=L2-AUDIT`
+- The bhyve-nested.sh wrapper has a `--help` and a man page under `tools/efi-console-harness/MANUAL.txt`
+
+### Known gaps to flag in plan / future work
+
+- **Pre-init L2 kernel failures** (between EFI ExitBootServices and first rc.d script) have no console and no boot.log. These are caught only by framebuffer snapshot showing "kernel never took over" — a coarse signal. Mitigation in plan: any negative test that triggers pre-init failures must be specifically tagged and the FINDING must include a note about the observability gap.
+- **OVMF version drift** between lab hosts may produce different console behavior. Mitigation: pin OVMF build per host in P7A-OBS config; flag drift as a CI failure.
+- **L1 bhyve (inside L0) has no KDB** by default; if L1's bhyve crashes, the harness can only capture what L1 had time to forward. Mitigation: L1 also runs an audit kernel with debug flags; however, capturing L1's KDB from L0's bhyve requires chained serial passthrough — implementable but not in v1.
+
+---
+
 ## Appendix E: Tools Inventory
+
+(See Appendix F for the EFI console observability design — placed before this appendix for narrative flow but documented under Wave 7 paths P7A-OBS and P7A-OBS-ATF.)
 
 Tools available for the audit:
 
