@@ -160,8 +160,6 @@ static uint64_t	nested_vmcs12_region[MAXCPU];
  */
 extern int vmm_nested_enable;
 
-#define VMX_NESTED_VMCS_SHADOWING	(1U << 14)
-
 static int vmx_nested_l0_warned;
 
 static inline bool
@@ -809,7 +807,7 @@ vmx_modinit(int ipinum)
 	}
 	nested_hw = vmx_set_ctlreg(MSR_VMX_PROCBASED_CTLS2,
 	    MSR_VMX_PROCBASED_CTLS2,
-	    PROCBASED2_UNRESTRICTED_GUEST | VMX_NESTED_VMCS_SHADOWING,
+	    PROCBASED2_UNRESTRICTED_GUEST | PROCBASED2_VMCS_SHADOWING,
 	    0, &tmp) == 0;
 
 	/* Check support for VPID */
@@ -1079,20 +1077,20 @@ vmx_modinit(int ipinum)
 	vmx_nested_status = nested_hw ? (vm_guest == VM_GUEST_NO ? 2 : 1) : 0;
 
 	/*
-	 * Nested-VMX (T15): if the host CPU supports VMCS shadowing
-	 * (which is part of the `nested_hw` gate we just used to set
-	 * vmx_nested_status), enable the VMCS-shadowing bit in the
-	 * global PROCBASED_CTLS2 so every VMCS we activate has the
-	 * shadowing control on.  This is safe because the VMCS12
-	 * shadow region is allocated lazily per-VM (see
-	 * vmx_vcpu_init() below); a non-nested VM never references
-	 * the shadow and so pays no runtime cost.
-	 *
-	 * Note: VMCS shadowing REQUIRES CR4.VMXE in the guest, which
-	 * T14 now forces on for any nested-enabled L1.
+	 * Nested-VMX (T15, T18): we deliberately do NOT OR the
+	 * VMCS-shadowing bit into the global `procbased_ctls2` here.
+	 * The Intel SDM (Vol 3 §25.4.2) requires that, when
+	 * VMCS shadowing is enabled, the shadow VMCS address in the
+	 * L0 VMCS must point at a valid, populated shadow VMCS --
+	 * otherwise VM-entry fails.  bhyve always writes
+	 * VMCS_LINK_POINTER = ~0 in vmcs_init(), which is the
+	 * correct value for a non-shadowing VMCS but is illegal
+	 * when shadowing is on.  So we leave the global ctl2
+	 * shadowing-free and only enable it per-vCPU, after
+	 * vmx_nested_load_vmcs12() has installed a real shadow VMCS
+	 * for the L1 (see `nested_enabled && ns->vmcs12_active`
+	 * below and the vmwrite in vmx_nested_load_vmcs12).
 	 */
-	if (nested_hw)
-		procbased_ctls2 |= VMX_NESTED_VMCS_SHADOWING;
 
 	return (0);
 }

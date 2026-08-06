@@ -26,6 +26,7 @@
 #include <dev/vmm/vmm_vm.h>
 
 #include "vmm_host.h"
+#include "vmx_controls.h"
 #include "vmcs.h"
 #include "vmx.h"
 #include "vmx_cpufunc.h"
@@ -117,6 +118,33 @@ vmx_nested_load_vmcs12(struct vmx_vcpu *vcpu, uint64_t gpa)
 	ns->vmcs12_gpa = gpa;
 	ns->state = VMCS12_STATE_CLEAR;
 	ns->vmcs12_active = true;
+
+	/*
+	 * The first time a real VMCS12 is installed for this vCPU,
+	 * flip on VMCS shadowing in the per-vCPU L0 VMCS and point
+	 * VMCS_LINK_POINTER at the nvmcs12 backing page.  The global
+	 * procbased_ctls2 deliberately leaves shadowing off (see the
+	 * T15/T18 note in vmx_modinit) because the link pointer
+	 * starts out as ~0 from vmcs_init(), which is illegal when
+	 * shadowing is on.  Doing this here -- gated on
+	 * vmcs12_active flipping true -- means non-nested VMs and
+	 * nested VMs before their first VMPTRLD see a shadowing-
+	 * free VMCS that VM-enters cleanly.
+	 */
+	{
+		struct vmcs *vmcs;
+		uint64_t ctl2;
+		uint64_t shadow_hpa;
+
+		vmcs = vcpu->vmcs;
+		VMPTRLD(vmcs);
+		ctl2 = vmread(VMCS_SEC_PROC_BASED_CTLS);
+		ctl2 |= PROCBASED2_VMCS_SHADOWING;
+		vmwrite(VMCS_SEC_PROC_BASED_CTLS, ctl2);
+		shadow_hpa = vtophys((vm_offset_t)vcpu->nvmcs12);
+		vmwrite(VMCS_LINK_POINTER, shadow_hpa);
+		VMCLEAR(vmcs);
+	}
 
 	VMX_CTR2(vcpu, "nested VMPTRLD: vmcs12 GPA=%#lx revision=%#x",
 	    (unsigned long)gpa, l0_revision);
