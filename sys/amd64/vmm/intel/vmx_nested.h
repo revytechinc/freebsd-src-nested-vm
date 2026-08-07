@@ -208,12 +208,17 @@ void	vmx_nested_ept12_install(struct vmx_vcpu *vcpu, uint64_t ept12_pte);
 
 /*
  * T23: translate a L2 GPA through EPT12 to its corresponding L1
- * GPA.  Returns VM_SUCCESS and writes *out_l1_gpa on success.
- * For the Wave-4 first pass this returns the input GPA unchanged
- * (identity map) and notes TODO(mvp) for the real EPT12 walk.
+ * GPA.  The 'access' parameter carries the requested L2 access
+ * type (one of VM_PROT_READ, VM_PROT_WRITE, VM_PROT_EXECUTE);
+ * the walker enforces the corresponding EPT permission bit at
+ * every level (Intel SDM Vol 3 §29.3.4).
+ *
+ * Returns VM_SUCCESS and writes *out_l1_gpa on success.  On
+ * failure returns -1 (translation failure / EPT violation /
+ * misconfiguration) and leaves *out_l1_gpa untouched.
  */
 int	vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
-	    uint64_t *out_l1_gpa);
+	    int access, uint64_t *out_l1_gpa);
 
 /*
  * T23b: emulate L1 INVEPT.  The EPTP operand is taken from L1's

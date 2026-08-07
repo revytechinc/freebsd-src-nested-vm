@@ -116,11 +116,16 @@ vmx_nested_ept12_install(struct vmx_vcpu *vcpu, uint64_t ept12_pte)
  * 8-byte PTE and indexing past it would walk off the end of the
  * held region into stack memory (CWE-125).
  *
+ * The 'access' argument carries the requested L2 access type
+ * (VM_PROT_READ / VM_PROT_WRITE / VM_PROT_EXECUTE).  Every
+ * walked PTE must permit that access (Intel SDM Vol 3 §29.3.4).
+ *
  * Returns VM_SUCCESS and writes *out_l1_gpa on success.  On
  * failure returns -1 and leaves *out_l1_gpa untouched.  The
  * failure cases are:
  *   - L1 EPTP not installed (ept12_pte == 0)
  *   - any level's PTE has the architecture-disallowed format
+ *   - the requested access is not permitted at any walked PTE
  *   - vm_gpa_hold fails (L1 page is unmapped / has been freed)
  *
  * The architecture-defined "large page" entries (2MB PDE,
@@ -130,7 +135,7 @@ vmx_nested_ept12_install(struct vmx_vcpu *vcpu, uint64_t ept12_pte)
  */
 int
 vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
-    uint64_t *out_l1_gpa)
+    int access, uint64_t *out_l1_gpa)
 {
 	struct vmx_nested_state *ns;
 	uint64_t ept_root;
@@ -138,6 +143,7 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 	uint64_t hpa;
 	uint64_t pte;
 	uint64_t table_pa;
+	uint64_t access_bit;
 	void *mapping;
 	void *cookie;
 	int level;
@@ -147,6 +153,26 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 		return (-1);
 	if (out_l1_gpa == NULL)
 		return (-1);
+
+	/*
+	 * Validate the requested access type.  Exactly one of
+	 * VM_PROT_READ/WRITE/EXECUTE must be set — we don't
+	 * support combined access in the walker because EPT
+	 * bit-checking is per-access-type (Intel SDM §29.3.4).
+	 */
+	switch (access) {
+	case VM_PROT_READ:
+		access_bit = EPT_PTE_R;
+		break;
+	case VM_PROT_WRITE:
+		access_bit = EPT_PTE_W;
+		break;
+	case VM_PROT_EXECUTE:
+		access_bit = EPT_PTE_X;
+		break;
+	default:
+		return (-1);
+	}
 
 	ept_root = ns->ept12_pte;
 	if ((ept_root & EPT_PTE_MASK) == 0)
@@ -208,6 +234,60 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 			    "level=%d idx=%lu pte=%#lx",
 			    level, (unsigned long)idx, (unsigned long)pte);
 			return (-1);
+		}
+
+		/*
+		 * Enforce the requested access type at every walked
+		 * level (Intel SDM Vol 3 §29.3.4).  Each non-leaf
+		 * table descriptor must also carry the access bit
+		 * for a translation that will eventually be allowed
+		 * — the SDM requires permission bits to combine
+		 * with AND across all levels.
+		 */
+		if ((pte & access_bit) == 0) {
+			VMX_CTR3(vcpu, "nested EPT12 walk: access denied at "
+			    "level=%d idx=%lu pte=%#lx",
+			    level, (unsigned long)idx, (unsigned long)pte);
+			return (-1);
+		}
+
+		/*
+		 * Reserved-bit validation per Intel SDM Vol 3 §29.3.
+		 * Bits the architecture marks as reserved must be
+		 * zero; a non-zero reserved bit triggers an EPT
+		 * misconfiguration (#VMEXIT INVEPT/INVVPID aside,
+		 * the walker must not propagate such a PTE).
+		 *
+		 *   PML4E: bits 11:0 are flags; no reserved bits.
+		 *   PDPTE non-leaf: bit 6, bits 11:8.
+		 *   PDPTE 1GB leaf: bits 29:12 reserved (already
+		 *                   masked by the large-page addr
+		 *                   mask, but we double-check here).
+		 *   PDE non-leaf: bit 6, bits 11:8.
+		 *   PDE 2MB leaf: bits 20:12 reserved.
+		 *   PTE 4KB leaf: bits 11:0 are flags; bits 52:MAXPHYADDR.
+		 *
+		 * We only validate the leaf-level reserved bits
+		 * explicitly here; non-leaf validation is folded
+		 * into the next-level table hold (a non-existent
+		 * table GPA fails vm_gpa_hold).
+		 */
+		if ((level == 1 || level == 2) &&
+		    (pte & EPT_PTE_LARGE) != 0) {
+			uint64_t reserved_mask;
+
+			if (level == 1)
+				reserved_mask = 0x3ffff000UL;
+			else
+				reserved_mask = 0x1ff000UL;
+			if ((pte & reserved_mask) != 0) {
+				VMX_CTR3(vcpu, "nested EPT12 walk: "
+				    "misconfigured large PTE level=%d "
+				    "idx=%lu pte=%#lx",
+				    level, (unsigned long)idx,
+				    (unsigned long)pte);
+				return (-1);
+			}
 		}
 
 		/*
