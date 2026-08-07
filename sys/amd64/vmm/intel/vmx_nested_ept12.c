@@ -93,9 +93,11 @@ vmx_nested_ept12_install(struct vmx_vcpu *vcpu, uint64_t ept12_pte)
 
 /*
  * Walk L1's 4-level EPT12 to translate the L2 GPA into a L1 GPA.
- * Each table walk holds a single 4KB mapping via vm_gpa_hold;
- * on success the next-level HPA is derived from the held
- * mapping's physical address (vtophys) and the GPA index.
+ * Each level holds the full 4KB table page via vm_gpa_hold so
+ * the held mapping covers all 512 entries; the indexed entry
+ * is then copied out of the held page.  Holding only a single
+ * 8-byte PTE and indexing past it would walk off the end of the
+ * held region into stack memory (CWE-125).
  *
  * Returns VM_SUCCESS and writes *out_l1_gpa on success.  On
  * failure returns -1 and leaves *out_l1_gpa untouched.  The
@@ -143,7 +145,20 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 	gpa = table_pa;
 
 	for (level = 0; level < EPT_WALK_MAX_LEVELS; level++) {
-		mapping = vm_gpa_hold(vcpu->vcpu, gpa, sizeof(uint64_t),
+		uint64_t idx;
+		uint64_t table_base;
+
+		/*
+		 * Hold the full 4KB table page at the page-aligned
+		 * GPA.  vm_gpa_hold() pins a single 4KB page and
+		 * requires len <= PAGE_SIZE - pageoff, so we must
+		 * hold at the page boundary and read out the
+		 * indexed entry (idx * 8 bytes into the page).
+		 * Holding only sizeof(uint64_t) and then indexing
+		 * past it would be an OOB stack read.
+		 */
+		table_base = gpa & ~PAGE_MASK;
+		mapping = vm_gpa_hold(vcpu->vcpu, table_base, PAGE_SIZE,
 		    VM_PROT_READ, &cookie);
 		if (mapping == NULL) {
 			VMX_CTR2(vcpu,
@@ -152,11 +167,6 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 			return (-1);
 		}
 
-		uint64_t entry;
-		memcpy(&entry, mapping, sizeof(entry));
-		vm_gpa_release(cookie);
-
-		uint64_t idx;
 		switch (level) {
 		case 0:
 			idx = EPT_IDX_PML4(l2_gpa);
@@ -172,8 +182,10 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 			break;
 		}
 
-		memcpy(&pte, (uint8_t *)&entry + (idx * sizeof(uint64_t)),
+		memcpy(&pte, (uint8_t *)mapping + (idx * sizeof(uint64_t)),
 		    sizeof(pte));
+		vm_gpa_release(cookie);
+
 		if ((pte & (EPT_PTE_R | EPT_PTE_W | EPT_PTE_X)) == 0) {
 			VMX_CTR3(vcpu, "nested EPT12 walk: empty PTE at "
 			    "level=%d idx=%lu pte=%#lx",
