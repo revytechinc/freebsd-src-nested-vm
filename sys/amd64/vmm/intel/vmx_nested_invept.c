@@ -114,17 +114,22 @@ vmx_nested_invvpid_handle(struct vmx_vcpu *vcpu, uint64_t type, uint16_t vpid,
  * VM-exit qualification field (Intel SDM §27.2.1 INVEPT is
  * m64).  We:
  *  1. validate the type (SINGLE_CONTEXT or ALL_CONTEXTS);
- *  2. hold the L1 descriptor page via vm_gpa_hold;
- *  3. read the EPTP out of the descriptor;
- *  4. call the L0 INVEPT with the L1-stated EPTP and type;
- *  5. release the hold and return 0 (caller advances L1 RIP).
+ *  2. validate the descriptor GPA is 16-byte aligned and
+ *     fits inside a single 4KB page (Intel SDM §30.7 — the
+ *     descriptor is exactly 16 bytes and the SDM defines
+ *     it as naturally aligned to 16; the VM-exit qualification
+ *     is also expected to carry an aligned address);
+ *  3. hold the L1 descriptor page via vm_gpa_hold;
+ *  4. read the EPTP out of the descriptor;
+ *  5. call the L0 INVEPT with the L1-stated EPTP and type;
+ *  6. release the hold and return 0 (caller advances L1 RIP).
  *
- * If the descriptor GPA is unreadable (vm_gpa_hold fails) we
- * inject #GP into L1 and return 0 (handled) so the L1 OS sees
- * the architectural fault rather than a fatal VMM path.
- * Returning -1 here would let the exit bubble up to userland
- * as VM_EXITCODE_VMINSN, which L1 cannot recover from with a
- * matching #GP.
+ * If the descriptor GPA is unreadable (vm_gpa_hold fails),
+ * unaligned, or straddles a page boundary, we inject #GP into
+ * L1 and return 0 (handled) so the L1 OS sees the architectural
+ * fault rather than a fatal VMM path.  Returning -1 here would
+ * let the exit bubble up to userland as VM_EXITCODE_VMINSN,
+ * which L1 cannot recover from with a matching #GP.
  */
 int
 vmx_nested_exit_invept(struct vmx_vcpu *vcpu)
@@ -151,6 +156,19 @@ vmx_nested_exit_invept(struct vmx_vcpu *vcpu)
 		VMX_CTR1(vcpu, "nested INVEPT: invalid type %#lx",
 		    (unsigned long)type);
 		return (-1);
+	}
+
+	/*
+	 * Descriptor must be 16-byte aligned (SDM §30.7) and must
+	 * fit entirely within a single 4KB page (the descriptor is
+	 * 16 bytes, so pageoff + 16 <= 4096 means pageoff <= 0xff0).
+	 * Otherwise inject #GP into L1.
+	 */
+	if ((desc_gpa & 0xf) != 0 || (desc_gpa & 0xfff) > 0xff0) {
+		VMX_CTR1(vcpu, "nested INVEPT: unaligned/cross-page "
+		    "desc=%#lx", (unsigned long)desc_gpa);
+		vm_inject_gp(vcpu->vcpu);
+		return (0);
 	}
 
 	mapping = vm_gpa_hold(vcpu->vcpu, desc_gpa, sizeof(desc), VM_PROT_READ,
@@ -182,8 +200,8 @@ vmx_nested_exit_invept(struct vmx_vcpu *vcpu)
  * layout.  The L1-stated type is in guest_rax, the descriptor
  * GPA is in the VM-exit qualification.
  *
- * On a failed descriptor hold we inject #GP into L1 and return
- * 0 (handled), consistent with the INVEPT path — see the long
+ * Descriptor GPA alignment, cross-page check, and the failed-
+ * hold #GP injection mirror the INVEPT path — see the long
  * comment on vmx_nested_exit_invept() for the rationale.
  */
 int
@@ -210,6 +228,18 @@ vmx_nested_exit_invvpid(struct vmx_vcpu *vcpu)
 		VMX_CTR1(vcpu, "nested INVVPID: invalid type %#lx",
 		    (unsigned long)type);
 		return (-1);
+	}
+
+	/*
+	 * Descriptor must be 16-byte aligned (SDM §30.7) and
+	 * must fit entirely within a single 4KB page; otherwise
+	 * inject #GP into L1.
+	 */
+	if ((desc_gpa & 0xf) != 0 || (desc_gpa & 0xfff) > 0xff0) {
+		VMX_CTR1(vcpu, "nested INVVPID: unaligned/cross-page "
+		    "desc=%#lx", (unsigned long)desc_gpa);
+		vm_inject_gp(vcpu->vcpu);
+		return (0);
 	}
 
 	mapping = vm_gpa_hold(vcpu->vcpu, desc_gpa, sizeof(desc), VM_PROT_READ,
