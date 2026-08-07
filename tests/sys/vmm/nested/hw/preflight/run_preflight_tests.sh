@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Wave 0a / T0a follow-up: preflight test driver. Runs the four
-# preflight test programs in order, prints a SUMMARY line, and is itself
-# exposed as a single ATF test (`preflight_integrity`).
+# Wave 0a / T0a follow-up + Wave 5/6: preflight test driver. Runs
+# every preflight_*.sh program in the directory in alphabetical
+# order, prints a SUMMARY line, and is itself exposed as a single
+# ATF test (preflight_integrity).
 #
 # Usage: bash run_preflight_tests.sh
 
@@ -41,7 +42,7 @@ fi
 atf_test_case preflight_integrity
 preflight_integrity_head()
 {
-    atf_set "descr" "Wave 0a preflight test matrix (2 unit + 2 integration)"
+    atf_set "descr" "Wave 0a + Wave 5/6 preflight test matrix (4 baseline + 10 wave-5+6 regression)"
 }
 preflight_integrity_body()
 {
