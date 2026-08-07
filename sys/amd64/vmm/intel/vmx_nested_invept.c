@@ -47,12 +47,19 @@ extern int vmm_nested_enable;
 
 /*
  * L1 INVEPT descriptor layout (Intel SDM Vol 3 §30.7 / §30.4).
- * The descriptor is a 16-byte little-endian struct.
+ * The descriptor is a 16-byte little-endian struct:
+ *
+ *   bits  63:0  - EPTP (64-bit physical address of EPT root)
+ *   bits 127:64 - reserved (must be zero)
+ *
+ * Earlier versions of this file declared EPTP as uint32_t,
+ * which truncated the L1-stated EPTP to its low 32 bits and
+ * caused L0 INVEPT to operate on a wrong EPT root — leaving
+ * stale EPT mappings in the L0 MMU cache.
  */
 struct invept_desc_l1 {
-	uint32_t	_res1;
-	uint32_t	eptp;
-	uint64_t	_res2;
+	uint64_t	eptp;
+	uint64_t	reserved;
 };
 CTASSERT(sizeof(struct invept_desc_l1) == 16);
 
