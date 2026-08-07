@@ -13,10 +13,10 @@
  *  - the L1-stated operand is a memory descriptor pointed to
  *    by the VM-exit instruction info / VM-exit qualification
  *    field (the L1 operand is m64 in both cases);
- *  - the descriptor is a 16-byte struct (4 reserved, 4 EPTP /
- *    4 reserved, 8 reserved for INVEPT; 2 VPID, 2 reserved,
- *    4 reserved, 8 linear address for INVVPID);
- *  - the type is the L1-stated type byte in low 64 bits of the
+ *  - the descriptor is a 16-byte struct (8 EPTP + 8 reserved
+ *    for INVEPT; 2 VPID + 6 reserved + 8 linear address for
+ *    INVVPID);
+ *  - the type is the L1-stated type in the low 64 bits of the
  *    L1 RAX register (per SDM §30.7 INVEPT and §30.7 INVVPID);
  *  - the L1-stated EPTP / VPID lives in the descriptor.
  *
