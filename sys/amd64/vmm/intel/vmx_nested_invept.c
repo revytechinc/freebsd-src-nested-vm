@@ -97,7 +97,25 @@ vmx_nested_invvpid_handle(struct vmx_vcpu *vcpu, uint64_t type, uint16_t vpid,
 {
 	struct invvpid_desc desc;
 
-	if (type > INVVPID_TYPE_ALL_CONTEXTS)
+	/*
+	 * Whitelist exact INVVPID types per Intel SDM Vol 3 §30.7:
+	 *   0 - individual-address invalidation
+	 *   1 - single-context invalidation
+	 *   2 - all-contexts invalidation
+	 * (Type 3 is only valid when INVVPID-with-retained-globals
+	 * is supported by the silicon; we don't advertise that to
+	 * L1 so we reject it here.)
+	 *
+	 * Additionally, types 0 and 1 with VPID 0 are
+	 * architecturally undefined (SDM Vol 3 §30.7) — only
+	 * type 2 (all-contexts) is valid with VPID 0.
+	 */
+	if (type != INVVPID_TYPE_ADDRESS &&
+	    type != INVVPID_TYPE_SINGLE_CONTEXT &&
+	    type != INVVPID_TYPE_ALL_CONTEXTS)
+		return (-1);
+	if ((type == INVVPID_TYPE_ADDRESS ||
+	    type == INVVPID_TYPE_SINGLE_CONTEXT) && vpid == 0)
 		return (-1);
 
 	desc.vpid = vpid;
@@ -224,7 +242,9 @@ vmx_nested_exit_invvpid(struct vmx_vcpu *vcpu)
 	desc_gpa = vmcs_exit_qualification();
 	type = vmxctx->guest_rax & 0xffffffffUL;
 
-	if (type > INVVPID_TYPE_ALL_CONTEXTS) {
+	if (type != INVVPID_TYPE_ADDRESS &&
+	    type != INVVPID_TYPE_SINGLE_CONTEXT &&
+	    type != INVVPID_TYPE_ALL_CONTEXTS) {
 		VMX_CTR1(vcpu, "nested INVVPID: invalid type %#lx",
 		    (unsigned long)type);
 		return (-1);
