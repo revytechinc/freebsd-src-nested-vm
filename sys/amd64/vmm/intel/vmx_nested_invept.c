@@ -207,8 +207,8 @@ vmx_nested_exit_invept(struct vmx_vcpu *vcpu)
 		return (-1);
 	}
 
-	VMX_CTR2(vcpu, "nested INVEPT: type=%#lx eptp=%#x",
-	    (unsigned long)type, (unsigned)desc.eptp);
+	VMX_CTR2(vcpu, "nested INVEPT: type=%#lx eptp=%#lx",
+	    (unsigned long)type, (unsigned long)desc.eptp);
 	return (0);
 }
 
