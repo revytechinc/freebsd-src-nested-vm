@@ -66,6 +66,23 @@ extern int vmm_nested_enable;
 #define	EPT_PTE_LARGE		(1U << 7)
 
 /*
+ * Large-page / 4KB leaf PTE physical-address masks.  Per Intel
+ * SDM Vol 3 §29.3, the low-order address bits are reserved and
+ * must be zero in a leaf PTE; the L2 page offset is OR-ed in by
+ * the walker after masking the PTE address.
+ *
+ *   1GB PDPTE: bits 51:30 hold the physical address; bits 29:12
+ *              are reserved.
+ *   2MB PDE:   bits 51:21 hold the physical address; bits 20:12
+ *              are reserved.
+ *   4KB PTE:   bits 51:12 hold the physical address; bits 11:0
+ *              are flag bits (R/W/X etc.).
+ */
+#define	EPT_PTE_LARGE_ADDR_1GB	0xffffffffc0000000UL
+#define	EPT_PTE_LARGE_ADDR_2MB	0xffffffffffe00000UL
+#define	EPT_PTE_4KB_ADDR	0x000ffffffffff000UL
+
+/*
  * EPT PML4 / PDPT / PD / PT indices, derived from the L2 GPA.
  * The architecture has 4 levels each indexing 512 entries
  * (9 bits per level), totalling 36 bits of address space.
@@ -198,16 +215,28 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 		 * current level means a 2MB PDE (level 2) or 1GB
 		 * PDPTE (level 1).  The PML4E never carries the
 		 * large bit.
+		 *
+		 * For large-page entries the low address bits are
+		 * reserved and must be zero (Intel SDM Vol 3 §29.3):
+		 * 1GB PDPTE: bits 29:12 reserved; 2MB PDE: bits
+		 * 20:12 reserved.  AND them out before OR-ing the
+		 * page offset so L1 cannot steer the translation
+		 * into L1 physical memory it does not own by
+		 * setting reserved bits.
 		 */
 		if ((level == 1 || level == 2) &&
 		    (pte & EPT_PTE_LARGE) != 0) {
 			uint64_t page_off;
+			uint64_t pte_addr;
 
-			if (level == 1)
+			if (level == 1) {
 				page_off = l2_gpa & 0x3fffffffUL;
-			else
+				pte_addr = pte & EPT_PTE_LARGE_ADDR_1GB;
+			} else {
 				page_off = l2_gpa & 0x1fffffUL;
-			hpa = (pte & EPT_PTE_MASK) | page_off;
+				pte_addr = pte & EPT_PTE_LARGE_ADDR_2MB;
+			}
+			hpa = pte_addr | page_off;
 			*out_l1_gpa = hpa;
 			VMX_CTR3(vcpu, "nested EPT12 large: level=%d "
 			    "hpa=%#lx pte=%#lx",
@@ -223,12 +252,15 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 			/*
 			 * Reached the leaf level without hitting
 			 * a large-page indicator — the PTE
-			 * describes a 4KB leaf.
+			 * describes a 4KB leaf.  The PTE physical
+			 * address bits are 51:12; AND out bits 11:0
+			 * (R/W/X, etc.) so we OR in only the L2
+			 * page offset.
 			 */
 			uint64_t page_off;
 
 			page_off = l2_gpa & 0xfffUL;
-			hpa = (pte & EPT_PTE_MASK) | page_off;
+			hpa = (pte & EPT_PTE_4KB_ADDR) | page_off;
 			*out_l1_gpa = hpa;
 			VMX_CTR3(vcpu, "nested EPT12 leaf: level=%d "
 			    "hpa=%#lx pte=%#lx",
