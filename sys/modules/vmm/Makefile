@@ -114,6 +114,7 @@ SRCS+=	ept.c		\
 	vmx_nested.c		\
 	vmx_nested_vmptrld.c	\
 	vmx_nested_vmread.c	\
+	vmx_nested_layout.c	\
 	vmx_nested_vmclear.c	\
 	vmx_nested_vmlaunch.c	\
 	vmx_nested_vmresume.c	\
