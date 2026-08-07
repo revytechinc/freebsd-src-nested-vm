@@ -65,6 +65,9 @@ mod_str=$(echo "$origin_line" | sed -n 's|.*Model=\(0x[0-9a-f]*\).*|\1|p')
 fam=$(h2d "$fam_str"); [ -z "$fam" ] && fam=0
 mod=$(h2d "$mod_str"); [ -z "$mod" ] && mod=0
 
+nested_vmx=$(sysctl -n hw.vmm.nested.vmx 2>/dev/null)
+nested_svm=$(sysctl -n hw.vmm.nested.svm 2>/dev/null)
+
 if [ "$VERBOSE" = "1" ]; then
     print_row "Origin raw:" "$origin_line"
     print_row "FT1 raw:"    "$ft1_line"
@@ -79,8 +82,8 @@ print_row "vendor:"     "$vendor"
 print_row "Features L1 (EDX):"      "0x$feat1"
 print_row "Features2 L1 (ECX):"     "0x$feat2"
 print_row "L7 EBX ext feat:"        "0x$extfeat"
-print_row "0x80000001 ECX (SVM?):"  "0x$amdfeat"
-print_row "0x80000001 EDX:"         "0x$amdfn2"
+print_row "0x80000001 ECX (SVM?):"  "0x$amdfn2"
+print_row "0x80000001 EDX:"         "0x$amdfeat"
 echo
 
 # -- Per-vendor decoding ----------------------------------------------
@@ -129,12 +132,23 @@ case "$vendor" in
         else
             print_row "nVMX verdict:" "INVESTIGATE - unknown family/model; load vmm.ko and read hw.vmm.vmx.cap.*"
         fi
+
+        if [ -n "$nested_vmx" ]; then
+            case "$nested_vmx" in
+                2) print_row "nVMX verdict (runtime):" "VIABLE - all gates clear (hw.vmm.nested.vmx=2)" ;;
+                1) print_row "nVMX verdict (runtime):" "L0 conflict - VMware/etc. filters (hw.vmm.nested.vmx=1)" ;;
+                0) print_row "nVMX verdict (runtime):" "host CPU lacks nested VMX (hw.vmm.nested.vmx=0)" ;;
+                *) print_row "nVMX verdict (runtime):" "unknown (hw.vmm.nested.vmx=$nested_vmx)" ;;
+            esac
+        fi
         ;;
 
     AuthenticAMD|AMDisbetter|HygonGenuine)
-        # IMPORTANT: SVM is in CPUID 0x80000001 EDX bit 2, not ECX.
+        # SVM is in CPUID 0x80000001 ECX bit 2 (matches AMDID2_SVM in
+        # sys/x86/include/specialreg.h:255).  NPT is leaf 0x8000000A:EDX[0]
+        # (NP) emitted in the `^SVM:` line below; do NOT derive NPT from
+        # 0x80000001 ECX bit 1 (that bit is CMP / legacy core-count).
         svm_bit=$(( 0x$amdfn2 >> 2 & 1 ))
-        npt_bit=$(( 0x$amdfn2 >> 1 & 1 ))
         # FreeBSD dmesg Family= is the effective family (see Intel SDM
         # Vol 2 §3.2 for the analogous Intel encoding); AMD APM Vol 2 §3.3
         # reports the same effective value, so fam is used as-is.
@@ -145,13 +159,9 @@ case "$vendor" in
         modlo=$(( mod & 0xf ))
 
         # Leaf 0x8000000A bits are reported by FreeBSD in `^SVM:` line.
+        has_np=0; has_nrip=0; has_vclean=0; has_aflush=0; has_dassist=0; has_avic=0
+        nasid=0
         if [ -n "$svm_line" ]; then
-            has_np=0
-            has_nrip=0
-            has_vclean=0
-            has_aflush=0
-            has_dassist=0
-            has_avic=0
             echo "$svm_line" | grep -q 'NP' && has_np=1
             echo "$svm_line" | grep -q 'NRIP' && has_nrip=1
             echo "$svm_line" | grep -q 'VClean' && has_vclean=1
@@ -161,8 +171,8 @@ case "$vendor" in
             nasid=$(echo "$svm_line" | sed -n 's|.*NAsids=\([0-9]*\).*|\1|p')
             [ -z "$nasid" ] && nasid=0
         fi
-        print_row "SVM (0x80000001:EDX[2]):" "$([ $svm_bit -eq 1 ] && echo PRESENT || echo absent)"
-        print_row "NPT (0x80000001:EDX[1]):" "$([ $npt_bit -eq 1 ] && echo PRESENT || echo absent)"
+        print_row "SVM (0x80000001:ECX[2]):" "$([ $svm_bit -eq 1 ] && echo PRESENT || echo absent)"
+        print_row "NPT (0x8000000A:EDX[0]):" "$([ "$has_np" = "1" ] && echo PRESENT || echo absent)"
         print_row "AMD family dec:" "$family_hex"
         case "$family_hex" in
             f|10|11|12|14|15|16|17|19|1a)
@@ -196,9 +206,21 @@ case "$vendor" in
                     12|14)   print_row "nSVM verdict:" "VIABLE - Llano / Bobcat; SVM present, AVIC absent.";;
                     15)      print_row "nSVM verdict:" "VIABLE - Bulldozer/Piledriver; AVIC absent.";;
                     16)      print_row "nSVM verdict:" "VIABLE - Jaguar; SVM present, AVIC absent.";;
-                    17)      print_row "nSVM verdict:" "FULLY VIABLE - Zen1+; AVIC/vgif/NRIP/VClean/DAssist.";;
-                    19|1a)   print_row "nSVM verdict:" "FULLY VIABLE - Zen4+; AVIC+vGIF 2-bit ASIDs.";;
+                    17)      print_row "nSVM verdict:" "VIABLE - Zen1+; runtime must confirm AVIC/vgif/NRIP/VClean/DAssist.";;
+                    19|1a)   print_row "nSVM verdict:" "VIABLE - Zen4+; runtime must confirm AVIC+vGIF 2-bit ASIDs.";;
                 esac
+
+                if [ -n "$nested_svm" ]; then
+                    case "$nested_svm" in
+                        2)
+                            avic_note=$([ "$has_avic" = "1" ] && echo "AVIC present" || echo "AVIC absent")
+                            print_row "nSVM verdict (runtime):" "VIABLE - all gates clear (hw.vmm.nested.svm=2; $avic_note)"
+                            ;;
+                        1) print_row "nSVM verdict (runtime):" "L0 conflict - VMware/etc. filters (hw.vmm.nested.svm=1)" ;;
+                        0) print_row "nSVM verdict (runtime):" "host CPU lacks nested SVM (hw.vmm.nested.svm=0)" ;;
+                        *) print_row "nSVM verdict (runtime):" "unknown (hw.vmm.nested.svm=$nested_svm)" ;;
+                    esac
+                fi
                 ;;
             *)
                 print_row "microarch:" "AMD family=0x$family_hex (unrecognised)"
@@ -274,21 +296,70 @@ echo "--- Verdict ---"
 verdict_ok=0
 case "$vendor" in
     GenuineIntel)
-        if [ "$vmx" = "1" ]; then verdict_ok=1; fi
-        if [ "$extfam" = "6" ] && [ "$modhi" = "3" ] && [ "$modlo" = "10" ]; then
-            echo "  Plain bhyve guests:    OK (VMX + EPT)"
-            echo "  nVMX (nested) guests:  BLOCKED (Ivy Bridge lacks VMCS-shadowing)"
+        if [ "$vmx" = "1" ]; then
             verdict_ok=1
+            echo "  Plain bhyve guests:    OK (VMX + EPT)"
+        else
+            echo "  Plain bhyve guests:    INVESTIGATE - VMX bit unset"
+        fi
+        if [ -n "$nested_vmx" ]; then
+            case "$nested_vmx" in
+                2)
+                    echo "  nVMX (nested) guests:  VIABLE (hw.vmm.nested.vmx=2; runtime says all gates clear)"
+                    verdict_ok=1
+                    ;;
+                1)
+                    echo "  nVMX (nested) guests:  L0 conflict - VMware/etc. filters (hw.vmm.nested.vmx=1)"
+                    ;;
+                0)
+                    echo "  nVMX (nested) guests:  BLOCKED - host CPU lacks nested VMX (hw.vmm.nested.vmx=0)"
+                    ;;
+                *)
+                    echo "  nVMX (nested) guests:  INVESTIGATE - hw.vmm.nested.vmx=$nested_vmx"
+                    ;;
+            esac
+        elif [ "$extfam" = "6" ] && [ "$modhi" = "3" ] && [ "$modlo" = "10" ]; then
+            echo "  nVMX (nested) guests:  BLOCKED - Ivy Bridge lacks VMCS-shadowing (family fallback)"
         elif [ "$extfam" = "6" ] && [ "$modhi" -ge 4 ]; then
-            echo "  Plain bhyve guests:    OK (VMX + EPT)"
-            echo "  nVMX (nested) guests:  VIABLE (Broadwell+, after kernel gate is in place)"
+            echo "  nVMX (nested) guests:  VIABLE - Broadwell+ (family fallback; load vmm.ko to confirm)"
             verdict_ok=1
+        elif [ "$extfam" = "6" ] && [ "$modhi" = "3" ] && [ $modlo -ge 12 ]; then
+            echo "  nVMX (nested) guests:  VIABLE - Haswell model 0x3c+ (family fallback; load vmm.ko to confirm)"
+            verdict_ok=1
+        else
+            echo "  nVMX (nested) guests:  INVESTIGATE - unknown family/model; load vmm.ko and read hw.vmm.vmx.cap.*"
         fi
         ;;
     AuthenticAMD|AMDisbetter|HygonGenuine)
-        if [ "$svm_bit" = "1" ]; then verdict_ok=1; fi
-        echo "  Plain bhyve guests:    $([ $svm_bit -eq 1 ] && [ -n "$svm_line" ] && echo OK || echo INVESTIGATE)"
-        echo "  nSVM (nested) guests:  $([ -z "$svm_line" ] && echo INVESTIGATE - SVM leaf missing || echo VIABLE - inner SVM supported; L0 hypervisor must allow it)"
+        if [ "$svm_bit" = "1" ] && [ -n "$svm_line" ]; then
+            verdict_ok=1
+            echo "  Plain bhyve guests:    OK (SVM leaf + NAsids present)"
+        else
+            echo "  Plain bhyve guests:    INVESTIGATE - SVM bit unset or leaf missing"
+        fi
+        if [ -n "$nested_svm" ]; then
+            case "$nested_svm" in
+                2)
+                    avic_note=$([ "$has_avic" = "1" ] && echo "AVIC present" || echo "AVIC absent")
+                    echo "  nSVM (nested) guests:  VIABLE (hw.vmm.nested.svm=2; $avic_note; runtime says all gates clear)"
+                    verdict_ok=1
+                    ;;
+                1)
+                    echo "  nSVM (nested) guests:  L0 conflict - VMware/etc. filters (hw.vmm.nested.svm=1)"
+                    ;;
+                0)
+                    echo "  nSVM (nested) guests:  BLOCKED - host CPU lacks nested SVM (hw.vmm.nested.svm=0)"
+                    ;;
+                *)
+                    echo "  nSVM (nested) guests:  INVESTIGATE - hw.vmm.nested.svm=$nested_svm"
+                    ;;
+            esac
+        elif [ -z "$svm_line" ]; then
+            echo "  nSVM (nested) guests:  INVESTIGATE - SVM leaf missing (runtime unknown)"
+        else
+            echo "  nSVM (nested) guests:  VIABLE - inner SVM supported (runtime unknown; L0 hypervisor must allow it)"
+            verdict_ok=1
+        fi
         ;;
 esac
 [ "$verdict_ok" = "0" ] && echo "  Plain bhyve guests:  NOT VIABLE - silicon vendor/model not in support matrix."
