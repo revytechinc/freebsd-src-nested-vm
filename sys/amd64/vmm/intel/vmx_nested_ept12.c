@@ -7,9 +7,16 @@
  * T23: EPT12 nested translation.  L1's EPT12 root pointer is
  * installed by VMWRITE to the EPT_POINTER_FULL field; L0 uses
  * EPT12 as the inner page table for L2 (L2 GPA -> EPT12 -> L1 GPA
- * -> EPT -> HPA).
+ * -> EPT (L0) -> HPA).
  *
- * Original BSD code; Intel SDM Vol 3 §30.4 / §29 is referenced
+ * The EPT12 page-table format follows Intel SDM Vol 3 §29.  The
+ * L0-side walk goes through up to four 4KB tables of 8-byte
+ * entries: PML4 -> PDPT -> PD -> PT, indexed by GPA bits 47:39 /
+ * 38:30 / 29:21 / 20:12.  Each non-leaf PTE carries the physical
+ * address of the next-level table; a leaf PTE carries the
+ * translated HPA.
+ *
+ * Original BSD code; Intel SDM Vol 3 §29 / §30.4 are referenced
  * for the EPTP encoding only.
  */
 
@@ -22,6 +29,7 @@
 #include <machine/cpufunc.h>
 #include <machine/vmm.h>
 
+#include <dev/vmm/vmm_ktr.h>
 #include <dev/vmm/vmm_vm.h>
 
 #include "vmm_host.h"
@@ -29,6 +37,48 @@
 #include "vmx.h"
 #include "vmx_cpufunc.h"
 #include "vmx_nested.h"
+
+extern int vmm_nested_enable;
+
+/*
+ * Intel SDM Vol 3 §29.3 EPT entry format.  Bit layout of each
+ * 8-byte EPT PTE / PDPTE / PDE:
+ *   bit 0    - Read access
+ *   bit 1    - Write access
+ *   bit 2    - Execute access
+ *   bit 7:3  - EPT memory type (UC/WC/WT/WP/WB)
+ *   bit 5    - Ignore PAT (for leaf entries with 2MB / 1GB pages)
+ *   bit 6    - Page size (0 = 4KB, 1 = 2MB / 1GB at PDPTE / PDE)
+ *   bits 11:8 - Available to software
+ *   bits M:12 - Physical address of next-level table or final HPA
+ * where M depends on the level (51:12 for PML4E / PDPTE, etc).
+ *
+ * The PML4E / PDPTE / PDE physical-address widths are 51:12 with
+ * bits 11:0 holding flags; the leaf PT physical-address bits are
+ * 51:12 with bits 11:0 holding flags and 20:12 holding the
+ * page-offset.  We therefore AND the entry with 0x000ffffffffff000
+ * to extract the pointer/HPA.
+ */
+#define	EPT_PTE_MASK		0x000ffffffffff000UL
+#define	EPT_PTE_R		(1U << 0)
+#define	EPT_PTE_W		(1U << 1)
+#define	EPT_PTE_X		(1U << 2)
+#define	EPT_PTE_LARGE		(1U << 7)
+
+/*
+ * EPT PML4 / PDPT / PD / PT indices, derived from the L2 GPA.
+ * The architecture has 4 levels each indexing 512 entries
+ * (9 bits per level), totalling 36 bits of address space.
+ */
+#define	EPT_IDX_PML4(gpa)	(((gpa) >> 39) & 0x1ff)
+#define	EPT_IDX_PDPT(gpa)	(((gpa) >> 30) & 0x1ff)
+#define	EPT_IDX_PD(gpa)		(((gpa) >> 21) & 0x1ff)
+#define	EPT_IDX_PT(gpa)		(((gpa) >> 12) & 0x1ff)
+
+/*
+ * Maximum depth of an EPT walk: 4 levels.
+ */
+#define	EPT_WALK_MAX_LEVELS	4
 
 void
 vmx_nested_ept12_install(struct vmx_vcpu *vcpu, uint64_t ept12_pte)
@@ -41,12 +91,142 @@ vmx_nested_ept12_install(struct vmx_vcpu *vcpu, uint64_t ept12_pte)
 	ns->ept12_pte = ept12_pte;
 }
 
+/*
+ * Walk L1's 4-level EPT12 to translate the L2 GPA into a L1 GPA.
+ * Each table walk holds a single 4KB mapping via vm_gpa_hold;
+ * on success the next-level HPA is derived from the held
+ * mapping's physical address (vtophys) and the GPA index.
+ *
+ * Returns VM_SUCCESS and writes *out_l1_gpa on success.  On
+ * failure returns -1 and leaves *out_l1_gpa untouched.  The
+ * failure cases are:
+ *   - L1 EPTP not installed (ept12_pte == 0)
+ *   - any level's PTE has the architecture-disallowed format
+ *   - vm_gpa_hold fails (L1 page is unmapped / has been freed)
+ *
+ * The architecture-defined "large page" entries (2MB PDE,
+ * 1GB PDPTE) are not currently exercised by any wave-4
+ * handler, so this walker treats them as a translation hit
+ * with the GPA low bits preserved.
+ */
 int
 vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
     uint64_t *out_l1_gpa)
 {
+	struct vmx_nested_state *ns;
+	uint64_t ept_root;
+	uint64_t gpa;
+	uint64_t hpa;
+	uint64_t pte;
+	uint64_t table_pa;
+	void *mapping;
+	void *cookie;
+	int level;
 
-	/* TODO(mvp): real EPT12 walk.  Identity-map fallback for now. */
-	*out_l1_gpa = l2_gpa;
-	return (VM_SUCCESS);
+	ns = vmx_nested_state(vcpu);
+	if (ns == NULL)
+		return (-1);
+	if (out_l1_gpa == NULL)
+		return (-1);
+
+	ept_root = ns->ept12_pte;
+	if ((ept_root & EPT_PTE_MASK) == 0)
+		return (-1);
+
+	/*
+	 * The L1 EPTP holds the physical address of the PML4 table
+	 * in bits 51:12.  We interpret it as a L1 GPA so the L0
+	 * vmm_gpa_hold() helper can resolve it to a host mapping
+	 * (the L1 EPT tables live in L1's physical memory).
+	 */
+	table_pa = ept_root & EPT_PTE_MASK;
+	gpa = table_pa;
+
+	for (level = 0; level < EPT_WALK_MAX_LEVELS; level++) {
+		mapping = vm_gpa_hold(vcpu->vcpu, gpa, sizeof(uint64_t),
+		    VM_PROT_READ, &cookie);
+		if (mapping == NULL) {
+			VMX_CTR2(vcpu,
+			    "nested EPT12 walk: vm_gpa_hold failed at level=%d gpa=%#lx",
+			    level, (unsigned long)gpa);
+			return (-1);
+		}
+
+		uint64_t entry;
+		memcpy(&entry, mapping, sizeof(entry));
+		vm_gpa_release(cookie);
+
+		uint64_t idx;
+		switch (level) {
+		case 0:
+			idx = EPT_IDX_PML4(l2_gpa);
+			break;
+		case 1:
+			idx = EPT_IDX_PDPT(l2_gpa);
+			break;
+		case 2:
+			idx = EPT_IDX_PD(l2_gpa);
+			break;
+		default:
+			idx = EPT_IDX_PT(l2_gpa);
+			break;
+		}
+
+		memcpy(&pte, (uint8_t *)&entry + (idx * sizeof(uint64_t)),
+		    sizeof(pte));
+		if ((pte & (EPT_PTE_R | EPT_PTE_W | EPT_PTE_X)) == 0) {
+			VMX_CTR3(vcpu, "nested EPT12 walk: empty PTE at "
+			    "level=%d idx=%lu pte=%#lx",
+			    level, (unsigned long)idx, (unsigned long)pte);
+			return (-1);
+		}
+
+		/*
+		 * Leaf detection: a non-zero "large" bit at the
+		 * current level means a 2MB PDE (level 2) or 1GB
+		 * PDPTE (level 1).  The PML4E never carries the
+		 * large bit.
+		 */
+		if ((level == 1 || level == 2) &&
+		    (pte & EPT_PTE_LARGE) != 0) {
+			uint64_t page_off;
+
+			if (level == 1)
+				page_off = l2_gpa & 0x3fffffffUL;
+			else
+				page_off = l2_gpa & 0x1fffffUL;
+			hpa = (pte & EPT_PTE_MASK) | page_off;
+			*out_l1_gpa = hpa;
+			VMX_CTR3(vcpu, "nested EPT12 large: level=%d "
+			    "hpa=%#lx pte=%#lx",
+			    level, (unsigned long)hpa, (unsigned long)pte);
+			return (VM_SUCCESS);
+		}
+
+		/*
+		 * Non-leaf: the entry points to the next-level
+		 * table at bits 51:12.
+		 */
+		if (level == EPT_WALK_MAX_LEVELS - 1) {
+			/*
+			 * Reached the leaf level without hitting
+			 * a large-page indicator — the PTE
+			 * describes a 4KB leaf.
+			 */
+			uint64_t page_off;
+
+			page_off = l2_gpa & 0xfffUL;
+			hpa = (pte & EPT_PTE_MASK) | page_off;
+			*out_l1_gpa = hpa;
+			VMX_CTR3(vcpu, "nested EPT12 leaf: level=%d "
+			    "hpa=%#lx pte=%#lx",
+			    level, (unsigned long)hpa, (unsigned long)pte);
+			return (VM_SUCCESS);
+		}
+
+		gpa = pte & EPT_PTE_MASK;
+	}
+
+	/* Unreachable. */
+	return (-1);
 }
