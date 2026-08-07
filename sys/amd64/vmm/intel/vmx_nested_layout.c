@@ -150,17 +150,12 @@ vmcs12_lookup(uint32_t encoding)
 }
 
 const struct vmcs12_layout *
-vmcs12_iterate(u_int *cursor)
+vmcs12_at(u_int index)
 {
-	u_int i;
 
-	if (cursor == NULL)
+	if (index >= vmcs12_fields_count)
 		return (NULL);
-	i = *cursor;
-	if (i >= vmcs12_fields_count)
-		return (NULL);
-	*cursor = i + 1;
-	return (&vmcs12_fields_table[i]);
+	return (&vmcs12_fields_table[index]);
 }
 
 int

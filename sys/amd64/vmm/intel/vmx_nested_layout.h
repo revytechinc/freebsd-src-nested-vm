@@ -85,13 +85,11 @@ int	vmcs12_write_field(struct vmcs12 *vmcs12, uint32_t encoding,
 	    uint64_t val);
 
 /*
- * Iterate over the descriptor table.  Callers pass an opaque
- * cursor (initialised to 0); the function returns the next
- * descriptor and advances the cursor, returning NULL when the
- * table is exhausted.  Used by the shadow apply step to walk
- * every supported encoding.
+ * Index-based accessor: returns the descriptor at 'index' or
+ * NULL if 'index' is out of range.  Used by the shadow apply
+ * and check steps to walk the supported encodings.
  */
-const struct vmcs12_layout *vmcs12_iterate(u_int *cursor);
+const struct vmcs12_layout *vmcs12_at(u_int index);
 
 #endif	/* _KERNEL */
 
