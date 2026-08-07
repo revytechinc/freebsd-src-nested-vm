@@ -120,8 +120,11 @@ vmx_nested_invvpid_handle(struct vmx_vcpu *vcpu, uint64_t type, uint16_t vpid,
  *  5. release the hold and return 0 (caller advances L1 RIP).
  *
  * If the descriptor GPA is unreadable (vm_gpa_hold fails) we
- * inject #GP into L1 so the L1 OS can recover (e.g. a VMM that
- * lost an EPT page in a hot-unplug scenario).
+ * inject #GP into L1 and return 0 (handled) so the L1 OS sees
+ * the architectural fault rather than a fatal VMM path.
+ * Returning -1 here would let the exit bubble up to userland
+ * as VM_EXITCODE_VMINSN, which L1 cannot recover from with a
+ * matching #GP.
  */
 int
 vmx_nested_exit_invept(struct vmx_vcpu *vcpu)
@@ -155,7 +158,8 @@ vmx_nested_exit_invept(struct vmx_vcpu *vcpu)
 	if (mapping == NULL) {
 		VMX_CTR1(vcpu, "nested INVEPT: vm_gpa_hold failed for "
 		    "desc=%#lx", (unsigned long)desc_gpa);
-		return (-1);
+		vm_inject_gp(vcpu->vcpu);
+		return (0);
 	}
 	memcpy(&desc, mapping, sizeof(desc));
 	vm_gpa_release(cookie);
@@ -177,6 +181,10 @@ vmx_nested_exit_invept(struct vmx_vcpu *vcpu)
  * vmx_nested_exit_invept() with the L1 INVVPID descriptor
  * layout.  The L1-stated type is in guest_rax, the descriptor
  * GPA is in the VM-exit qualification.
+ *
+ * On a failed descriptor hold we inject #GP into L1 and return
+ * 0 (handled), consistent with the INVEPT path — see the long
+ * comment on vmx_nested_exit_invept() for the rationale.
  */
 int
 vmx_nested_exit_invvpid(struct vmx_vcpu *vcpu)
@@ -209,7 +217,8 @@ vmx_nested_exit_invvpid(struct vmx_vcpu *vcpu)
 	if (mapping == NULL) {
 		VMX_CTR1(vcpu, "nested INVVPID: vm_gpa_hold failed for "
 		    "desc=%#lx", (unsigned long)desc_gpa);
-		return (-1);
+		vm_inject_gp(vcpu->vcpu);
+		return (0);
 	}
 	memcpy(&desc, mapping, sizeof(desc));
 	vm_gpa_release(cookie);
