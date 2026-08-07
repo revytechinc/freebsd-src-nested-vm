@@ -5,11 +5,23 @@
  * All rights reserved.
  *
  * T23b: nested INVEPT / INVVPID emulation.  When L1 executes
- * INVEPT/INVVPID we translate the L1 EPTP/VPID through to the L0
- * INVEPT/INVVPID so the L0 MMU caches are invalidated.
+ * INVEPT/INVVPID we translate the L1 EPTP/VPID through to the
+ * L0 INVEPT/INVVPID so the L0 MMU caches are invalidated.
  *
- * Original BSD code; Intel SDM Vol 3 §30.7 is referenced for the
- * INVEPT/INVVPID exit semantics only.
+ * Both instructions follow the same pattern (Intel SDM Vol 3
+ * §30.7):
+ *  - the L1-stated operand is a memory descriptor pointed to
+ *    by the VM-exit instruction info / VM-exit qualification
+ *    field (the L1 operand is m64 in both cases);
+ *  - the descriptor is a 16-byte struct (4 reserved, 4 EPTP /
+ *    4 reserved, 8 reserved for INVEPT; 2 VPID, 2 reserved,
+ *    4 reserved, 8 linear address for INVVPID);
+ *  - the type is the L1-stated type byte in low 64 bits of the
+ *    L1 RAX register (per SDM §30.7 INVEPT and §30.7 INVVPID);
+ *  - the L1-stated EPTP / VPID lives in the descriptor.
+ *
+ * Original BSD code; Intel SDM Vol 3 §30.7 is referenced for
+ * the INVEPT/INVVPID exit semantics only.
  */
 
 #include <sys/param.h>
@@ -19,8 +31,10 @@
 #include <vm/pmap.h>
 
 #include <machine/cpufunc.h>
+#include <machine/psl.h>
 #include <machine/vmm.h>
 
+#include <dev/vmm/vmm_ktr.h>
 #include <dev/vmm/vmm_vm.h>
 
 #include "vmm_host.h"
@@ -28,6 +42,32 @@
 #include "vmcs.h"
 #include "vmx.h"
 #include "vmx_nested.h"
+
+extern int vmm_nested_enable;
+
+/*
+ * L1 INVEPT descriptor layout (Intel SDM Vol 3 §30.7 / §30.4).
+ * The descriptor is a 16-byte little-endian struct.
+ */
+struct invept_desc_l1 {
+	uint32_t	_res1;
+	uint32_t	eptp;
+	uint64_t	_res2;
+};
+CTASSERT(sizeof(struct invept_desc_l1) == 16);
+
+/*
+ * L1 INVVPID descriptor layout (Intel SDM Vol 3 §30.7 / §30.4).
+ * The VPID is 16 bits; the linear address is 64 bits; the
+ * reserved fields pad to 16 bytes.
+ */
+struct invvpid_desc_l1 {
+	uint16_t	vpid;
+	uint16_t	_res1;
+	uint32_t	_res2;
+	uint64_t	linear_addr;
+};
+CTASSERT(sizeof(struct invvpid_desc_l1) == 16);
 
 int
 vmx_nested_invept_handle(struct vmx_vcpu *vcpu, uint64_t type, uint64_t eptp)
@@ -61,16 +101,122 @@ vmx_nested_invvpid_handle(struct vmx_vcpu *vcpu, uint64_t type, uint16_t vpid,
 	return (VM_SUCCESS);
 }
 
+/*
+ * Top-level dispatch for EXIT_REASON_INVEPT.  The L1-stated
+ * type is carried in guest_rax; the descriptor GPA is the
+ * VM-exit qualification field (Intel SDM §27.2.1 INVEPT is
+ * m64).  We:
+ *  1. validate the type (SINGLE_CONTEXT or ALL_CONTEXTS);
+ *  2. hold the L1 descriptor page via vm_gpa_hold;
+ *  3. read the EPTP out of the descriptor;
+ *  4. call the L0 INVEPT with the L1-stated EPTP and type;
+ *  5. release the hold and return 0 (caller advances L1 RIP).
+ *
+ * If the descriptor GPA is unreadable (vm_gpa_hold fails) we
+ * inject #GP into L1 so the L1 OS can recover (e.g. a VMM that
+ * lost an EPT page in a hot-unplug scenario).
+ */
 int
 vmx_nested_exit_invept(struct vmx_vcpu *vcpu)
 {
+	struct vmx_nested_state *ns;
+	struct vmxctx *vmxctx;
+	struct invept_desc_l1 desc;
+	uint64_t desc_gpa;
+	uint64_t type;
+	void *mapping;
+	void *cookie;
+	int rc;
 
-	return (-1);
+	ns = vmx_nested_state(vcpu);
+	if (ns == NULL)
+		return (-1);
+
+	vmxctx = &vcpu->ctx;
+	desc_gpa = vmcs_exit_qualification();
+	type = vmxctx->guest_rax & 0xffffffffUL;
+
+	if ((type != INVEPT_TYPE_SINGLE_CONTEXT) &&
+	    (type != INVEPT_TYPE_ALL_CONTEXTS)) {
+		VMX_CTR1(vcpu, "nested INVEPT: invalid type %#lx",
+		    (unsigned long)type);
+		return (-1);
+	}
+
+	mapping = vm_gpa_hold(vcpu->vcpu, desc_gpa, sizeof(desc), VM_PROT_READ,
+	    &cookie);
+	if (mapping == NULL) {
+		VMX_CTR1(vcpu, "nested INVEPT: vm_gpa_hold failed for "
+		    "desc=%#lx", (unsigned long)desc_gpa);
+		return (-1);
+	}
+	memcpy(&desc, mapping, sizeof(desc));
+	vm_gpa_release(cookie);
+
+	rc = vmx_nested_invept_handle(vcpu, type, desc.eptp);
+	if (rc != 0) {
+		VMX_CTR1(vcpu, "nested INVEPT: handle failed type=%#lx",
+		    (unsigned long)type);
+		return (-1);
+	}
+
+	VMX_CTR2(vcpu, "nested INVEPT: type=%#lx eptp=%#x",
+	    (unsigned long)type, (unsigned)desc.eptp);
+	return (0);
 }
 
+/*
+ * Top-level dispatch for EXIT_REASON_INVVPID.  Mirrors
+ * vmx_nested_exit_invept() with the L1 INVVPID descriptor
+ * layout.  The L1-stated type is in guest_rax, the descriptor
+ * GPA is in the VM-exit qualification.
+ */
 int
 vmx_nested_exit_invvpid(struct vmx_vcpu *vcpu)
 {
+	struct vmx_nested_state *ns;
+	struct vmxctx *vmxctx;
+	struct invvpid_desc_l1 desc;
+	uint64_t desc_gpa;
+	uint64_t type;
+	void *mapping;
+	void *cookie;
+	int rc;
 
-	return (-1);
+	ns = vmx_nested_state(vcpu);
+	if (ns == NULL)
+		return (-1);
+
+	vmxctx = &vcpu->ctx;
+	desc_gpa = vmcs_exit_qualification();
+	type = vmxctx->guest_rax & 0xffffffffUL;
+
+	if (type > INVVPID_TYPE_ALL_CONTEXTS) {
+		VMX_CTR1(vcpu, "nested INVVPID: invalid type %#lx",
+		    (unsigned long)type);
+		return (-1);
+	}
+
+	mapping = vm_gpa_hold(vcpu->vcpu, desc_gpa, sizeof(desc), VM_PROT_READ,
+	    &cookie);
+	if (mapping == NULL) {
+		VMX_CTR1(vcpu, "nested INVVPID: vm_gpa_hold failed for "
+		    "desc=%#lx", (unsigned long)desc_gpa);
+		return (-1);
+	}
+	memcpy(&desc, mapping, sizeof(desc));
+	vm_gpa_release(cookie);
+
+	rc = vmx_nested_invvpid_handle(vcpu, type, desc.vpid,
+	    desc.linear_addr);
+	if (rc != 0) {
+		VMX_CTR1(vcpu, "nested INVVPID: handle failed type=%#lx",
+		    (unsigned long)type);
+		return (-1);
+	}
+
+	VMX_CTR3(vcpu, "nested INVVPID: type=%#lx vpid=%u gla=%#lx",
+	    (unsigned long)type, (unsigned)desc.vpid,
+	    (unsigned long)desc.linear_addr);
+	return (0);
 }
