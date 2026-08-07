@@ -46,9 +46,9 @@ extern int vmm_nested_enable;
  *   bit 0    - Read access
  *   bit 1    - Write access
  *   bit 2    - Execute access
- *   bit 7:3  - EPT memory type (UC/WC/WT/WP/WB)
- *   bit 5    - Ignore PAT (for leaf entries with 2MB / 1GB pages)
- *   bit 6    - Page size (0 = 4KB, 1 = 2MB / 1GB at PDPTE / PDE)
+ *   bit 5    - Accessed flag (PDPTE / PDE)
+ *   bit 6    - Ignore PAT (for leaf entries with 2MB / 1GB pages)
+ *   bit 7    - Page size (0 = 4KB, 1 = 2MB / 1GB at PDPTE / PDE)
  *   bits 11:8 - Available to software
  *   bits M:12 - Physical address of next-level table or final HPA
  * where M depends on the level (51:12 for PML4E / PDPTE, etc).
