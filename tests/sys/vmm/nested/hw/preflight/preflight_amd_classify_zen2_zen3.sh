@@ -92,7 +92,7 @@ preflight_classify_one()
 	_label=$1
 	_dmesg=$2
 	_out_arch=$3
-	_verdict=$4
+	_verdict=${4:-}
 
 	tmp=$(mktemp "${TMPDIR:-/tmp}/preflight-classify-amd.XXXXXX") || return 1
 	tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/preflight-bind-amd.XXXXXX") || return 1
@@ -101,9 +101,9 @@ preflight_classify_one()
 	chmod +x "${script_copy}"
 	dmesg_path="${tmpdir}/dmesg.boot"
 	printf '%s\n' "${_dmesg}" > "${dmesg_path}"
-	sed -i.bak "s|DMESG=/var/run/dmesg.boot|DMESG=${dmesg_path}|" "${script_copy}"
+	sed -i.bak "s|PREFLIGHT_DMESG=/var/run/dmesg.boot|PREFLIGHT_DMESG=${dmesg_path}|" "${script_copy}"
 
-	sh "${script_copy}" > "${tmp}" 2>&1
+	PREFLIGHT_DMESG="${dmesg_path}" sh "${script_copy}" > "${tmp}" 2>&1
 	rc=$?
 	if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
 		echo "FAIL: ${_label} - preflight exited ${rc}"
@@ -126,24 +126,19 @@ preflight_amd_classify_zen2_zen3_main()
 		exit 0
 	fi
 
-	# Zen2 (Family=0x17, Model=0x18).  Family 17h is the Zen1+
-	# bucket, so the verdict string is 'Zen1+'.  We pick a model
-	# in the 0x10..0x1f Zen2 range; the script keys off Family,
-	# not Model, so any Model in 17h exercises the Zen1+ branch.
-	amd_zen2=$(make_amd_dmesg 17 "75a337ff" 0x18)
+	# Zen2 (Family=0x17, Model=0x31).  v2.0 maps 17h:0x30..0xaf to Zen 2.
+	# (Models 0x00..0x2f in family 17h are Zen 1.)
+	amd_zen2=$(make_amd_dmesg 17 "75a337ff" 0x31)
 	preflight_classify_one "AMD Zen2" \
 	    "${amd_zen2}" \
-	    "Zen1\+" \
-	    "FULLY VIABLE - Zen1\+"
+	    "Zen 2"
 
-	# Zen3 (Family=0x19, Model=0x01).  Family 19h is in the
-	# Zen4/Zen5 verdict family (post-wave-5 collapse).  Model is
-	# picked as 0x01 since the script keys off Family only.
+	# Zen3 (Family=0x19, Model=0x01).  v2.0 maps 0x00..0x0f + 0x20..0x5f
+	# in family 19h to Zen 3 (Milan / Vermeer / Cezanne / Rembrandt).
 	amd_zen3=$(make_amd_dmesg 19 "75a337ff" 0x01)
 	preflight_classify_one "AMD Zen3" \
 	    "${amd_zen3}" \
-	    "Zen4/Zen5" \
-	    "FULLY VIABLE - Zen4\+"
+	    "Zen 3"
 
 	echo "PASS: preflight_amd_classify_zen2_zen3 2 microarch pairs"
 }

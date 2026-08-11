@@ -58,17 +58,38 @@ preflight_unit_help_main()
 		exit 0
 	fi
 
-	out=$(sh "${PREFLIGHT}" 2>&1) || rc=$?
+	# Run preflight against the host's real dmesg.boot if readable,
+	# otherwise fall back to a synthetic fixture so the test still works
+	# on non-FreeBSD CI hosts.
+	if [ -r /var/run/dmesg.boot ] && grep -q '^CPU:' /var/run/dmesg.boot 2>/dev/null; then
+		out=$(sh "${PREFLIGHT}" 2>&1) || rc=$?
+	else
+		tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/preflight-help.XXXXXX") || exit 1
+		script_copy="${tmpdir}/preflight.sh"
+		cp "${PREFLIGHT}" "${script_copy}"
+		chmod +x "${script_copy}"
+		dmesg_path="${tmpdir}/dmesg.boot"
+		cat > "${dmesg_path}" <<'DMESG'
+CPU: Intel(R) Core(TM) synthetic
+  Origin="GenuineIntel"  Id=0x806d1  Family=0x6  Model=0x8d  Stepping=1
+  Features=0xbfebfbff
+  Features2=0x7ffafbff
+  Structured Extended Features=0xf3bfa7eb
+DMESG
+		sed -i.bak "s|PREFLIGHT_DMESG=/var/run/dmesg.boot|PREFLIGHT_DMESG=${dmesg_path}|" "${script_copy}"
+		out=$(PREFLIGHT_DMESG="${dmesg_path}" sh "${script_copy}" 2>&1) || rc=$?
+		rm -rf "${tmpdir}"
+	fi
 	rc=${rc:-0}
 
-	if ! printf '%s\n' "${out}" | grep -q "vmm.preflight  v0.4"; then
+	if ! printf '%s\n' "${out}" | grep -q "vmm.preflight  v2.0"; then
 		echo "FAIL: banner line not found in preflight output"
 		printf '%s\n' "${out}" | head -20
 		exit 1
 	fi
 
-	if ! printf '%s\n' "${out}" | grep -q '^--- Verdict ---'; then
-		echo "FAIL: --- Verdict --- section missing"
+	if ! printf '%s\n' "${out}" | grep -qE '^---------- verdict'; then
+		echo "FAIL: verdict section missing"
 		printf '%s\n' "${out}" | tail -20
 		exit 1
 	fi
@@ -81,7 +102,7 @@ preflight_unit_help_main "$@"
 atf_test_case "preflight_unit_help"
 preflight_unit_help_head()
 {
-	atf_set "descr" "preflight.sh runs without root/vmm and prints the v0.4 banner + Verdict section"
+	atf_set "descr" "preflight.sh runs without root/vmm and prints the v2.0 banner + Verdict section"
 }
 preflight_unit_help_body()
 {

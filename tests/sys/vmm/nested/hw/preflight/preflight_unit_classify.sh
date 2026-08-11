@@ -127,10 +127,11 @@ preflight_classify_one()
 	chmod +x "${script_copy}"
 	dmesg_path="${tmpdir}/dmesg.boot"
 	printf '%s\n' "${_dmesg}" > "${dmesg_path}"
-	# Patch the DMESG path inside the copy.
-	sed -i.bak "s|DMESG=/var/run/dmesg.boot|DMESG=${dmesg_path}|" "${script_copy}"
+	# v2.0 prefers PREFLIGHT_DMESG env var; fall back to sed patch if
+	# the variable-name form was retained.
+	sed -i.bak "s|PREFLIGHT_DMESG=/var/run/dmesg.boot|PREFLIGHT_DMESG=${dmesg_path}|" "${script_copy}"
 
-	sh "${script_copy}" > "${tmp}" 2>&1
+	PREFLIGHT_DMESG="${dmesg_path}" sh "${script_copy}" > "${tmp}" 2>&1
 	rc=$?
 	if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
 		echo "FAIL: ${_label} - preflight exited ${rc}"
@@ -169,19 +170,20 @@ preflight_unit_classify_main()
 	    "${amd_bulldozer}" \
 	    "Bulldozer"
 
-	# AMD Zen1+ (Family 17h): FULLY VIABLE path.
+	# AMD Zen1 (Family 17h): v2.0 maps 0x00..0x2f + 0x50..0x5f to Zen 1.
 	amd_zen=$(make_amd_dmesg 17 "  SVM: NP,NRIP,VClean,AFlush,DAssist,NAsids=64" "75a337ff")
-	preflight_classify_one "AMD Zen1+" \
+	preflight_classify_one "AMD Zen1" \
 	    "${amd_zen}" \
-	    "Zen1+"
+	    "Zen 1"
 
 	# AMD Zen5 (Family 1ah): FULLY VIABLE path; the prior test used
 	# Family=0x12 (Llano) under the bug-fallback, so this case now
-	# exercises the corrected effective-family arithmetic.
+	# exercises the corrected effective-family arithmetic. v2.0 also
+	# adds a Zen-5 specific microarchitecture label.
 	amd_zen5=$(make_amd_dmesg 1a "  SVM: NP,NRIP,VClean,AFlush,DAssist,AVIC,NAsids=512" "75a337ff")
 	preflight_classify_one "AMD Zen5" \
 	    "${amd_zen5}" \
-	    "Zen4/Zen5"
+	    "Zen 5"
 
 	echo "PASS: preflight_unit_classify 5 CPU microarch pairs"
 }

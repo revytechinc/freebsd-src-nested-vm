@@ -20,6 +20,9 @@ ${PACKAGE}FILES+=	preflight_unit_help.sh \
 			preflight_unit_test_module.sh \
 			preflight_vmcs_shadowing_scoped.sh \
 			preflight_vmcs12_state_transitions.sh \
+			preflight_arch_output_test.sh \
+			preflight_arch_consistency_test.sh \
+			preflight_critical_bugfix_test.sh \
 			run_preflight_tests.sh
 
 .include <bsd.test.mk>

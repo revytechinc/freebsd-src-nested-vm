@@ -104,8 +104,8 @@ assert_preflight_prints_svm_line()
 	if [ ! -r "${PREFLIGHT}" ]; then
 		return 0
 	fi
-	if ! grep -q '0x80000001 ECX (SVM?)' "${PREFLIGHT}"; then
-		echo "FAIL: preflight.sh does not print '0x80000001 ECX (SVM?)' line"
+	if ! grep -q 'SVM (0x80000001:ECX\[2\])' "${PREFLIGHT}"; then
+		echo "FAIL: preflight.sh does not print 'SVM (0x80000001:ECX\[2\])' line"
 		exit 1
 	fi
 }

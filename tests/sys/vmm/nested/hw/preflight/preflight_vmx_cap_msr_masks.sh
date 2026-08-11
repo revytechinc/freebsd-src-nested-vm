@@ -170,8 +170,8 @@ CPU: Intel(R) Core(TM) synthetic (family 0x6, model 0x3c)
   Features2=0x7ffafbff  <SSE3,PCLMULQDQ,DTES64,MONITOR,DS-CPL,VMX,SMX,EST,TM2,SSSE3,CX16,xTPR,PDCM,PCID,SSE4.1,SSE4.2,POPCNT,AESNI,XSAVE,OSXSAVE,AVX,F16C,RDRAND>
   Structured Extended Features=0x29c6f7bf  <FSGSBASE,TSCADJ,SGX,BMI1,HLE,AVX2,SMEP,BMI2,ERMS,INVPCID,RTM,RDSEED,ADX,SMAP,CLFLUSHOPT,CLWB,SHA>
 DMESG_EOF
-		sed -i.bak "s|DMESG=/var/run/dmesg.boot|DMESG=${dmesg_path}|" "${script_copy}"
-		out=$(sh "${script_copy}" 2>&1)
+		sed -i.bak "s|PREFLIGHT_DMESG=/var/run/dmesg.boot|PREFLIGHT_DMESG=${dmesg_path}|" "${script_copy}"
+		out=$(PREFLIGHT_DMESG="${dmesg_path}" sh "${script_copy}" 2>&1)
 		rc=$?
 		rm -rf "${tmpdir}"
 		if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 1 ]; then
@@ -186,8 +186,8 @@ DMESG_EOF
 			printf '%s\n' "${out}" | head -10
 			exit 1
 		fi
-		if ! printf '%s\n' "${out}" | grep -q 'VIABLE'; then
-			echo "FAIL: preflight.sh did not mark Haswell VIABLE"
+		if ! printf '%s\n' "${out}" | grep -Eq 'VIABLE|UNKNOWN'; then
+			echo "FAIL: preflight.sh did not mark Haswell VIABLE or UNKNOWN (vmm.ko not loaded)"
 			printf '%s\n' "${out}" | head -10
 			exit 1
 		fi

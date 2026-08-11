@@ -97,9 +97,9 @@ preflight_classify_one()
 	chmod +x "${script_copy}"
 	dmesg_path="${tmpdir}/dmesg.boot"
 	printf '%s\n' "${_dmesg}" > "${dmesg_path}"
-	sed -i.bak "s|DMESG=/var/run/dmesg.boot|DMESG=${dmesg_path}|" "${script_copy}"
+	sed -i.bak "s|PREFLIGHT_DMESG=/var/run/dmesg.boot|PREFLIGHT_DMESG=${dmesg_path}|" "${script_copy}"
 
-	sh "${script_copy}" > "${tmp}" 2>&1
+	PREFLIGHT_DMESG="${dmesg_path}" sh "${script_copy}" > "${tmp}" 2>&1
 	rc=$?
 	if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
 		echo "FAIL: ${_label} - preflight exited ${rc}"
@@ -119,20 +119,19 @@ preflight_nested_classify_skylake_main()
 		exit 0
 	fi
 
-	# Skylake (Family=6, Model=0x5e).  The wave-5 microarch table
-	# must classify 6.5e as 'Skylake (6th gen)' and mark the nVMX
-	# verdict VIABLE.
+	# Skylake (Family=6, Model=0x5e).  v2.0 classifies as
+	# 'Skylake (6th gen client/mobile)' per the expanded model table.
 	intel_skl=$(make_intel_dmesg 6 5 14)
 	preflight_classify_one "Intel Skylake" \
 	    "${intel_skl}" \
-	    "Skylake \(6th gen\)"
+	    "Skylake"
 
 	# Kaby Lake (Family=6, Model=0x8e).  Maps to 6.8e -> 'Kaby
 	# Lake (7th gen)' with VIABLE verdict (modhi 8 is >= 4).
 	intel_kbl=$(make_intel_dmesg 6 8 14)
 	preflight_classify_one "Intel Kaby Lake" \
 	    "${intel_kbl}" \
-	    "Kaby Lake \(7th gen\)"
+	    "Kaby/Coffee"
 
 	# Coffee Lake (Family=6, Model=0x9e).  Maps to 6.9e which
 	# the preflight table groups with Kaby Lake (the 6.9e|
@@ -141,15 +140,14 @@ preflight_nested_classify_skylake_main()
 	intel_cfl=$(make_intel_dmesg 6 9 14)
 	preflight_classify_one "Intel Coffee Lake" \
 	    "${intel_cfl}" \
-	    "Kaby Lake \(7th gen\)"
+	    "Kaby/Coffee"
 
-	# Comet / Ice Lake (Family=6, Model=0xa5).  Maps to 6.a5
-	# -> 'Comet / Ice Lake (10th gen)'.  This is the actual
-	# 10th-gen branch in the preflight table.
+	# Comet / Ice Lake (Family=6, Model=0xa5).  v2.0 correctly
+	# classifies 0xa5/0xa6 as Comet Lake only (audit High-6 fix).
 	intel_cml=$(make_intel_dmesg 6 10 5)
 	preflight_classify_one "Intel Comet Lake" \
 	    "${intel_cml}" \
-	    "Comet / Ice Lake \(10th gen\)"
+	    "Comet Lake"
 
 	echo "PASS: preflight_nested_classify_skylake 4 microarch pairs"
 }
