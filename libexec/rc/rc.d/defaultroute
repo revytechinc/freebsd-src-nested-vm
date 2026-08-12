@@ -1,0 +1,85 @@
+#!/bin/sh
+#
+# Wait for the default route to be up if DHCPv4 or IPv6 SLAAC is in use
+#
+#
+
+# PROVIDE: defaultroute
+# REQUIRE: devd netif stf
+# KEYWORD: nojailvnet
+
+. /etc/rc.subr
+. /etc/network.subr
+
+name="defaultroute"
+desc="Setup default router"
+start_cmd="defaultroute_start"
+stop_cmd=":"
+
+# Does any interface have a carrier?
+defaultroute_carrier()
+{
+	local carrier nocarrier
+
+	carrier=1
+	for _if in ${dhcp_interfaces} ${autoconf_interfaces}; do
+		output=`/sbin/ifconfig ${_if}`
+		nocarrier=`expr "${output}" : '.*[[:blank:]]status: \(no carrier\)'`
+		[ -z "${nocarrier}" ] && carrier=0
+	done
+	return ${carrier}
+}
+
+defaultroute_start()
+{
+	local have_inet have_inet6 nl waited
+
+	# Check for IPv4/IPv6 support
+	have_inet=0
+	afexists inet  && have_inet=1
+	have_inet6=0
+	afexists inet6 && have_inet6=1
+	[ ${have_inet} -eq 0 ] && [ ${have_inet6} -eq 0 ] && return
+
+	# Return without waiting if we don't have dhcp or autoconf interfaces,
+	# or if none of them is plugged in.
+	[ ${have_inet}  -ne 0 ] && dhcp_interfaces=`list_net_interfaces dhcp`
+	[ ${have_inet6} -ne 0 ] && autoconf_interfaces=`list_net_interfaces autoconf`
+	[ -z "${dhcp_interfaces}" -a -z "${autoconf_interfaces}" ] && return
+
+	# Wait for a default route
+	waited=0
+	while [ ${waited} -lt ${defaultroute_delay} ]; do
+		[ ${have_inet}  -ne 0 ] && defif=`get_default_if -inet`
+		[ ${have_inet6} -ne 0 ] && defif6=`get_default_if -inet6`
+		if [ -n "${defif}" ] || [ -n "${defif6}" ]; then
+			if [ ${waited} -ne 0 ]; then
+				[ -n "${defif}"  ] && echo -n "($defif)=>inet "
+				[ -n "${defif6}" ] && echo -n "($defif6)=>inet6"
+				nl=1
+			fi
+			break
+		fi
+		if [ ${waited} -eq 0 ]; then
+			echo -n "Waiting ${defaultroute_delay}s for the default route interface: "
+		else
+			echo -n .
+		fi
+		if [ ${waited} -eq ${defaultroute_carrier_delay} ] && ! defaultroute_carrier; then
+			echo -n "(no carrier)"
+			break
+		fi
+		nl=1
+		sleep 1
+		waited=$(($waited + 1))
+	done
+
+	[ -n "$nl" ] && echo
+}
+
+load_rc_config $name
+
+# doesn't make sense to run in a svcj: config setting
+defaultroute_svcj="NO"
+
+run_rc_command "$1"

@@ -1,0 +1,59 @@
+.\"-
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright (c) 2026 The FreeBSD Foundation
+.\"
+.\" This documentation was written by Aymeric Wibo <obiwac@freebsd.org> under
+.\" sponsorship from the FreeBSD Foundation.
+.\"
+.Dd May 26, 2026
+.Dt ZZZ 8
+.Os
+.Sh NAME
+.Nm zzz
+.Nd suspend the system
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+The
+.Nm
+utility suspends the system by writing a suspend transition request to
+.Pa /dev/power .
+.Pp
+The specific sleep method used
+.Pq e.g.\& suspend-to-idle or firmware suspend
+is determined by the
+.Va kern.power.suspend
+sysctl.
+.Sh SEE ALSO
+.Xr acpi 4 ,
+.Xr acpiconf 8
+.Sh HISTORY
+The
+.Nm
+utility first appeared as a shell script in
+.Fx 5.1 .
+It suspended the system by invoking
+.Xr acpiconf 8
+with the suspend state configured via
+.Va hw.acpi.suspend_state ,
+or
+.Xr apm 8
+on systems without ACPI support.
+.Pp
+It was rewritten in C in
+.Fx 16.0
+to use the generic power management interface provided by
+.Pa /dev/power .
+.Sh AUTHORS
+The original
+.Nm
+script was written by
+.An Mark Santcroos Aq Mt marks@ripe.net .
+This manual page was originally written by
+.An Nate Lawson Aq Mt njl@FreeBSD.org .
+Both the current program and manual page were written by
+.An Aymeric Wibo Aq Mt obiwac@FreeBSD.org ,
+under sponsorship from the
+.Fx
+Foundation.

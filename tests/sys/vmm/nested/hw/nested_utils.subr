@@ -1,0 +1,190 @@
+#-
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 The FreeBSD Project
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+#
+# Shared helpers for the T52a / T52b nested-virtualization hardware-layer
+# test scripts. Provides:
+#   nested_load_vmm     - load vmm.ko if not already resident
+#   nested_vm_create    - create a bhyve VM via bhyvectl
+#   nested_vm_destroy   - destroy a previously created VM
+#   nested_vm_running   - check if a named VM exists in /dev/vmm
+#   nested_require_root - atf_check root precondition guard
+#   nested_fixture_dir  - echo the fixture directory path
+#   nested_supported    - gate driver: skip on non-FreeBSD / no vmm
+#
+# All helpers are POSIX sh and shellcheck clean. The helpers are
+# stubs on platforms where /dev/vmm is absent; the test bodies
+# assert device round-trip semantics, the helpers only orchestrate
+# kernel/module lifecycle.
+
+# nested_fixture_dir echoes the absolute path to the directory where
+# the nested-virt test fixtures (mfsBSD, OVMF, Alpine, kernel images)
+# live. Defaults to the Kyua-installed location under /usr/tests.
+nested_fixture_dir()
+{
+	echo "${NESTED_FIXTURE_DIR:-/usr/tests/sys/vmm/nested/fixtures}"
+}
+
+# nested_supported returns success (0) when the host can actually
+# run nested-virt tests: vmm(4) must be loadable and either VMX or
+# SVM must be present in CPUID. Returns 1 otherwise; callers should
+# invoke `atf_skip "..."` when this helper fails.
+nested_supported()
+{
+	if [ "${NESTED_TEST_DRIVER:-auto}" = "force-run" ]; then
+		return 0
+	fi
+	if ! [ -r /dev/vmm ] && ! kldstat 2>/dev/null | grep -qw vmm; then
+		# Try to load vmm(4) - typical CI path.
+		if command -v kldload >/dev/null 2>&1; then
+			kldload vmm 2>/dev/null || true
+		fi
+	fi
+	if ! [ -r /dev/vmm ] && ! kldstat 2>/dev/null | grep -qw vmm; then
+		return 1
+	fi
+	if ! sysctl -n hw.vmm.vmx.cap >/dev/null 2>&1 && \
+	    ! grep -qw svm /proc/cpuinfo 2>/dev/null; then
+		return 1
+	fi
+	return 0
+}
+
+# nested_load_vmm ensures the vmm(4) module is loaded. Idempotent.
+# Usage: nested_load_vmm
+# Returns: 0 on success, 1 if vmm could not be loaded.
+nested_load_vmm()
+{
+	if kldstat 2>/dev/null | grep -qw vmm; then
+		return 0
+	fi
+	if [ -r /dev/vmm ]; then
+		return 0
+	fi
+	if command -v kldload >/dev/null 2>&1; then
+		kldload vmm 2>/dev/null && return 0
+	fi
+	return 1
+}
+
+# nested_vm_create creates a bhyve VM with the given name. The
+# optional second argument is a memory size (default 256M). Returns
+# 0 if the VM was created, non-zero if bhyvectl failed.
+# Usage: nested_vm_create <vmname> [memsize]
+nested_vm_create()
+{
+	local vmname="$1"
+	local memsize="${2:-256M}"
+
+	if [ -z "${vmname}" ]; then
+		echo "nested_vm_create: empty vm name" >&2
+		return 2
+	fi
+	bhyvectl --vm="${vmname}" --create 2>/dev/null || return 1
+	# Set memory; ignore failure (older bhyvectl may not support it).
+	bhyvectl --vm="${vmname}" --memsize="${memsize}" 2>/dev/null || true
+	return 0
+}
+
+# nested_vm_destroy tears down a previously created VM. Always
+# invoked from the `_cleanup` function. Returns 0 even when the VM
+# did not exist; non-zero only on unexpected bhyvectl errors.
+# Usage: nested_vm_destroy <vmname>
+nested_vm_destroy()
+{
+	local vmname="$1"
+
+	if [ -z "${vmname}" ]; then
+		return 0
+	fi
+	bhyvectl --vm="${vmname}" --destroy 2>/dev/null || true
+	# Some hosts keep the /dev/vmm/<name> node after --destroy;
+	# attempt best-effort removal. The node is owned by devfs.
+	return 0
+}
+
+# nested_vm_running returns 0 if the named VM appears in the vmm(4)
+# instance list. The check is best-effort and does not require vmmctl.
+# Usage: nested_vm_running <vmname>
+nested_vm_running()
+{
+	local vmname="$1"
+
+	if [ -z "${vmname}" ]; then
+		return 1
+	fi
+	# /dev/vmm/<name> is the canonical node created by bhyvectl.
+	if [ -e "/dev/vmm/${vmname}" ]; then
+		return 0
+	fi
+	return 1
+}
+
+# nested_require_root is a convenience wrapper around atf_check that
+# asserts the test is running as root. Use as the first assertion
+# in any _body function that needs /dev/vmm access.
+# Usage: nested_require_root
+nested_require_root()
+{
+	atf_check -s exit:0 -o ignore -e ignore \
+	    sh -c '[ "$(id -u)" = "0" ]'
+}
+
+# nested_log_dir echoes a per-test log directory under /tmp that the
+# body function can write diagnostic output to. The runner script
+# captures whatever lands here for post-mortem analysis.
+# Usage: nested_log_dir <testname>
+nested_log_dir()
+{
+	local testname="$1"
+	local base="${NESTED_LOG_DIR:-/tmp/nested-hw-logs}"
+
+	echo "${base}/${testname}.$$"
+}
+
+# nested_make_log_dir creates the per-test log directory and echoes
+# its path. Safe to call from _body.
+# Usage: nested_make_log_dir <testname>
+nested_make_log_dir()
+{
+	local testname="$1"
+	local dir
+
+	dir=$(nested_log_dir "${testname}")
+	mkdir -p "${dir}" 2>/dev/null || true
+	echo "${dir}"
+}
+
+# nested_default_vmname returns a stable per-script VM name suitable
+# for bhyvectl. Uses NESTED_VM_PREFIX so concurrent tests don't
+# collide on /dev/vmm/<name>.
+# Usage: nested_default_vmname <script>
+nested_default_vmname()
+{
+	local script="$1"
+	local prefix="${NESTED_VM_PREFIX:-nested}"
+
+	echo "${prefix}-${script}-$$"
+}

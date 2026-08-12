@@ -1,0 +1,314 @@
+Release notes for FreeBSD 16.0.
+
+This file describes new user-visible features, changes and updates relevant to
+users of binary FreeBSD releases.  Each entry should describe the change in no
+more than several sentences and should reference manual pages where an
+interested user can find more information.  Entries should wrap after 80
+columns.  Each entry should begin with one or more commit IDs on one line,
+specified as a comma separated list and/or range, followed by a colon and a
+newline.  Entries should be separated by a newline.
+
+Changes to this file should not be MFCed.
+
+0a0a0a0a0a0a:
+	Nested virtualization support for bhyve (Intel VMX, AMD SVM,
+	Hyper-V enlightenments) is now available behind the
+	hw.vmm.nested.enable sysctl, defaulting to OFF.  The facility is
+	experimental: enabling the sysctl permits the
+	VMMCTL_CREATE_NESTED ioctl and the VMMAPI_OPEN_CREATE_NESTED
+	libvmmapi flag to construct VMs with the per-VM nested_enabled
+	flag, but it does not yet cover live migration of nested VMs,
+	IOMMU virtualization, Last Branch Record virtualization, SMM
+	virtualization, or any code derived from GPL-licensed
+	hypervisors; see vmm_nested(9) for the current scope and watch
+	individual task MFCs for staged feature landings.
+	(commit hash placeholder; will be resolved by release eng.)
+
+72e57bc26417, 3dfbbe8586bb, d8e8f9251975:
+	These patches provide improvements for the pNFS server
+	configuration.  New optional features include:
+	- Support for striped Flexible File Layouts (RFC8435).
+	- Support for pre-creation of files, allowing the
+	  Open/Create to be done without communicating with
+	  any DSs, so long as the cache of pre-created files
+	  is not depleted.
+
+b92b9da33006, 13d3bd165e22:
+	This patch allows vfs.nfsd.srvmaxio to be set to
+	a value as high as 4Mbytes.  It is usually set
+	via the nfs_server_maxio variable in /etc/rc.conf.
+
+4c486fe40267:
+	The multicast routing modules, ip_mroute and ip6_mroute, are now FIB-aware.
+	That is, there is a multicast routing table per FIB, rather than a global
+	table.  One can run a multicast routing daemon within each FIB; the FIB of
+	the routing socket determines the corresponding multicast routing table.
+
+5c2186b99254,628d7a3270b6:
+	When the sector size for an NVMe namespace changes, nda(4) now
+	reports this as a media change rather than a disk resize
+	event.  nda(4) also no longer reports a disk resize event in
+	some cases when the namespace's size had not changed.  nda(4)
+	also reprobes NVMe namespaces each time they are opened to
+	check for a new sector size or namespace size.
+
+7a323f873662:
+	Remove the le(4) driver.  This driver supported older 10Mbps
+	and 100Mbps Ethernet adapters.  True hardware devices have not
+	been used in FreeBSD systems in many years, but the driver was
+	previously retained for use with MIPS QEMU virtual machines.
+
+e51ef8ae490f:
+	Add initial support for instruction-based sampling (IBS)
+	performance counters on AMD processors to hwpmc(4).
+
+d69fc3a9dc71:
+	The EFI boot loader now tries all ZFS pools found during
+	probing when looking for a boot pool.  Previously it would try
+	only the first pool found.
+
+4d5c434ed16e:
+	Use the BSD-licensed implementation of diff3 instead of GNU diff3
+	by default.
+
+7f54c65abc67:
+	Update the smartpqi(4) driver to vendor version 14.4690.0.2008
+	- 15.2.0.2008.  This includes support for new controllers and
+	renaming Microsemi to Microchip.
+
+350c1232a57a:
+	nvmecontrol(8)'s telemetry-log now works reliably.
+
+d14e018024bb,b125c4d13095,1322760fd127,0730a05cd383:
+	Permit both SCHED_ULE and SCHED_4BSD to be compiled into the
+	same kernel.  The scheduler can be selected at boot time by
+	setting the kern.sched_name tunable to the scheduler name
+	("4BSD" or "ULE").  The default scheduler is ULE.  This is
+	currently enabled in amd64 kernels by default.
+
+90a7728cd890:
+	Update nuageinit to request configuration on all network
+	interfaces.  nuageinit will now issue DHCP requests on all
+	network interfaces and request configuration data from the
+	first interface which successfully obtains a lease.
+
+92ba9b2fe589:
+	Add RoCE support for Broadcom BCM576xx controllers.
+
+fb4b0c911951:
+	Add a facility to witness(4) to provide more detailed information
+	about lock order reversals detailing when initial lock orders were
+	established.
+
+65f5dd42f11c:
+	sh(1) add -l option which makes sh act as a login shell and read the profile.
+
+beab8b1ddf86:
+	bintrans(1) now supports the RFC2047 variant of quoted print
+
+9dc96d8bc3f2:
+	libusb(3) hotplug event are now really hotplugged using either
+	nlsysevent or devd(9) if available.
+
+d64db8892f85:
+	sh(1) is the default shell in the release media.
+
+68ad2b0d7af2:
+	ncurses has been updated to 6.6
+
+52d19df19ed6:
+	nvi(1) has been update to 2.2.2
+
+4d5c434ed16e, 2cfca8e710f2:
+	diff3(1) has replaced GNU diff3 and is now fully compatible.
+
+625dc44832cd:
+	tr(1) is now UTF-8 compliant.
+
+62fba0054d9e:
+	ee(1) is now UTF-8 compliant.
+
+5df6aca10906:
+	ed(1) is now UTF-8 compliant.
+
+28ff4d35f8b9:
+	Update libedit to 2026-04-03.
+
+b42e852e89cb:
+	Add a new pkg-serve(8) to serve packages over TCP via inetd.
+
+8b9775912cbc, 53b4ae3bf0f7:
+	Add support for an NFSv4 root file system.
+	Note that NFSv3 is still used for bootstrapping. See
+	"Diskless Operation with PXE" under "Advanced Networking" in the
+	FreeBSD Handbook.  To configure an NFSv4 root fs, you will need
+	a line in /boot/loader.conf like boot.nfsroot.options="nfsv4" and
+	either a line in /etc/sysctl.conf like vfs.nfs.enable_uidtostring=1
+	or an additional line in /boot/loader.conf like
+	boot.nfsroot.user_domain="<user-domain>",
+	if you are running nfsuserd(8).
+
+ab9257599a5:
+	The src.conf(5) options WITHOUT_BZIP2 and WITHOUT_BZIP2_SUPPORT
+	have been removed.
+
+af099eaa5ec:
+	Users belonging to the new vmm group can now create bhyve VMs.  See the
+	vmm(4) man page for details.
+
+c71354030a2:
+	Users wishing to use bhyve PCI passthrough in jails must create the
+	jail with the allow.vmm_ppt option configured.
+
+4d707825bf62:
+	The pdwait(2) system call was added.  It provides wait(2)-like
+	functionality for a process descriptor (see procdesc(4)).
+
+5c2ee618d5ec:
+	The pdrfork(2) system call was added.  It behaves like rfork(2) but
+	additionally returns a process descriptor (see procdesc(4)).
+
+41ccf82b29f3, 591c7a08bf8a:
+	On arm64, memcpy(3), memmove(3) and memset(3) are now implemented using
+	the MOPS (Memory Operations) feature instructions when they are
+	implemented by the system.
+
+3f0aea09689f:
+	posix_spawnattr_getexecfd_np(3) and posix_spawnattr_setexecfd_np(3)
+	functions were added to libc.  The latter causes posix_spawn(3) to
+	call fexecve(2) on the specified file descriptor rather than executing
+	the file at the provided path.
+
+fb4b0c911951:
+	witness(4) now prints additional information to the system console when
+	a lock order reversal is detected, making debugging such issues easier.
+
+1322760fd127:
+	It is now possible to compile both the 4BSD and ULE schedulers into the
+	same kernel.  The scheduler is selectable at boot-time using a tunable.
+	See the SCHEDULERS section of the tuning(7) man page for details.
+
+627e126dbb07:
+	The default value of the net.inet6.ip6.connect_in6addr_wild has changed
+	to 0.  This means that connecting to the all-zeroes IPv6 address no longer
+	implicitly results in a loopback connection.
+
+afa70a8496e9:
+	The pthread_tryjoin_np(3) function was added to libthr(3).  It provides
+	the same functionality as pthread_join(3) but returns instead of
+	blocking if the target thread has not yet exited.
+
+ecc039be7fdd:
+	NanoBSD images can now be built as a non-root user.
+
+7f54c65abc67:
+        Update smartpqi(4) to vendor version 14.4690.0.2008 - 15.2.0.2008
+        for the SmartArray storage controllers.  This adds support for new 
+        controllers, adds code that utilizes the new BIG_IOCTL_Command_struct
+        and allows the I/O buffer size for a single passthrough ioctl to be
+        stored as a 32 bit integer instead of the original 16 bit integer.
+
+b0d997095022:
+	The pf firewall now supports passing IPv6 packets to divert(4)
+	sockets via divert-to actions.
+
+0fa7b3bee72e, c71f18998e0b, 4162a419a475, f5a77dc8f8df:
+	LinuxKPI based wireless drivers, especially iwlwifi(4) are now
+	supported on RISC-V.
+
+8254b0dec02b3, bd55cbb50c588:
+	The mac(4) framework has been extended to support jail operations,
+	allowing a policy to constrain jail creation, modification, removal, and
+	attachment.  Jails have additionally been made a first-class mac(4)
+	object, and a mac.label jail(8) property has been added to facilitate
+	administration of their labels.
+
+c558eca47970:
+	The smartpqi(4) driver was updated to vendor version 4660.0.2002
+	for the SmartArry storage controllers.
+
+493d26c58e73:
+	The aq(4) driver was added, imported from the vendor repository.
+	This provides support for Aquantia / Marvell PCIe 1/2.5/5/10 Gigabit
+	Ethernet adapters (AQC107, AQC108, AQC109, AQC111, AQC112).
+
+1a7151f79664:
+	A new CAM provider was added to dtrace.  This enables tracing of I/O
+	requests through the CAM layer without relying on fragile function
+	boundary tracing.  See dtrace_cam(4) for details.
+
+b8c99e7d912f:
+	The tdestroy(3) function was added to libc.  The tdestroy() function
+	destroys a whole search tree, freeing all allocated nodes.
+
+4bf8ce037dc8:
+	The rge(4) driver was added, ported from OpenBSD.  This provides
+	support for RealTek RTL8125, RTL8126 and RTL8127 PCIe Ethernet
+	controllers.
+
+cbc6f7e941e4:
+	bhyve(8)'s VNC device can now listen on a unix(4) socket for VNC client
+	connections.
+
+39ee24182b92:
+	An rc(8) service can now be started as a specific user for auditing
+	purposes by setting the <service>_audit_user rc.conf(5) variable.
+
+dcb0790bad43:
+	A setaudit(8) utility was added to the base system.  This provides a
+	simple command-line wrapper for the setaudit(2) and setaudit_addr(2)
+	system calls.
+
+8e3fd450cc53, 949cff4dceff, 0e724de9ed6f, 9f49f436a9ec, e35191ccf3b3:
+	Add support for an extension to NFSv4.2 (RFCnnnn) that
+	supports handling of POSIX draft ACLs via getfacl(1)/setfacl(1).
+
+dbac191956f9, fe21dbf70aa8:
+	Support for the kcmp(2) system call and fcntl(F_DUPFD_QUERY) for Linux
+	binaries.
+
+a86dc94b84d1:
+	tzdata2025c was imported.
+
+a98e5d785001:
+	Add strdupa(3) and strndupa(3) macros for compatability with glibc.
+
+e967a2a03677:
+	divert socket compat removal, consumers must use PF_DIVERT instead of
+	PF_INET.
+
+4453ec5b8716b, 2a3b1641756a:
+	The reboot(8) and halt(8) commands now perform a graceful shutdown similar
+	to the shutdown(8) command including invoking rc.d scripts to shutdown
+	services.  The fastboot(8) and fasthalt(8) commands still perform a "fast"
+	reboot or shutdown.
+
+d9788eabffa4:
+	ipfilter cannot be used in a jail by default.
+
+0ff0c19e7f70:
+	ipfs(8) is no longer built by default.
+
+575efcfff22f:
+	sendfile(2)'s SF_SYNC flag was removed.
+
+057dae35ffc6, 51a01f3debff, ca3e47b0ea68:
+	hwpmc(4) support for Intel Alder Lake 6-B7, 6-BA, and 6-BF CPU
+	hwpmc(4) support for Intel Emerald Rapids CPUs
+	hwpmc(4) support for Intel Alder Lake-N CPUs
+
+1ecf01065b45:
+	New library libuvmem provides the vmem(9) API to userspace applications.
+
+b6cad334e64:
+	Make game controller devices accessible by members of the "game" group
+	by default.
+
+791c531402bd:
+	Add driver for Feature Integration Technology Inc. (aka Fintek) F81232
+	USB to serial devices.
+
+ec0cd287f55f:
+	Support for NVMe/TCP offload on Chelsio T7 adapters.  The nvmf_che(4)
+	module enables T7 adapters to process NVMe/TCP PDUs directly similar to
+	the PDU offload provided by cxgbei(4) for iSCSI.

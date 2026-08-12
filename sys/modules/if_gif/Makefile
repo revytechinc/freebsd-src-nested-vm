@@ -1,0 +1,11 @@
+SYSDIR?=${SRCTOP}/sys
+.PATH: ${SYSDIR}/net ${SYSDIR}/netinet ${SYSDIR}/netinet6
+
+KMOD=	if_gif
+SRCS=	if_gif.c opt_inet.h opt_inet6.h
+SRCS.INET=in_gif.c
+SRCS.INET6=in6_gif.c
+
+EXPORT_SYMS=	YES
+
+.include <bsd.kmod.mk>

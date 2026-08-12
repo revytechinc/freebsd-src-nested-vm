@@ -1,0 +1,117 @@
+.\"-
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright (c) 2026 The FreeBSD Foundation
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd July 30, 2026
+.Dt DISABLE-PANIC-DEBUGGER 8
+.Os
+.Sh NAME
+.Nm disable-panic-debugger
+.Nd ensure auto-reboot-on-panic sysctls are configured
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+The
+.Nm
+script ensures that
+.Pa /etc/sysctl.conf
+contains the following entries:
+.Bd -literal
+debug.debugger_on_panic=0
+kern.panic_reboot_wait_time=5
+.Ed
+.Pp
+These cause the kernel to automatically reboot after a panic rather than
+dropping into the
+.Xr ddb 4
+debugger, and to wait five seconds before rebooting so that console
+messages are flushed.
+This combination makes the host recoverable over
+.Xr ssh 1
+or out-of-band management
+.Pq such as IPMI
+after a panic, without requiring physical console access.
+.Pp
+This is required on nested-virtualization development and test hosts
+because a bug in the new nested-virt code path can panic the kernel
+during
+.Xr kldload 8
+of
+.Dq vmm
+or during early register-virtualization tests.
+Without auto-reboot, the operator would have to use a physical console
+or IPMI to recover the host.
+.Pp
+The script is idempotent: running it repeatedly is safe and will append
+each required line only once.
+A line that is already present
+.Pq either active or commented out
+is reported as
+.Em UNCHANGED .
+A line that is appended is reported as
+.Em SET .
+The script always exits 0.
+.Pp
+After appending, the script queries the live values of both sysctls
+via
+.Xr sysctl 8
+and prints them for operator visibility.
+Note that the values written to
+.Pa /etc/sysctl.conf
+only take effect on the next reboot; the live values reflect the
+current kernel state.
+.Sh WARNING
+This script is intended for development and test hosts only.
+Disabling the kernel debugger on production systems removes a critical
+fault-diagnosis tool.
+Do
+.Em not
+install this script on production machines.
+.Sh FILES
+.Bl -tag -width "/etc/sysctl.conf"
+.It Pa /etc/sysctl.conf
+System-wide sysctl settings; the script appends to this file.
+.El
+.Sh EXIT STATUS
+The
+.Nm
+script always exits 0.
+It reports
+.Em SET
+when a line was appended and
+.Em UNCHANGED
+when the line was already present.
+.Sh SEE ALSO
+.Xr loader.conf 5 ,
+.Xr sysctl.conf 5 ,
+.Xr kldload 8 ,
+.Xr kldstat 8 ,
+.Xr sysctl 8
+.Sh HISTORY
+The
+.Nm
+script first appeared in the nested-virt register-virtualization
+project in
+.Fx 16.0 .

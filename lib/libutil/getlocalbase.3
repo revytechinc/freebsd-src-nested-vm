@@ -1,0 +1,114 @@
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright 2020 Scott Long
+.\" Copyright 2020 Stefan Eßer
+.\" Copyright (c) 2026 Dag-Erling Smørgrav
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd July 20, 2026
+.Dt GETLOCALBASE 3
+.Os
+.Sh NAME
+.Nm getlocalbase
+.Nd "return the path to the local software base directory"
+.Sh LIBRARY
+.Lb libutil
+.Sh SYNOPSIS
+.In libutil.h
+.Ft "const char *"
+.Fn getlocalbase "void"
+.Sh DESCRIPTION
+The
+.Nm
+function returns the path to the local software base directory,
+normally
+.Pa /usr/local .
+.Pp
+First the
+.Ev LOCALBASE
+environment variable is checked.
+If that variable is undefined or empty, the
+.Va user.localbase
+sysctl is checked.
+If that returns an empty string or an error occurs, the value of
+.Dv _PATH_LOCALBASE
+is used as a last resort.
+.Pp
+If the value obtained through these means is not a valid absolute path
+shorter than
+.Dv MAXPATHLEN ,
+a constant string which has been deliberately chosen to cause any file
+system operation using it to fail is returned instead.
+.Pp
+The contents of the string returned by
+.Nm
+shall not be modified by the caller.
+.Sh IMPLEMENTATION NOTES
+The
+.Ev LOCALBASE
+environment variable will only be used if the process calling
+.Nm
+is not setugid.
+.Pp
+Successive calls to
+.Nm
+will return the same value throughout the lifetime of the process,
+regardless of any subsequent changes to the environment or sysctl
+variables.
+.Pp
+The
+.Nm
+function is thread-safe if and only if it has been called at least
+once already.
+.Sh RETURN VALUES
+The
+.Fn getlocalbase
+function returns a pointer to a null-terminated string.
+.Sh ENVIRONMENT
+.Bl -tag -width ".Ev LOCALBASE"
+.It Ev LOCALBASE
+Path to the local software base directory
+.El
+.Sh SEE ALSO
+.Xr environ 7 ,
+.Xr sysctl 8
+.Sh HISTORY
+The
+.Nm
+function first appeared in
+.Fx 13.0 .
+.Sh AUTHORS
+.An -nosplit
+The
+.Nm
+function was originally written by
+.An Stefan Eßer Aq Mt se@FreeBSD.org
+and was later reimplemented by
+.An Dag-Erling Sm\(/orgrav Aq Mt des@FreeBSD.org .
+This manual page was originally written by
+.An Scott Long Aq Mt scottl@FreeBSD.org
+and
+.An Stefan Eßer Aq Mt se@FreeBSD.org
+and was later substantially rewritten by
+.An Dag-Erling Sm\(/orgrav Aq Mt des@FreeBSD.org .

@@ -1,0 +1,254 @@
+/*-
+ * Copyright (c) 2011 Jilles Tjoelker
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+/*
+ * Test program for posix_spawn() and posix_spawnp() as specified by
+ * IEEE Std. 1003.1-2008.
+ */
+
+#include <sys/param.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <spawn.h>
+
+#include <atf-c.h>
+
+static const char true_script[] =
+    "#!/usr/bin/env\n"
+    "/usr/bin/true\n";
+
+char *myenv[2] = { "answer=42", NULL };
+
+ATF_TC_WITHOUT_HEAD(posix_spawn_simple_test);
+ATF_TC_BODY(posix_spawn_simple_test, tc)
+{
+	char *myargs[4];
+	int error, status;
+	pid_t pid, waitres;
+
+	/* Make sure we have no child processes. */
+	while (waitpid(-1, NULL, 0) != -1)
+		;
+	ATF_REQUIRE_MSG(errno == ECHILD, "errno was not ECHILD: %d", errno);
+
+	/* Simple test. */
+	myargs[0] = "sh";
+	myargs[1] = "-c";
+	myargs[2] = "exit $answer";
+	myargs[3] = NULL;
+	error = posix_spawnp(&pid, myargs[0], NULL, NULL, myargs, myenv);
+	ATF_REQUIRE(error == 0);
+	waitres = waitpid(pid, &status, 0);
+	ATF_REQUIRE(waitres == pid);
+	ATF_REQUIRE(WIFEXITED(status) && WEXITSTATUS(status) == 42);
+}
+
+ATF_TC_WITHOUT_HEAD(posix_spawn_no_such_command_negative_test);
+ATF_TC_BODY(posix_spawn_no_such_command_negative_test, tc)
+{
+	char *myargs[4];
+	int error, status;
+	pid_t pid, waitres;
+
+	/*
+	 * If the executable does not exist, the function shall either fail
+	 * and not create a child process or succeed and create a child
+	 * process that exits with status 127.
+	 */
+	myargs[0] = "/var/empty/nonexistent";
+	myargs[1] = NULL;
+	error = posix_spawn(&pid, myargs[0], NULL, NULL, myargs, myenv);
+	if (error == 0) {
+		waitres = waitpid(pid, &status, 0);
+		ATF_REQUIRE(waitres == pid);
+		ATF_REQUIRE(WIFEXITED(status) && WEXITSTATUS(status) == 127);
+	} else {
+		ATF_REQUIRE(error == ENOENT);
+		waitres = waitpid(-1, NULL, 0);
+		ATF_REQUIRE(waitres == -1 && errno == ECHILD);
+	}
+}
+
+ATF_TC_WITHOUT_HEAD(posix_spawnp_enoexec_fallback);
+ATF_TC_BODY(posix_spawnp_enoexec_fallback, tc)
+{
+	char buf[FILENAME_MAX];
+	char *myargs[2];
+	int error, status;
+	pid_t pid, waitres;
+
+	snprintf(buf, sizeof(buf), "%s/spawnp_enoexec.sh",
+	    atf_tc_get_config_var(tc, "srcdir"));
+	myargs[0] = buf;
+	myargs[1] = NULL;
+	error = posix_spawnp(&pid, myargs[0], NULL, NULL, myargs, myenv);
+	ATF_REQUIRE(error == 0);
+	waitres = waitpid(pid, &status, 0);
+	ATF_REQUIRE(waitres == pid);
+	ATF_REQUIRE(WIFEXITED(status) && WEXITSTATUS(status) == 42);
+}
+
+ATF_TC_WITHOUT_HEAD(posix_spawnp_enoexec_fallback_null_argv0);
+ATF_TC_BODY(posix_spawnp_enoexec_fallback_null_argv0, tc)
+{
+	char buf[FILENAME_MAX];
+	char *myargs[1];
+	int error;
+	pid_t pid;
+
+	snprintf(buf, sizeof(buf), "%s/spawnp_enoexec.sh",
+	    atf_tc_get_config_var(tc, "srcdir"));
+	myargs[0] = NULL;
+	error = posix_spawnp(&pid, buf, NULL, NULL, myargs, myenv);
+	ATF_REQUIRE(error == EINVAL);
+}
+
+ATF_TC(posix_spawnp_eacces);
+ATF_TC_HEAD(posix_spawnp_eacces, tc)
+{
+	atf_tc_set_md_var(tc, "descr", "Verify EACCES behavior in posix_spawnp");
+	atf_tc_set_md_var(tc, "require.user", "unprivileged");
+}
+ATF_TC_BODY(posix_spawnp_eacces, tc)
+{
+	const struct spawnp_eacces_tc {
+		const char	*pathvar;
+		int		 error_expected;
+	} spawnp_eacces_tests[] = {
+		{ ".",			EACCES }, /* File exists, but not +x */
+		{ "unsearchable",	ENOENT }, /* File exists, dir not +x */
+	};
+	char *myargs[2] = { "eacces", NULL };
+	int error;
+
+	error = mkdir("unsearchable", 0755);
+	ATF_REQUIRE(error == 0);
+	error = symlink("/usr/bin/true", "unsearchable/eacces");
+	ATF_REQUIRE(error == 0);
+
+	(void)chmod("unsearchable", 0444);
+
+	/* this will create a non-executable file */
+	atf_utils_create_file("eacces", true_script);
+
+	for (size_t i = 0; i < nitems(spawnp_eacces_tests); i++) {
+		const struct spawnp_eacces_tc *tc = &spawnp_eacces_tests[i];
+		pid_t pid;
+
+		error = setenv("PATH", tc->pathvar, 1);
+		ATF_REQUIRE_EQ(0, error);
+
+		error = posix_spawnp(&pid, myargs[0], NULL, NULL, myargs,
+		    myenv);
+		ATF_CHECK_INTEQ_MSG(tc->error_expected, error,
+		    "path '%s'", tc->pathvar);
+	}
+}
+
+#define	NUM_DSO	512
+ATF_TC_WITHOUT_HEAD(posix_spawnp_stackunderflow);
+ATF_TC_BODY(posix_spawnp_stackunderflow, tc)
+{
+	struct stat sb;
+	char dsopath[MAXPATHLEN];
+	char *myargs[] = { "true", NULL };
+	void **handles;
+	char *dsomap;
+	size_t dsosz;
+	int error, fd, nfd, status;
+	pid_t pid, waitres;
+
+	/* Make sure we have no child processes. */
+	while (waitpid(-1, NULL, 0) != -1)
+		;
+	ATF_REQUIRE_MSG(errno == ECHILD, "errno was not ECHILD: %d", errno);
+
+	(void)snprintf(dsopath, sizeof(dsopath), "%s/libdummy.so",
+	    atf_tc_get_config_var(tc, "srcdir"));
+
+	fd = open(dsopath, O_RDONLY);
+	ATF_REQUIRE(fd >= 0);
+
+	/*
+	 * We'll open our original shlib and fdlopen() it repeatedly until we
+	 * have a lot of DSOs open, then we'll trigger a posix_spawnp.  This
+	 * previously unearthed suboptimal stack usage in rtld that caused
+	 * posix_spawnp()'s effectively-vforked environment to underflow its
+	 * stack.
+	 *
+	 * We only get one shot to trigger the underflow, as rtld binding the
+	 * symbols in the exec path in the rfork-child will affect the main
+	 * process, so we only test that we don't have a problem with a large
+	 * number of DSOs loaded.
+	 */
+	ATF_REQUIRE(fstat(fd, &sb) == 0);
+	dsosz = sb.st_size;
+	dsomap = mmap(NULL, dsosz, PROT_READ, MAP_SHARED, fd, 0);
+	ATF_REQUIRE(dsomap != MAP_FAILED);
+
+	handles = calloc(sizeof(*handles), NUM_DSO);
+	ATF_REQUIRE(handles != NULL);
+
+	for (int i = 0; i < NUM_DSO; i++) {
+		nfd = memfd_create("dsobase", MFD_CLOEXEC);
+		ATF_REQUIRE(nfd >= 0);
+		ATF_REQUIRE(ftruncate(nfd, dsosz) == 0);
+		ATF_REQUIRE(write(nfd, dsomap, dsosz) == dsosz);
+
+		handles[i] = fdlopen(nfd, RTLD_LAZY);
+		ATF_REQUIRE(handles[i] != NULL);
+		if (i > 0)
+			ATF_REQUIRE(handles[i] != handles[i - 1]);
+
+		close(nfd);
+	}
+
+	error = posix_spawnp(&pid, myargs[0], NULL, NULL, myargs, myenv);
+	ATF_REQUIRE(error == 0);
+	waitres = waitpid(pid, &status, 0);
+	ATF_REQUIRE(waitres == pid);
+	ATF_REQUIRE(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+ATF_TP_ADD_TCS(tp)
+{
+
+	ATF_TP_ADD_TC(tp, posix_spawn_simple_test);
+	ATF_TP_ADD_TC(tp, posix_spawn_no_such_command_negative_test);
+	ATF_TP_ADD_TC(tp, posix_spawnp_enoexec_fallback);
+	ATF_TP_ADD_TC(tp, posix_spawnp_enoexec_fallback_null_argv0);
+	ATF_TP_ADD_TC(tp, posix_spawnp_eacces);
+	ATF_TP_ADD_TC(tp, posix_spawnp_stackunderflow);
+
+	return (atf_no_error());
+}

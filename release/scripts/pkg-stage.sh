@@ -1,0 +1,126 @@
+#!/bin/sh
+#
+#
+
+set -e
+
+export ASSUME_ALWAYS_YES="YES"
+export PKG_DBDIR="/tmp/pkg"
+export PERMISSIVE="YES"
+export REPO_AUTOUPDATE="NO"
+export ROOTDIR="$PWD/dvd"
+export PORTSDIR="${PORTSDIR:-/usr/ports}"
+
+_DVD_PACKAGES_MAIN="
+comms/usbmuxd
+devel/git@lite
+editors/emacs@nox
+editors/vim
+filesystems/ext2
+filesystems/ntfs
+misc/freebsd-doc-all
+net/mpd5
+net/rsync
+ports-mgmt/pkg
+shells/bash
+shells/zsh
+security/sudo@default
+sysutils/screen
+sysutils/seatd
+sysutils/tmux
+www/firefox
+www/links
+x11/gnome
+x11/sddm
+x11/xorg
+x11-wm/sway
+"
+
+_DVD_PACKAGES_KMODS="
+net/wifi-firmware-kmod@release
+"
+
+# If NOPORTS is set for the release, do not attempt to build pkg(8).
+if [ ! -f ${PORTSDIR}/Makefile ]; then
+	echo "*** ${PORTSDIR} is missing!    ***"
+	echo "*** Skipping pkg-stage.sh     ***"
+	echo "*** Unset NOPORTS to fix this ***"
+	exit 0
+fi
+
+usage()
+{
+	echo "usage: $0 [-N]"
+	exit 0
+}
+
+while getopts N opt; do
+	case "$opt" in
+	N)	;;
+	*)	usage ;;
+	esac
+done
+
+PKG_ARGS="--rootdir ${ROOTDIR}"
+PKG_ARGS="$PKG_ARGS -o INSTALL_AS_USER=1"
+PKGCMD="/usr/sbin/pkg ${PKG_ARGS}"
+
+if [ ! -x /usr/local/sbin/pkg ]; then
+	/etc/rc.d/ldconfig restart
+	/usr/bin/make -C ${PORTSDIR}/ports-mgmt/pkg install clean
+fi
+
+export PKG_ABI=$(pkg --rootdir ${ROOTDIR} config ABI)
+export PKG_ALTABI=$(pkg --rootdir ${ROOTDIR} config ALTABI 2>/dev/null)
+export PKG_REPODIR="packages/${PKG_ABI}"
+
+/bin/mkdir -p ${ROOTDIR}/${PKG_REPODIR}
+if [ -n "${PKG_ALTABI}" ]; then
+	ln -nfs ${PKG_ABI} ${ROOTDIR}/packages/${PKG_ALTABI}
+fi
+
+# Ensure the ports listed in _DVD_PACKAGES_* exist to sanitize the
+# final list.
+for _P in ${_DVD_PACKAGES_MAIN}; do
+	if [ -d "${PORTSDIR}/${_P%%@*}" ]; then
+		DVD_PACKAGES_MAIN="${DVD_PACKAGES_MAIN} ${_P}"
+	else
+		echo "*** Skipping nonexistent port: ${_P%%@*}"
+	fi
+done
+for _P in ${_DVD_PACKAGES_KMODS}; do
+	if [ -d "${PORTSDIR}/${_P%%@*}" ]; then
+		DVD_PACKAGES_KMODS="${DVD_PACKAGES_KMODS} ${_P}"
+	else
+		echo "*** Skipping nonexistent port: ${_P%%@*}"
+	fi
+done
+
+# Make sure the package list is not empty.
+if [ -z "${DVD_PACKAGES_MAIN}${DVD_PACKAGES_KMODS}" ]; then
+	echo "*** The package list is empty."
+	echo "*** Something is very wrong."
+	# Exit '0' so the rest of the build process continues
+	# so other issues (if any) can be addressed as well.
+	exit 0
+fi
+
+# Print pkg(8) information to make debugging easier.
+${PKGCMD} -vv
+${PKGCMD} update -f
+${PKGCMD} fetch -o ${PKG_REPODIR} -r release -d ${DVD_PACKAGES_MAIN}
+${PKGCMD} fetch -o ${PKG_REPODIR} -r release-kmods -d ${DVD_PACKAGES_KMODS}
+
+# Create the 'Latest/pkg.pkg' symlink so 'pkg bootstrap' works
+# using the on-disc packages.
+export LATEST_DIR="${ROOTDIR}/${PKG_REPODIR}/Latest"
+mkdir -p ${LATEST_DIR}
+ln -nfs ../All/$(${PKGCMD} rquery %n-%v pkg).pkg ${LATEST_DIR}/pkg.pkg
+
+${PKGCMD} repo ${PKG_REPODIR}
+
+mtree -c -p $ROOTDIR | mtree -C -k type,mode,link,size | \
+    grep '^./packages[/ ]' >> $ROOTDIR/METALOG
+
+# Always exit '0', even if pkg(8) complains about conflicts.
+exit 0

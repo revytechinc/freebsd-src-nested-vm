@@ -1,0 +1,7 @@
+SYSDIR?=${SRCTOP}/sys
+.PATH: ${SYSDIR}/net
+
+KMOD=	if_enc
+SRCS=	if_enc.c opt_inet.h opt_inet6.h opt_ipsec.h
+
+.include <bsd.kmod.mk>

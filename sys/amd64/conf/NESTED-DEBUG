@@ -1,0 +1,31 @@
+#
+# NESTED-DEBUG -- FreeBSD nested-virt development kernel
+#
+# Pinned to main HEAD. Used by:
+#   * tests/sys/vmm/nested/ -- all Wave 8 tests
+#   * Local development of sys/amd64/vmm/{vmm.c,intel/vmx.c,amd/svm.c}
+#
+# This config inherits GENERIC and layers nested-virt-specific
+# debug / assertion / instrumentation options on top. It is INTENDED
+# FOR DEVELOPMENT ONLY. Do not use for production or for
+# performance benchmarking.
+
+include GENERIC
+
+ident		NESTED-DEBUG
+
+options 	INVARIANTS
+options 	INVARIANT_SUPPORT
+options 	WITNESS
+options 	WITNESS_SKIPSPIN
+options 	DEBUG_VMM
+options 	KTR
+options 	KTR_COMPILE
+options 	KTR_MASK
+options 	DDB
+options 	CTF
+
+makeoptions	DEBUG=-g
+
+# Nested-virt-specific tunables can be set at runtime, not compile
+# time. No additional compile-time options are required.

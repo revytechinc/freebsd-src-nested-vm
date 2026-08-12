@@ -1,0 +1,120 @@
+# KVM Parity Conformance — Exit Reason Test Vectors
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 The FreeBSD Project Contributors.
+# All rights reserved.
+#
+# Format (one vector per line):
+#   ID|EXIT_REASON|EXIT_QUAL|EXIT_INT|EXIT_GUEST_PHYS|MASK|CATEGORY
+#
+#   ID              - stable identifier (MUST NOT change once committed)
+#   EXIT_REASON     - decimal exit reason (1-78 for AMD SVM; 1-77 for Intel VMX)
+#   EXIT_QUAL       - hex exit qualification register
+#   EXIT_INT        - decimal interrupt info (if applicable)
+#   EXIT_GUEST_PHYS - hex guest physical address (if applicable)
+#   MASK            - 32-bit hex mask applied to exit reason only
+#   CATEGORY        - MUST_PASS | KNOWN_DIFF
+#
+# CATEGORY semantics:
+#   MUST_PASS   - L2 must observe this exit reason with the expected
+#                 qual/int/guest_phys when the L1 hypervisor triggers
+#                 the corresponding operation. Architectural correctness.
+#   KNOWN_DIFF  - documented in PARITY.md; test passes if vector is
+#                 present, exact value comparison is skipped
+#
+# Source: vectors are derived from
+#   - AMD APM Vol. 2, SVM Intercept Exit Codes
+#   - Intel SDM Vol. 3, VM-Exit Reasons
+#   - Hyper-V TLFS 7.8 (hypercall exit)
+# No values are copied from KVM source code.
+#
+# === MUST_PASS: control-register exits (AMD/Intel) ===
+# CR read/write exits. Reason 28 (MOV CR) for AMD, 28/30 for Intel.
+E001|28|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E002|30|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E003|32|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E004|34|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: CPUID exit ===
+# Reason 18 (CPUID) for AMD SVM, 10 (CPUID) for Intel VMX.
+E010|18|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: I/O instruction exit ===
+# Reason 12 (I/O instruction) for both. EAX=I/O port.
+E011|12|000000000000E0|0|0000000000000000|FFFFFFFF|MUST_PASS
+E012|12|0000000000003F8|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: MSR read/write exits ===
+# Reason 31 (RDMSR), 32 (WRMSR) for AMD. Reason 31/32 for Intel.
+E020|31|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E021|32|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: VMRUN / nested-launch exits ===
+# Reason 0x6C (VMRUN) for AMD. Reason 0 (exception/nmi) for nested VMX.
+E030|108|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: exception exits ===
+# Reason 3 (exception) for both. EXIT_INT carries the vector.
+E040|3|0000000000000000|14|0000000000000000|FFFFFFFF|MUST_PASS
+E041|3|0000000000000000|6|0000000000000000|FFFFFFFF|MUST_PASS
+E042|3|0000000000000000|13|0000000000000000|FFFFFFFF|MUST_PASS
+E043|3|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E044|3|0000000000000000|1|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: nested-page-fault exit (EPT/NPT violation) ===
+# Reason 48 (nested page fault) for AMD/Intel. Guest physical in qual.
+E050|48|0000000000000000|0|00000000DEADBEEF|FFFFFFFF|MUST_PASS
+E051|48|0000000000000000|0|00000000CAFEBABE|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: hypercall exit ===
+# Reason 28 (HYPERCALL) for Intel, N/A for AMD (different mechanism).
+# For AMD, hypercall is via VMCB intercept; recorded with reason 0x7C.
+E060|124|00000000C0FFEE00|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: INVD/INVLPG/WBINVD exits ===
+E070|9|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E071|54|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E072|54|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: control-register shadow exits (VMX-specific) ===
+# Reason 28 for MOV CR, reason 19/20/21 for CR access with qual.
+E080|28|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E081|28|0000000000000004|0|0000000000000000|FFFFFFFF|MUST_PASS
+E082|28|0000000000000008|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: HLT/Pause exits ===
+E090|12|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E091|64|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: SIPI / INIT exits ===
+E100|5|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E101|6|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: descriptor-table access exits (LGDT/LIDT) ===
+E110|13|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+E111|14|0000000000000000|0|0000000000000000|FFFFFFFF|MUST_PASS
+
+# === KNOWN_DIFF: APIC-write emulation specifics ===
+# KVM and bhyve differ in exit-qual layout for APIC-write traps.
+# Documented in PARITY.md.
+D001|56|0000000000000000|0|0000000000000000|FFFFFFFF|KNOWN_DIFF
+
+# === KNOWN_DIFF: EPT misconfig exit reason ===
+# Both AMD and Intel use reason 49; KVM and bhyve differ in
+# which specific misconfigurations they report. PARITY.md.
+D002|49|0000000000000000|0|0000000000000000|FFFFFFFF|KNOWN_DIFF
+
+# === KNOWN_DIFF: I/O bitmap granularity ===
+# KVM and bhyve may differ in how they report per-bit vs per-byte
+# I/O bitmap exit information. PARITY.md.
+D003|12|000000000000E0|0|0000000000000000|FFFFFFFF|KNOWN_DIFF
+
+# === KNOWN_DIFF: x2APIC MSR exit clustering ===
+# KVM may emit one combined exit; bhyve may emit per-register. PARITY.md.
+D004|31|0000000000000800|0|0000000000000000|FFFFFFFF|KNOWN_DIFF
+D005|32|0000000000000800|0|0000000000000000|FFFFFFFF|KNOWN_DIFF
+
+# Total MUST_PASS count for this file: 30
+# Total KNOWN_DIFF count for this file: 5
+# Must match PARITY.md allowlist.
