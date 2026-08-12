@@ -1510,7 +1510,7 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 			 * userspace hypervisor (bhyve) which decides
 			 * whether to re-deliver or coalesce.
 			 */
-			svm_nested_handle_vmexit(vcpu, code, info1, info2);
+			svm_nested_handle_vmexit(vcpu, NULL, code, info1, info2);
 			break;
 		}
 		handled = 1;
@@ -1522,7 +1522,7 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 			 * INTR — reflect into L1's VMCB12, fall through
 			 * to userspace so L0 retains veto.
 			 */
-			svm_nested_handle_vmexit(vcpu, code, info1, info2);
+			svm_nested_handle_vmexit(vcpu, NULL, code, info1, info2);
 			break;
 		}
 		handled = 1;
@@ -1727,7 +1727,7 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 			 * are L1's GPAs (no remap), so info1/error and
 			 * info2/GPA are forwarded verbatim.
 			 */
-			svm_nested_handle_vmexit(vcpu, code, info1, info2);
+			svm_nested_handle_vmexit(vcpu, NULL, code, info1, info2);
 			vmm_stat_incr(vcpu->vcpu, VMEXIT_NESTED_FAULT, 1);
 			break;
 		}
