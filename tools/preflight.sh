@@ -59,13 +59,11 @@ export PATH
 
 DMESG=${PREFLIGHT_DMESG:-/var/run/dmesg.boot}
 VERBOSE=0
-JSON=0
 for arg in "$@"; do
     case "$arg" in
         -v)     VERBOSE=1 ;;
-        --json) JSON=1 ;;
         -h|--help)
-            printf 'usage: %s [-v] [--json]\n' "${0##*/}"
+            printf 'usage: %s [-v]\n' "${0##*/}"
             exit 0
             ;;
     esac
@@ -319,7 +317,6 @@ decode_intel() {
     fi
 
     section 'runtime vmm loadable state'
-    vmm_loaded=$(kldstat 2>/dev/null | awk '$1 == "1" {found=1} END{print found ? "yes" : "no"}')
     if kldstat 2>/dev/null | grep -q ' vmm\.ko'; then
         vmm_loaded='yes'
     else
@@ -534,7 +531,6 @@ decode_amd() {
         esac
     fi
 }
-banner
 # ============================================================================
 # MAIN: dmesg.boot dependency check + CPU field collection
 # ============================================================================
@@ -644,11 +640,8 @@ case "$vendor" in
         ;;
 esac
 
-# ============================================================================
-# decode_intel: VMX silicon identity, leaf-1 features, leaf-7 features,
-
 if [ "$verdict_ok" = "1" ]; then
     exit 0
-elif [ "$verdict_ok" = "0" ] && [ "$vendor" = "GenuineIntel" -o "$vendor" = "AuthenticAMD" -o "$vendor" = "HygonGenuine" -o "$vendor" = "AMDisbetter" ]; then
+elif [ "$verdict_ok" = "0" ] && [ "$vendor" = "GenuineIntel" ] || [ "$vendor" = "AuthenticAMD" ] || [ "$vendor" = "HygonGenuine" ] || [ "$vendor" = "AMDisbetter" ]; then
     exit 1
 fi
