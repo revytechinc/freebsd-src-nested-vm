@@ -309,7 +309,7 @@ decode_intel() {
     [ -n "$vtx_evidence" ] && echo "  VT-x line: $vtx_evidence"
     if [ -n "$vtx_line" ]; then
         parse_vtx_line "$vtx_line"
-        print_row 'EPT (PROC_BASED2_CTLS[1]):' "$(present_or_absent "$vtx_line" 1 2>/dev/null || echo "$([ "$has_ept" = "1" ] && echo PRESENT || echo absent)")"
+        print_row 'EPT (PROC_BASED2_CTLS[1]):' "$([ "$has_ept" = "1" ] && echo PRESENT || echo absent)"
         print_row 'Unrestricted guest:' "$([ "$has_ug" = "1" ] && echo PRESENT || echo absent)"
         print_row 'VPID:'               "$([ "$has_vpid" = "1" ] && echo PRESENT || echo absent)"
         print_row 'APICv (VID):'        "$([ "$has_apicv" = "1" ] && echo PRESENT || echo absent)"
