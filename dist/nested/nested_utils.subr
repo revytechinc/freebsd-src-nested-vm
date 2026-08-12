@@ -1,0 +1,90 @@
+#-
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 The FreeBSD Foundation
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are
+# met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+# DAMAGE.
+#
+# Common shell helpers for tests/sys/vmm/nested/*.sh.
+#
+# shellcheck shell=sh
+# FreeBSD /bin/sh supports `local` even though POSIX leaves it undefined.
+# shellcheck disable=SC3043
+#
+# Source this file from a test body with:
+#
+#	. $(atf_get_srcdir)/nested_utils.subr
+#
+
+# nested_load_vmm
+#
+# Ensure the vmm(4) kernel module is loaded.  Tolerates "already loaded".
+# Returns 0 when vmm is loaded afterwards, 1 otherwise.
+nested_load_vmm()
+{
+	if kldstat -q -m vmm; then
+		return 0
+	fi
+	kldload vmm 2>/dev/null || kldstat -q -m vmm
+}
+
+# nested_sysctl_get <name>
+#
+# Print the value of hw.vmm.nested.<name>.  Returns non-zero if the sysctl
+# is not present (e.g. when nested virtualization is not yet wired up).
+nested_sysctl_get()
+{
+	local name="$1"
+	sysctl -n "hw.vmm.nested.${name}" 2>/dev/null
+}
+
+# nested_has_vmx
+#
+# Return 0 if Intel VMX is available on this host, non-zero otherwise.
+# Reads hw.vmm.vmx.cap; non-zero means VMX is exposed.
+nested_has_vmx()
+{
+	local cap
+	cap=$(sysctl -n hw.vmm.vmx.cap 2>/dev/null) || return 1
+	[ "${cap}" -gt 0 ] 2>/dev/null
+}
+
+# nested_has_svm
+#
+# Return 0 if AMD SVM is available on this host, non-zero otherwise.
+# Reads hw.vmm.svm.features; non-zero means SVM is exposed.
+nested_has_svm()
+{
+	local feat
+	feat=$(sysctl -n hw.vmm.svm.features 2>/dev/null) || return 1
+	[ "${feat}" -gt 0 ] 2>/dev/null
+}
+
+# nested_vm_create <name>
+#
+# Create bhyve VM <name> via bhyvectl(8) if it does not already exist.
+# Existence is detected via the /dev/vmm/<name> device node.
+nested_vm_create()
+{
+	local name="$1"
+	[ -e "/dev/vmm/${name}" ] || bhyvectl --vm="${name}" --create
+}

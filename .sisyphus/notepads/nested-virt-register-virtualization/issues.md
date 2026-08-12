@@ -1087,3 +1087,75 @@ Then rebuild kernel + vmm.ko, re-deploy via bectl.
 - `/home/buildbot/logs/buildkernel-wave7-r2.log` (MK_WERROR=no alone, failed for modules)
 - `/home/buildbot/logs/buildkernel-wave7-r3.log` (MK_WERROR=no WERROR="", succeeded)
 - BE `wave7-preflight` (38.1M, has /boot/kernel/kernel + /boot/kernel/vmm.ko from this deploy, plus .bak-pre-wave7 originals)
+
+## [2026-08-11] Wave-7 kernel install status — DEFERRED (host down)
+
+### What happened
+- Built kernel + vmm.ko at HEAD `a5c0e490b66` (which is what the local branch had, NOT the spec's stale `8d978034268` — subagent discovered and documented this).
+- Created `wave7-preflight` BE on freedev003 (~38M ZFS clone from `cloudbsd-20260722`).
+- Installed fresh `kernel` (31MB) and `vmm.ko` (643KB) into the BE.
+- Activated wave7-preflight BE (`T` = next-boot target).
+- Scheduled reboot via `shutdown -r +1 "wave7-preflight kernel install"` at 16:58:02.
+
+### Recovery state
+- freedev003.cloudbsd.org (99.48.162.221) became unreachable ~16:59 onwards.
+- Probed 5 sibling hosts (002, 005, 006, 007, 008) on the same SBC subnet.
+  - Internet upstream (Google 8.8.8.8) works on all 5.
+  - Default gateway 99.48.162.254 (SBC modem) is alive on all 5.
+  - ARP for freedev003 (99.48.162.221) shows `incomplete` + `expired` on every sibling.
+- Diagnosis: freedev003 has lost L2 connectivity. Either stuck at firmware/BIOS, in a powercycle panic loop, or has a hardware issue.
+- All 3 other boot environments on freedev003 are preserved on ZFS:
+  - `cloudbsd-20260722` (NR, active root)
+  - `preflight-stable` (ZFS snapshot from earlier, ~538M)
+  - `wave7-preflight` (~38M, the new install with the wave-3+5+6+7 kernel)
+- `kern.powercycle_on_panic=1` is set. If the host panic-loops, BIOS watchdog will eventually cut power.
+
+### Operator recovery (when physically present)
+1. Open BMC / IPMI / serial console on freedev003.
+2. If console shows panic, run:
+   ```
+   bectl activate cloudbsd-20260722
+   shutdown -r now
+   ```
+   This reverts to the pre-wave7 BE. The wave7-preflight BE is preserved on disk so the install can be retried later.
+3. If console shows the wave-3+5+6+7 kernel booted successfully but networking is broken, debug from there.
+4. If freedev003 doesn't respond to IPMI either, physical inspection is required (power cycle, BIOS reset).
+
+### Work already pushed to remote
+- Local HEAD: `efb9e44cc26 wave-7: rewrite tools/preflight.sh v2.0 + fix test scripts`
+- Remote `origin/nested-virt/wave5-t18-t23b-impl`: in sync.
+- All 13 wave-3+5+6+7 commits and the wave-7 v2.0 are on GitHub.
+- Test suite verified: `12/17 PASS, 5 SKIP env-gated, 0 FAIL` on Linux dev box.
+
+### Next session (when freedev003 is back)
+- Verify the new kernel boots: `uname -v | grep a5c0e49066` should match the wave-3+5+6+7 build.
+- Run the 5 SKIP tests (need root): `preflight_sysctl_paths`, `preflight_intel_ivybridge`, `preflight_cr4_vmxe`, `preflight_unit_test_module`, `preflight_vmcs_shadowing_scoped`.
+- Capture post-patch baseline (the analog of the P6 pre-patch baseline now that we have wave-7 binary installed).
+
+## [2026-08-12] Wave-7 packaging complete (multi-arch distribution)
+
+Phase 1-9 complete on AMD Zen 5 (172.16.176.131):
+
+### Distribution
+- File: dist/wave7-preflight-multiarch.tar.zst (~10MB compressed)
+- Contents: kernel.amd64 (31MB), vmm.ko.amd64 (514KB), tools/preflight.sh v2.0,
+  tests/sys/vmm/nested/hw/preflight/ (17 regression tests), INSTALL.md
+- Extract: cleanly on both Linux and FreeBSD
+
+### Validation matrix
+| Host | Result | Notes |
+|------|--------|-------|
+| AMD Zen 5 HX 370 (vm16-00) | 11-12/17 PASS, 5-6 SKIP, 0-1 FAIL | VMX filtered by VMware L0 |
+| Intel Ivy Bridge (freedev002) | 12/17 PASS, 5 SKIP, 0 FAIL | bare metal, nVMX correctly BLOCKED |
+| poddy001.cloudbsd.org | UNREACHABLE | SBC gateway outage, deferred |
+
+### Commits this session
+On origin/nested-virt/wave5-t18-t23b-impl (local HEAD d418de83f70):
+- vmm/amd: add svm_nested_tlb_flush stub (fixes linker error when loading wave-7 vmm.ko)
+- tests/perf: add post-patch baseline on AMD Zen 5
+
+### Outstanding
+- freedev003.cloudbsd.org: STILL DOWN (L2 ARP failure). Cannot validate the
+  full Haswell+/Tiger Lake+ nVMX path. Wave-7 is ready to install whenever
+  host returns (booting from wave7-preflight BE is preserved).
+- 11th Gen Intel Tiger Lake validation: deferred until freedev003 returns.

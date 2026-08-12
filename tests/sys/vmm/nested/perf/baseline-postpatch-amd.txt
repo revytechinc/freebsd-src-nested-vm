@@ -1,0 +1,23 @@
+Post-patch baseline on AMD Zen 5 HX 370 (vm16-00)
+Captured: 2026-08-12T00:41:58Z
+Host: FreeBSD vm16-00 16.0-CURRENT FreeBSD 16.0-CURRENT #0 6caa0949fcc5: Tue Aug 11 23:51:55 UTC 2026     root@vm16-00:/home/mlapointe/obj/home/mlapointe/nested-src/amd64.amd64/sys/GENERIC amd64
+Tool: sysbench sysbench 1.0.20
+
+Methodology:
+  - sysbench cpu --cpu-max-prime=20000 --threads=N
+  - 3 runs each, single-thread (--threads=1) and 8-thread (--threads=8)
+  - Reported: events_per_second (CPU work throughput) + total events
+
+Single-thread (--threads=1):
+  run | events/s   | total events
+  ----+-------------+-------------
+  1   | 7775043.68 | 77760651
+  2   | 8001843.95 | 80028808
+  3   | 7746902.21 | 77478376
+
+Multi-thread (--threads=8):
+  run | events/s   | total events
+  ----+-------------+-------------
+  1   | 39363688.45 | 393732673
+  2   | 40166560.46 | 401747621
+  3   | 39670691.10 | 396789779
