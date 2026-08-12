@@ -59,6 +59,13 @@ export PATH
 
 DMESG=${PREFLIGHT_DMESG:-/var/run/dmesg.boot}
 VERBOSE=0
+# PREFLIGHT_ALLOW_STDIN=1 opts in to reading dmesg from '-' (stdin).
+# Required because a forgotten CI pipe can silently hang on EOF.
+if [ "$DMESG" = "-" ] && [ "${PREFLIGHT_ALLOW_STDIN:-0}" != "1" ]; then
+    echo 'PREFLIGHT_DMESG=- refused (stdin not allowed by default).' >&2
+    echo 'Set PREFLIGHT_ALLOW_STDIN=1 to opt in.' >&2
+    exit 2
+fi
 for arg in "$@"; do
     case "$arg" in
         -v)     VERBOSE=1 ;;
@@ -572,7 +579,7 @@ vm_guest=$(sysctl -n kern.vm_guest 2>/dev/null)
 print_row 'vm_guest:' "${vm_guest:-none}"
 echo
 
-if [ ! -r "$DMESG" ] || ! grep -q '^CPU:' "$DMESG" 2>/dev/null; then
+if [ ! -f "$DMESG" ] || ! grep -q '^CPU:' "$DMESG" 2>/dev/null; then
     echo 'dmesg.boot not readable; cannot derive CPUID details.'
     echo '(Mount /var or load vmm.ko for richer telemetry.)'
     banner
