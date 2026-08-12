@@ -65,3 +65,15 @@ void
 svm_nested_skinit(struct svm_vcpu *vcpu)
 {
 }
+
+void
+svm_nested_tlb_flush(struct svm_vcpu *vcpu)
+{
+	/*
+	 * Stub for the missing T25 TLB-flush function.  The full
+	 * implementation will mark TLB entries tagged with L1's ASID
+	 * for invalidation, then trigger a flush.  For now we
+	 * intentionally do nothing - the next VMRUN/VMLOAD path will
+	 * re-fault the ASID anyway.
+	 */
+}
