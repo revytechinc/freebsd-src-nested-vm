@@ -70,10 +70,50 @@ void
 svm_nested_tlb_flush(struct svm_vcpu *vcpu)
 {
 	/*
-	 * Stub for the missing T25 TLB-flush function.  The full
-	 * implementation will mark TLB entries tagged with L1's ASID
-	 * for invalidation, then trigger a flush.  For now we
-	 * intentionally do nothing - the next VMRUN/VMLOAD path will
-	 * re-fault the ASID anyway.
+	 * NO-OP LINKER STUB ONLY.
+	 *
+	 * This body is intentionally empty.  The function exists solely
+	 * because the wave-5 dispatcher wiring in sys/amd64/vmm/amd/svm.c
+	 * references svm_nested_tlb_flush() by name, so the symbol must
+	 * resolve at link time.  A real implementation MUST come in a
+	 * later wave and is NOT provided here.
+	 *
+	 * What a real implementation MUST do (AMD APM Vol 2, sec. 15.5 /
+	 * 15.6 - Nested Page Tables and ASIDs):
+	 *
+	 *   1. Decide the flush scope.  AMD exposes a per-VMCB TLB_CONTROL
+	 *      field with values:
+	 *        - VMCB_TLB_FLUSH_NOTHING  (= 0): no flush requested.
+	 *        - VMCB_TLB_FLUSH_ENTRIES  (= 1): flush this guest's TLB
+	 *          entries that match VMCB.ASID (the L2 ASID).
+	 *        - VMCB_TLB_FLUSH_GUEST    (= 3): flush all TLB entries
+	 *          belonging to this guest (all ASIDs assigned to L2).
+	 *        - VMCB_TLB_FLUSH_ALL      (= 7): flush the entire TLB.
+	 *      Pick the narrowest scope that still preserves correctness
+	 *      for the operation that triggered the flush.
+	 *
+	 *   2. Mark the source VMCB's ASID as dirty so the next VMRUN with
+	 *      that ASID will force a full TLB reload on entry (ASIDs are
+	 *      tracked via vmcb->tlb_dirty or equivalent in svm_softc).
+	 *      Without this, INVLPGA from L2 with a stale ASID can leak
+	 *      L1-tagged entries across context switches.
+	 *
+	 *   3. Walk the nSVM shadow-ASID table and invalidate any ASID
+	 *      aliases the L1 hypervisor has bound to this L2.  AMD ASID
+	 *      space is shared between L1 and L2 - an L2 INVLPGA that
+	 *      targets a "free" ASID can flush an unrelated L1 mapping.
+	 *
+	 *   4. Optionally issue VMRUN with TLB_CONTROL=FLUSH_ALL as a
+	 *      safe fallback when the caller cannot prove a narrower
+	 *      scope is sufficient.
+	 *
+	 * DO NOT CALL THIS STUB DURING LIVE L2 EXECUTION.
+	 *
+	 * The empty body here is unsafe: it leaves L1/L2 TLB entries
+	 * tagged with L1's ASID visible after a flush request, which
+	 * on real silicon lets an L2 guest observe L1 mappings it
+	 * should not see.  The dispatcher path that reaches this stub
+	 * must short-circuit to L0 emulation (return 1 / bail to the
+	 * legacy svm.c handler) until a real implementation lands.
 	 */
 }
