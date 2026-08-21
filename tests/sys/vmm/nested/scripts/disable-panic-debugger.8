@@ -41,18 +41,30 @@ contains the following entries:
 .Bd -literal
 debug.debugger_on_panic=0
 kern.panic_reboot_wait_time=5
+kern.powercycle_on_panic=1
 .Ed
 .Pp
-These cause the kernel to automatically reboot after a panic rather than
+These cause the kernel to automatically
+.Em power-cycle
+after a panic rather than
 dropping into the
 .Xr ddb 4
-debugger, and to wait five seconds before rebooting so that console
+debugger, and to wait five seconds before resetting so that console
 messages are flushed.
+A reboot without a power-cycle is not enough on a wedged box: firmware
+must re-init devices.
 This combination makes the host recoverable over
 .Xr ssh 1
-or out-of-band management
-.Pq such as IPMI
 after a panic, without requiring physical console access.
+A hang that never panics is
+.Em not
+covered; pair this with
+.Pa enable-fail-watchdog.sh
+and
+.Pa activate_oneshot_be.sh
+so
+.Va bootfs
+stays on the known-good boot environment.
 .Pp
 This is required on nested-virtualization development and test hosts
 because a bug in the new nested-virt code path can panic the kernel

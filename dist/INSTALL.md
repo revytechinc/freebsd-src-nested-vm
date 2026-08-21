@@ -78,8 +78,15 @@ sudo bectl umount wave7-preflight
 # 3. Install preflight.sh into PATH (NOT into /boot - /boot is reserved for boot files)
 sudo install -m 755 preflight.sh /usr/local/bin/preflight
 
-# 4. Activate the new BE
-sudo bectl activate -t wave7-preflight
+# 4. Fail-reboot contract BEFORE the first candidate boot:
+#    DDB off, power-cycle on panic, watchdog for hangs, vmm not autoloaded.
+sudo ./nested/scripts/disable-panic-debugger.sh
+sudo ./nested/scripts/enable-fail-watchdog.sh
+sudo ./nested/scripts/disable-vmm-autoload.sh
+# Confirm zpool bootfs still names the KNOWN-GOOD BE. Do NOT
+# `zpool set bootfs=.../wave7-preflight` — that is how a failed
+# nested BE never reverts (008).
+sudo ./nested/scripts/activate_oneshot_be.sh wave7-preflight
 
 # 5. Reboot
 sudo shutdown -r +1 "wave-7 install"

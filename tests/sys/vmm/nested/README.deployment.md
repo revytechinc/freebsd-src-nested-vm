@@ -15,13 +15,27 @@ Nested-virt register virtualization introduces new failure modes (kernel
 panics on malformed VMCS12/VMCB12, host-state leaks on partial exits, etc.)
 that an unsuspecting operator might not be able to recover from without
 physical or IPMI access. To make a test host **recoverable** from a
-nested-virt panic, we configure:
+nested-virt **panic or hang**, we configure:
 
-1. **Auto-reboot on panic** — kernel panics reboot instead of dropping
-   into DDB.
-2. **No vmm auto-load at boot** — the operator must explicitly
+1. **Power-cycle on panic** — `debug.debugger_on_panic=0` and
+   `kern.powercycle_on_panic=1`. Do not sit in DDB. A reboot without a
+   power-cycle is not enough on a wedged box.
+2. **Watchdog on hang** — a hang that never panics (no ARP, SSH
+   `No route to host`, box still "up" on the chassis) will not fire
+   panic-reboot. `watchdogd` resets onto the known-good `bootfs`.
+3. **One-shot BE** — `bectl activate -t` only. **Never**
+   `zpool set bootfs` to the candidate. The loader consumes bootonce;
+   the next reset returns to the previous `bootfs`.
+4. **No vmm auto-load at boot** — the operator must explicitly
    `kldload vmm` after verifying the kernel boots cleanly. A broken vmm
    cannot lock the box at boot.
+
+freedev008 (2026-08-21) did **not** fit this pattern: ARP incomplete from
+every lab peer, so the kernel never paniced (hang/NIC dead). Panic-reboot
+never ran. If `bootfs` was also pointed at the candidate, a later reset
+would have come back into the same kernel. Fix: oneshot BE + powercycle +
+watchdog; recover 008 with one chassis/IPMI power cycle, then pick the
+known-good BE at the loader if `bootfs` was flipped.
 
 ## Scripts
 

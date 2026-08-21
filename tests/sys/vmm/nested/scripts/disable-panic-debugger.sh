@@ -39,6 +39,9 @@ SYSCTL_CONF=/etc/sysctl.conf
 # Required sysctl assignments (key=value form, no trailing whitespace).
 LINE_DEBUGGER="debug.debugger_on_panic=0"
 LINE_REBOOT_WAIT="kern.panic_reboot_wait_time=5"
+# Reboot is not enough if the box is wedged. Power-cycle so firmware
+# re-inits devices. A hang with no panic still needs watchdog/IPMI.
+LINE_POWERCYCLE="kern.powercycle_on_panic=1"
 
 log() {
 	printf 'disable-panic-debugger.sh: %s\n' "$*"
@@ -101,19 +104,45 @@ ensure_sysctl_line() {
 	log "${_line} SET (appended to ${_file})"
 }
 
+apply_live()
+{
+	_kv=$1
+	_key=${_kv%%=*}
+	_val=${_kv#*=}
+	if ! command -v sysctl >/dev/null 2>&1; then
+		return 0
+	fi
+	if [ "$(id -u)" -ne 0 ]; then
+		log "live ${_key} not applied (not root)"
+		return 0
+	fi
+	if sysctl -n "$_key" >/dev/null 2>&1; then
+		sysctl "${_key}=${_val}" >/dev/null || log "live set ${_kv} failed"
+	else
+		log "live ${_key} not present on this kernel"
+	fi
+}
+
 main() {
 	log "ensuring panic-reboot sysctls in ${SYSCTL_CONF}"
 	ensure_sysctl_line "$SYSCTL_CONF" "$LINE_DEBUGGER"
 	ensure_sysctl_line "$SYSCTL_CONF" "$LINE_REBOOT_WAIT"
+	ensure_sysctl_line "$SYSCTL_CONF" "$LINE_POWERCYCLE"
 
-	# Report live values for operator visibility. The /etc/sysctl.conf
-	# entry only takes effect on the next reboot; the live numbers here
-	# reflect the current kernel state.
+	# Persist is not enough: a host that already booted with DDB on
+	# (freedev002) will sit in the debugger on the *next* panic until
+	# the live sysctl is flipped too.
+	apply_live "$LINE_DEBUGGER"
+	apply_live "$LINE_REBOOT_WAIT"
+	apply_live "$LINE_POWERCYCLE"
+
 	if command -v sysctl >/dev/null 2>&1; then
 		_live=$(sysctl -n debug.debugger_on_panic 2>/dev/null) || _live=unavailable
 		log "live debug.debugger_on_panic=${_live}"
 		_live=$(sysctl -n kern.panic_reboot_wait_time 2>/dev/null) || _live=unavailable
 		log "live kern.panic_reboot_wait_time=${_live}"
+		_live=$(sysctl -n kern.powercycle_on_panic 2>/dev/null) || _live=unavailable
+		log "live kern.powercycle_on_panic=${_live}"
 	else
 		log "sysctl(8) not present; skipping live-value report"
 	fi

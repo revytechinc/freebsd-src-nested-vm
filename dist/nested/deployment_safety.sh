@@ -43,7 +43,7 @@
 atf_test_case panic_sysctl_set
 panic_sysctl_set_head()
 {
-	atf_set "descr" "Verify debug.debugger_on_panic=0 and kern.panic_reboot_wait_time are set"
+	atf_set "descr" "Verify debug.debugger_on_panic=0, panic wait, and powercycle_on_panic=1"
 	atf_set "require.user" "root"
 }
 panic_sysctl_set_body()
@@ -57,6 +57,8 @@ panic_sysctl_set_body()
 	# Any non-negative integer is acceptable; we only require the script
 	# left it on the system.  A bare >=0 check would be brittle.
 	[ -n "$wait" ] || atf_fail "kern.panic_reboot_wait_time not set"
+	pc=$(sysctl -n kern.powercycle_on_panic 2>/dev/null || true)
+	atf_check_equal "$pc" "1"
 }
 
 atf_test_case vmm_load_disabled
@@ -85,7 +87,9 @@ scripts_exist_head()
 }
 scripts_exist_body()
 {
-	for s in scripts/disable-panic-debugger.sh scripts/disable-vmm-autoload.sh scripts/disable-panic-debugger.8; do
+	for s in scripts/disable-panic-debugger.sh scripts/disable-vmm-autoload.sh \
+	    scripts/disable-panic-debugger.8 scripts/activate_oneshot_be.sh \
+	    scripts/enable-fail-watchdog.sh; do
 		[ -f "$(atf_get_srcdir)/$s" ] || atf_fail "$s missing"
 		case "$s" in
 		*.sh) [ -x "$(atf_get_srcdir)/$s" ] || atf_fail "$s not executable" ;;
