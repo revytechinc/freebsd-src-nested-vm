@@ -89,7 +89,7 @@ preflight_cr4_vmxe_main()
 	# consolidated the VMX gate into CR4_VMXE (0x2000); a regression
 	# to a different bit (e.g. 0x1000) would silently break bhyve.
 	if [ -r "${SPECIALREG}" ]; then
-		if ! grep -Eq 'define[[:space:]]+CR4_VMXE[[:space:]]+0x2000' \
+		if ! grep -Eq 'define[[:space:]]+CR4_VMXE[[:space:]]+0x0*2000' \
 		    "${SPECIALREG}"; then
 			echo "FAIL: CR4_VMXE not defined as 0x2000 in specialreg.h"
 			exit 1
