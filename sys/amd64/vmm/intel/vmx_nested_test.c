@@ -248,7 +248,7 @@ vmxtest_shadowing_gate(void)
 		if (status == 2) {
 			VMXTEST_PASS(2);
 		} else if (status == 0) {
-			VMXTEST_FAIL(2, "nested.vmx=0 (CPU lacks VMCS shadowing?)");
+			VMXTEST_SKIP(2, "nested.vmx=0 (CPU lacks VMCS shadowing, e.g. Ivy Bridge)");
 		} else if (status == 1) {
 			VMXTEST_FAIL(2, "nested.vmx=1 (L0 hypervisor conflict)");
 		} else {
