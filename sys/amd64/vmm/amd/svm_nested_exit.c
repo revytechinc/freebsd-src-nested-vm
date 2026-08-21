@@ -28,6 +28,7 @@
 #include <sys/kernel.h>
 
 #include <machine/vmm.h>
+#include <dev/vmm/vmm_mem.h>
 
 #include "svm_softc.h"
 #include "svm_nested.h"
@@ -46,11 +47,37 @@
  */
 static struct vmcb *svm_nested_vmcb12 = NULL;
 
+struct svm_nested *
+svm_nested_lookup(struct svm_vcpu *vcpu)
+{
+
+	if (vcpu == NULL)
+		return (NULL);
+	return (&vcpu->nested);
+}
+
 void
 svm_nested_set_vmcb12(struct vmcb *vmcb12)
 {
 
 	svm_nested_vmcb12 = vmcb12;
+}
+
+void
+svm_nested_release_vmcb12(struct svm_vcpu *vcpu)
+{
+	struct svm_nested *ns;
+
+	ns = svm_nested_lookup(vcpu);
+	if (ns == NULL)
+		return;
+	if (ns->vmcb12_cookie != NULL) {
+		vm_gpa_release(ns->vmcb12_cookie);
+		ns->vmcb12_cookie = NULL;
+	}
+	ns->vmcb12 = NULL;
+	ns->vmcb12_gpa = 0;
+	svm_nested_set_vmcb12(NULL);
 }
 
 void
@@ -78,8 +105,6 @@ svm_nested_reflect_exit_info_to_vmcb12(struct svm_vcpu *vcpu,
 	ctrl->exitinfo2 = exitinfo2;
 }
 
-static struct svm_nested *svm_nested_lookup(struct svm_vcpu *vcpu) { return NULL; }
-
 void
 svm_nested_handle_vmexit(struct svm_vcpu *vcpu, struct vmcb *vmcb12,
     uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2)
@@ -91,7 +116,9 @@ svm_nested_handle_vmexit(struct svm_vcpu *vcpu, struct vmcb *vmcb12,
 	if (vcpu == NULL)
 		return;
 
-	ns = NULL; /* stub: svm_nested_lookup not yet implemented */
+	ns = svm_nested_lookup(vcpu);
+	if (vmcb12 == NULL && ns != NULL)
+		vmcb12 = ns->vmcb12;
 
 	switch (exitcode) {
 	case VMCB_EXIT_NPF:
@@ -185,11 +212,18 @@ svm_nested_handle_vmexit(struct svm_vcpu *vcpu, struct vmcb *vmcb12,
 		break;
 	}
 
-	if (ns != NULL)
-		ns->nested_in_l2 = false;
-
 	svm_nested_reflect_exit_info_to_vmcb12(vcpu, vmcb12, exitcode,
 	    reflected_exitinfo1, reflected_exitinfo2);
+
+	if (ns != NULL && ns->nested_in_l2) {
+		/*
+		 * Park L2: restore L1 save area into the hardware VMCB
+		 * so the next VMRUN (L0) re-enters L1, not L2.
+		 */
+		vcpu->vmcb->state = ns->l1_state;
+		ns->nested_in_l2 = false;
+		svm_set_dirty(vcpu, 0xffffffff);
+	}
 
 	/*
 	 * T29b: drop L2 translations so L1 cannot observe them.

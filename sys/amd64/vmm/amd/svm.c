@@ -71,6 +71,8 @@
 #include "svm_msr.h"
 #include "svm_nested.h"
 #include "svm_nested_stubs.h"
+#include "svm_nested_exit.h"
+#include "svm_nested_intr.h"
 #include "npt.h"
 #include "io/ppt.h"
 
@@ -82,16 +84,13 @@
  * the entry points but did not wire them into svm_vmexit(), so nSVM
  * launch was dead code. This file pulls them into the dispatcher.
  *
- * Two nested-aware entry points are undeclared in svm_nested*.h and
- * are forward-declared locally so svm.c remains the only file touched
- * by this commit. Subsequent waves should promote these to the
- * canonical headers.
+ * Prototypes come from svm_nested_exit.h / svm_nested_intr.h. The
+ * 5-arg svm_nested_handle_vmexit signature (vmcb12 may be NULL until
+ * the dispatcher can derive it) must match those headers; a stale
+ * file-local 4-arg prototype fails -Werror on the call sites.
  */
 extern int vmm_nested_enable;	/* declared in sys/amd64/vmm/vmm.c */
 int	 svm_nested_status;
-void	 svm_nested_handle_vmexit(struct svm_vcpu *vcpu, uint64_t exitcode,
-    uint64_t exitinfo1, uint64_t exitinfo2);
-int	 svm_nested_drain_pir(struct svm_vcpu *vcpu);
 
 static int svm_nested_l0_warned;
 
@@ -1800,40 +1799,48 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 		 * to enter its L2 guest. Forward to svm_nested_vmrun()
 		 * with the active L1 VMCB as the L1-side context; on
 		 * success the guest is re-launched into L2 (handled=1),
-		 * on failure the wave5 launch state machine is left
-		 * pending and we fall through to the legacy #UD path.
+		 * on failure fall through to #UD (legacy non-nested).
 		 */
-if (svm_nested_active(svm_sc)) {
-			/* T25 stub removed: no real impl yet. */
-			(void)0;
+		if (svm_nested_active(svm_sc) &&
+		    svm_nested_vmrun(vcpu, svm_get_vmcb(vcpu)) == 0) {
+			handled = 1;
+			break;
 		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
 		break;
 	case VMCB_EXIT_VMSAVE:
-		if (svm_nested_active(svm_sc)) {
-			(void)0;
+		if (svm_nested_active(svm_sc) &&
+		    svm_nested_vmsave(vcpu) == 0) {
+			handled = 1;
+			break;
 		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
 		break;
 	case VMCB_EXIT_VMLOAD:
-		if (svm_nested_active(svm_sc)) {
-			(void)0;
+		if (svm_nested_active(svm_sc) &&
+		    svm_nested_vmload(vcpu) == 0) {
+			handled = 1;
+			break;
 		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
 		break;
 	case VMCB_EXIT_STGI:
-		if (svm_nested_active(svm_sc)) {
-			(void)0;
+		if (svm_nested_active(svm_sc) &&
+		    svm_nested_stgi(vcpu) == 0) {
+			handled = 1;
+			break;
 		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
 		break;
 	case VMCB_EXIT_CLGI:
-		if (svm_nested_active(svm_sc)) {
-			(void)0;
+		if (svm_nested_active(svm_sc) &&
+		    svm_nested_clgi(vcpu) == 0) {
+			handled = 1;
+			break;
 		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
@@ -2467,6 +2474,7 @@ svm_vcpu_cleanup(void *vcpui)
 {
 	struct svm_vcpu *vcpu = vcpui;
 
+	svm_nested_release_vmcb12(vcpu);
 	free(vcpu->vmcb, M_SVM);
 	free(vcpu, M_SVM);
 }

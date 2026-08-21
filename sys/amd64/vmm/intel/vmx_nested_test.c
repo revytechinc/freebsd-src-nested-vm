@@ -56,6 +56,7 @@
 
 #include <machine/cpufunc.h>
 #include <machine/specialreg.h>
+#include <x86/x86_var.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -165,11 +166,23 @@ static int vmxtest_skip;
  * returns something with the revision-ID high-bit pattern that all
  * production Intel parts set in MSR_VMX_BASIC[30:0].
  */
+static int
+vmxtest_is_intel(void)
+{
+
+	return (strcmp(cpu_vendor, "GenuineIntel") == 0);
+}
+
 static void
 vmxtest_cap_msr_read(void)
 {
 	uint64_t basic;
 	uint32_t revid;
+
+	if (!vmxtest_is_intel()) {
+		VMXTEST_SKIP(1, "not Intel; skip VMX MSRs");
+		return;
+	}
 
 	basic = rdmsr(MSR_VMX_BASIC);
 	if (basic == 0) {
@@ -177,16 +190,18 @@ vmxtest_cap_msr_read(void)
 		return;
 	}
 	revid = (uint32_t)(basic & 0xffffffff);
-	if ((revid & 0x80000000U) == 0) {
+	if ((revid & 0x80000000U) != 0) {
 		/*
-		 * SDM Vol 3 §25.6.2: "Bits 30:0 of the MSR contain the
-		 * VMCS revision identifier".  All shipping parts set
-		 * bit 31 to indicate a fixed-width VMCS region; if it
-		 * is zero something is very wrong.
+		 * SDM Vol 3 §25.6.2: bits 30:0 are the VMCS revision
+		 * identifier; bit 31 is reserved and must be 0.
 		 */
 		VMXTEST_FAIL(1,
-		    "MSR_VMX_BASIC revision-id bit 31 clear: revid=%#x",
+		    "MSR_VMX_BASIC reserved bit 31 set: revid=%#x",
 		    revid);
+		return;
+	}
+	if ((revid & 0x7fffffffU) == 0) {
+		VMXTEST_FAIL(1, "MSR_VMX_BASIC revision-id bits 30:0 zero");
 		return;
 	}
 	printf("vmx_nested_test: test-1 MSR_VMX_BASIC=%#lx revid=%#x\n",
@@ -210,23 +225,36 @@ vmxtest_cap_msr_read(void)
 static void
 vmxtest_shadowing_gate(void)
 {
+	if (!vmxtest_is_intel()) {
+		VMXTEST_SKIP(2, "not Intel; skip VMCS-shadowing gate");
+		return;
+	}
 	if (!vmxtest_vmm_loaded()) {
 		VMXTEST_SKIP(2, "vmm.ko not loaded (vmx_nested_status uninitialised)");
 		return;
 	}
 
-	printf("vmx_nested_test: test-2 vmx_nested_status=%d\n",
-	    vmx_nested_status);
+	{
+		int status;
+		size_t slen;
 
-	if (vmx_nested_status == 2) {
-		VMXTEST_PASS(2);
-	} else if (vmx_nested_status == 0) {
-		VMXTEST_FAIL(2, "vmx_nested_status=0 (CPU lacks VMCS shadowing?)");
-	} else if (vmx_nested_status == 1) {
-		VMXTEST_FAIL(2, "vmx_nested_status=1 (L0 hypervisor conflict)");
-	} else {
-		VMXTEST_FAIL(2, "vmx_nested_status=%d (unexpected value)",
-		    vmx_nested_status);
+		slen = sizeof(status);
+		if (kernel_sysctlbyname(&thread0, "hw.vmm.nested.vmx", &status,
+		    &slen, NULL, 0, NULL, 0) != 0) {
+			VMXTEST_SKIP(2, "hw.vmm.nested.vmx sysctl missing");
+			return;
+		}
+		printf("vmx_nested_test: test-2 hw.vmm.nested.vmx=%d\n", status);
+		if (status == 2) {
+			VMXTEST_PASS(2);
+		} else if (status == 0) {
+			VMXTEST_FAIL(2, "nested.vmx=0 (CPU lacks VMCS shadowing?)");
+		} else if (status == 1) {
+			VMXTEST_FAIL(2, "nested.vmx=1 (L0 hypervisor conflict)");
+		} else {
+			VMXTEST_FAIL(2, "nested.vmx=%d (unexpected value)",
+			    status);
+		}
 	}
 }
 
@@ -286,6 +314,11 @@ vmxtest_cr4_vmxe(void)
 {
 	uint64_t before, after;
 
+	if (!vmxtest_is_intel()) {
+		VMXTEST_SKIP(4, "not Intel; skip CR4.VMXE toggle");
+		return;
+	}
+
 	if (CR4_VMXE != 0x2000U) {
 		VMXTEST_FAIL(4, "CR4_VMXE=%#x expected 0x2000",
 		    (unsigned)CR4_VMXE);
@@ -324,6 +357,11 @@ static void
 vmxtest_fixed_msr_read(void)
 {
 	uint64_t fixed0, fixed1;
+
+	if (!vmxtest_is_intel()) {
+		VMXTEST_SKIP(5, "not Intel; skip VMX FIXED MSRs");
+		return;
+	}
 
 	fixed0 = rdmsr(MSR_VMX_CR0_FIXED0);
 	fixed1 = rdmsr(MSR_VMX_CR0_FIXED1);

@@ -32,6 +32,7 @@
 #include "x86.h"
 #include "svm.h"
 #include "vmcb.h"
+#include "svm_nested.h"
 
 
 #define SVM_MSR_BITMAP_SIZE (2 * PAGE_SIZE)
@@ -65,6 +66,7 @@ struct svm_vcpu {
 	int		vcpuid;
 	struct dbg	dbg;
 	int		caps;	 /* optional vm capabilities */
+	struct svm_nested nested; /* nSVM per-vCPU state (zeroed at alloc) */
 };
 
 /*
