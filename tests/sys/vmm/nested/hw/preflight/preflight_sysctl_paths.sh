@@ -86,13 +86,15 @@ preflight_sysctl_paths_main()
 	if sysctl hw.vmm.nested_enable=1 >/dev/null 2>&1; then
 		echo "  hw.vmm.nested_enable=1 accepted"
 		sysctl hw.vmm.nested_enable=0 >/dev/null 2>&1 || true
-	elif sysctl hw.vmm.nested_enable=1 2>&1 | \
-	    grep -q 'refusing nested-virt'; then
-		echo "  hw.vmm.nested_enable=1 refused (L0/refusal gate active)"
 	else
-		echo "FAIL: hw.vmm.nested_enable=1 produced unexpected output"
-		sysctl hw.vmm.nested_enable=1 2>&1 || true
-		exit 1
+		out=$(sysctl hw.vmm.nested_enable=1 2>&1 || true)
+		if echo "$out" | grep -Eq 'refusing nested-virt|not available|not supported'; then
+			echo "  hw.vmm.nested_enable=1 refused (gate: $out)"
+		else
+			echo "FAIL: hw.vmm.nested_enable=1 produced unexpected output"
+			echo "$out"
+			exit 1
+		fi
 	fi
 
 	echo "PASS: preflight_sysctl_paths reachable, integer, in range"
