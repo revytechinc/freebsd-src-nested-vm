@@ -31,7 +31,35 @@ Verified on:
 - AMD Zen 5 (Ryzen AI 9 HX 370) running under VMware L0 (nVMX filtered, nSVM confirmed)
 - Intel Ivy Bridge (i7-3770S) bare metal (nVMX correctly BLOCKED due to missing VMCS shadowing)
 
+## VM boot gate (mandatory before metal)
+
+Do **not** install `kernel.amd64` or `vmm.ko.amd64` on bare metal until the
+candidate has booted as a **bhyve guest**. Nested features are not required
+for this gate — a serial console that shows `FreeBSD x.y-CURRENT` and
+`Timecounter` (or `mountroot>` / `login:`) is enough. A panic after those
+markers (for example missing `/sbin/init` on the throwaway UFS image) is
+still a boot PASS.
+
+The hypervisor host must already run a known-good `vmm.ko`. Never `kldload`
+the candidate module on the hypervisor.
+
+```sh
+# On a FreeBSD hypervisor that already has working bhyve (not the target BE).
+# Copy the candidate kernel into place, then:
+sudo env NESTED_GATE_KERNEL=/path/to/kernel.amd64 \
+    NESTED_GATE_VMM_KO=/path/to/vmm.ko.amd64 \
+    NESTED_TEST_DRIVER=force-run \
+    ./tests/sys/vmm/nested/scripts/run_vm_boot_gate.sh
+# Expected: VM BOOT GATE: PASS
+# Classifier-only (any OS): ./tests/sys/vmm/nested/scripts/run_vm_boot_gate.sh selftest
+```
+
+If the gate FAILs, stop. Do not `bectl create`, do not set `bootfs`, do not
+reboot a lab host into the candidate.
+
 ## Install on a FreeBSD 16.0-CURRENT host
+
+Only after **VM BOOT GATE: PASS**:
 
 ```sh
 # 0. Extract the bundle somewhere safe (NOT under /boot)

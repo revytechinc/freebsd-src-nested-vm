@@ -52,12 +52,31 @@ vmm_load="NO"
 Without this, the loader auto-loads `vmm.ko` if any consumer references
 it during boot.
 
+## VM boot gate (before any metal install)
+
+`scripts/run_vm_boot_gate.sh` boots the candidate GENERIC kernel as a
+**bhyve guest** on a hypervisor that already has a known-good `vmm.ko`.
+PASS is kernel ident + `Timecounter` / `mountroot>` / `login:` on the
+guest serial console. Nested sysctls may be missing or 0.
+
+Never `kldload` the candidate `vmm.ko` on the hypervisor. Never install
+the candidate into a boot environment until this gate prints
+`VM BOOT GATE: PASS`.
+
+```sh
+sudo env NESTED_GATE_KERNEL=/path/to/GENERIC/kernel \
+    NESTED_TEST_DRIVER=force-run \
+    ./tests/sys/vmm/nested/scripts/run_vm_boot_gate.sh
+```
+
 ## Boot-time safety flow
 
 The intended operator sequence for a freshly-patched test host:
 
-1. **Boot with patched kernel**. Does the kernel boot? (vmm is not yet
-   loaded.)
+0. **VM boot gate** (`scripts/run_vm_boot_gate.sh`). Does the candidate
+   kernel boot as a guest? Nested features are not required.
+1. **Boot with patched kernel** on metal (only after step 0 PASSes).
+   Does the kernel boot? (vmm is not yet loaded.)
 2. **Verify boot OK** via console or IPMI.
 3. `sudo kldload vmm`. Does vmm load OK? (still no nested yet.)
 4. `sudo sysctl hw.vmm.nested.enable=1`. Enables nested-virt code paths.

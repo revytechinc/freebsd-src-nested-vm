@@ -3,6 +3,11 @@
 #
 # Full nested-virt regression: sysctls, preflight matrix, optional
 # vmx_nested_test.ko, bhyve -N presence.
+#
+# This is the ON-HOST matrix. It is not a substitute for the VM boot
+# gate (run_vm_boot_gate.sh), which must PASS before a candidate kernel
+# is installed on bare metal. Nested features are not required for that
+# gate.
 
 set -eu
 
