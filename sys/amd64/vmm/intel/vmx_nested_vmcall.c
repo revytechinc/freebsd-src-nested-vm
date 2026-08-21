@@ -52,7 +52,7 @@ vmx_nested_vmcall_handle(struct vmx_vcpu *vcpu)
 {
 	struct vmx_nested_state *ns;
 	struct vmxctx *vmxctx;
-	uint64_t rcx __diagused, rbx __diagused, rdx __diagused;
+	uint64_t rcx __unused, rbx __unused, rdx __unused;
 
 	if (vcpu == NULL)
 		return (-1);

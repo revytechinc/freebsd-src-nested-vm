@@ -14,6 +14,7 @@
 #include <sys/types.h>
 
 #include "vmm_nested.h"
+#include "vmcb.h"
 
 /*
  * AMD SVM MSR Permission Map (MSRPM) layout.
@@ -61,7 +62,12 @@ struct svm_vcpu;
  * pointer, the cached L2 VMCB, and the L2 IDT/GDT/CR state.
  */
 struct svm_nested {
-	bool	nested_in_l2;
+	bool		nested_in_l2;
+	bool		gif;		/* STGI/CLGI guest interrupt flag */
+	uint64_t	vmcb12_gpa;
+	struct vmcb	*vmcb12;
+	void		*vmcb12_cookie;
+	struct vmcb_state l1_state;	/* L1 save area parked during L2 */
 };
 
 /*
@@ -111,7 +117,9 @@ void	 svm_nested_build_msrpm(struct svm_softc *sc, struct svm_vcpu *vcpu);
  * the reflection helpers degrade to no-ops so the unit tests can
  * exercise the dispatcher without a real L1 mapping.
  */
+struct svm_nested *svm_nested_lookup(struct svm_vcpu *vcpu);
 void	 svm_nested_set_vmcb12(struct vmcb *vmcb12);
+void	 svm_nested_release_vmcb12(struct svm_vcpu *vcpu);
 
 /*
  * Drop L2-translated TLB entries so L1 cannot observe them. Called
