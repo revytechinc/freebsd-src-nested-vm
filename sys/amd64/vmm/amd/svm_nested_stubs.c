@@ -1,25 +1,37 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Nested SVM instruction emulation (VMRUN/VMLOAD/VMSAVE/CLGI/STGI/SKINIT).
+ * Nested SVM instruction emulation (VMRUN/VMLOAD/VMSAVE/CLGI/STGI).
  *
- * Original BSD code. AMD APM Vol 2 §15.5 / §15.19 are referenced for
- * the instruction semantics only. KVM nSVM was consulted for dispatch
- * order; no GPL source is copied.
+ * Original BSD code. AMD APM Vol 2 §15.5 (VMRUN/#VMEXIT), §15.5.2
+ * (VMLOAD/VMSAVE) and §15.17 (GIF) are referenced for the instruction
+ * semantics only.
  *
- * Limitation (v1): L0 nested-page tables are not composed with L1 NPT.
- * L2 GPA is translated with the existing L0 NPT (L2 GPA treated as L1
- * GPA). Full NPT12 walks belong in a later wave.
+ * Model (v1):
+ *
+ *   - The hardware VMCB owned by L0 doubles as VMCB02. On VMRUN the L1
+ *     save area and the L0-owned control fields are parked in
+ *     'struct svm_nested', the L2 save area from VMCB12 is loaded, and
+ *     the L1 intercept vectors are OR-ed into L0's.
+ *   - When L1 enables nested paging for L2, L2 runs under a per-vCPU
+ *     shadow NPT built from VMCB12.N_CR3 (svm_nested_npt.c). When L1
+ *     runs L2 without nested paging, L2 guest-physical addresses are L1
+ *     guest-physical addresses by definition and L0's own NPT applies.
+ *   - On an intercepted L2 exit (see svm_nested_exit.c) the L2 save
+ *     area is written back to VMCB12, the L1 state is restored, and L1
+ *     resumes at the instruction after VMRUN with GIF clear.
  */
 
 #include <sys/cdefs.h>
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
 #include <machine/vmm.h>
+#include <machine/specialreg.h>
 
 #include <dev/vmm/vmm_mem.h>
 #include <dev/vmm/vmm_ktr.h>
@@ -30,12 +42,49 @@
 #include "svm_nested_stubs.h"
 #include "vmcb.h"
 
+SYSCTL_DECL(_hw_vmm_nested);
+int svm_nested_debug;
+SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm_debug, CTLFLAG_RWTUN,
+    &svm_nested_debug, 0,
+    "Log the first nested-SVM events per vCPU to the console");
+
+/*
+ * Rate-limited console trace of the nested state machine, for bring-up
+ * on machines without a serial console: only the first
+ * SVM_NESTED_DEBUG_MAX events per vCPU are printed, counted from the
+ * first VMRUN. Console output is slow enough to starve L2 of its
+ * time slice, so the budget is deliberately small.
+ */
+#define	SVM_NESTED_DEBUG_MAX	700
+void
+svm_nested_trace(struct svm_vcpu *vcpu, const char *what, uint64_t a,
+    uint64_t b)
+{
+	struct svm_nested *ns;
+
+	if (svm_nested_debug == 0)
+		return;
+	ns = svm_nested_lookup(vcpu);
+	if (ns == NULL || ns->debug_count >= SVM_NESTED_DEBUG_MAX)
+		return;
+	ns->debug_count++;
+	printf("svm_nested[%d]: %s %#lx %#lx\n", vcpu->vcpuid, what,
+	    (unsigned long)a, (unsigned long)b);
+}
+
+/*
+ * VMLOAD/VMSAVE transfer FS, GS, TR, LDTR (including hidden state),
+ * KernelGsBase, STAR, LSTAR, CSTAR, SFMASK and SYSENTER_{CS,ESP,EIP}.
+ */
 static void
-svm_nested_copy_sys_msrs(struct vmcb_state *dst, const struct vmcb_state *src)
+svm_nested_copy_vmload_state(struct vmcb_state *dst,
+    const struct vmcb_state *src)
 {
 
 	dst->fs = src->fs;
 	dst->gs = src->gs;
+	dst->tr = src->tr;
+	dst->ldt = src->ldt;
 	dst->kernelgsbase = src->kernelgsbase;
 	dst->star = src->star;
 	dst->lstar = src->lstar;
@@ -46,7 +95,7 @@ svm_nested_copy_sys_msrs(struct vmcb_state *dst, const struct vmcb_state *src)
 	dst->sysenter_eip = src->sysenter_eip;
 }
 
-static struct vmcb *
+struct vmcb *
 svm_nested_hold_vmcb(struct svm_vcpu *vcpu, uint64_t gpa, int prot,
     void **cookie)
 {
@@ -57,61 +106,200 @@ svm_nested_hold_vmcb(struct svm_vcpu *vcpu, uint64_t gpa, int prot,
 	if ((gpa & PAGE_MASK) != 0)
 		return (NULL);
 	mapping = vm_gpa_hold(vcpu->vcpu, gpa, PAGE_SIZE, prot, cookie);
-	if (mapping == NULL)
-		return (NULL);
 	return (mapping);
 }
 
+/*
+ * Fail a VMRUN the way hardware does for an inconsistent VMCB: the
+ * guest sees #VMEXIT(INVALID) in its VMCB and continues after VMRUN.
+ */
+static void
+svm_nested_vmrun_invalid(struct vmcb *vmcb12)
+{
+
+	vmcb12->ctrl.exitcode = VMCB_EXIT_INVALID;
+	vmcb12->ctrl.exitinfo1 = 0;
+	vmcb12->ctrl.exitinfo2 = 0;
+	vmcb12->ctrl.exitintinfo = 0;
+}
+
+/*
+ * Minimal subset of the APM §15.5.1 VMRUN consistency checks. Anything
+ * L0 does not model is left to hardware, which reports an INVALID exit
+ * that svm_nested_l2_exit() reflects to L1.
+ */
+static bool
+svm_nested_vmcb12_consistent(const struct vmcb *vmcb12)
+{
+	const struct vmcb_state *st = &vmcb12->state;
+	const struct vmcb_ctrl *ctrl = &vmcb12->ctrl;
+
+	if ((ctrl->intercept[VMCB_CTRL2_INTCPT] & VMCB_INTCPT_VMRUN) == 0)
+		return (false);
+	if (ctrl->asid == 0)
+		return (false);
+	if ((st->efer & EFER_SVM) == 0)
+		return (false);
+	if ((st->cr0 & CR0_CD) == 0 && (st->cr0 & CR0_NW) != 0)
+		return (false);
+	if ((st->cr0 >> 32) != 0)
+		return (false);
+	if ((st->efer & EFER_LME) != 0 && (st->cr0 & CR0_PG) != 0 &&
+	    (st->cr4 & CR4_PAE) == 0)
+		return (false);
+	return (true);
+}
+
+/*
+ * VMRUN from L1. 'l1_next_rip' is where L1 resumes after the L2 guest
+ * exits back to it.
+ *
+ * Returns:
+ *   0  L2 state is loaded in the hardware VMCB; caller must not advance
+ *      RIP (it is L2's now).
+ *   2  VMRUN failed with #VMEXIT(INVALID) reflected into VMCB12; L1
+ *      continues at l1_next_rip.
+ *   1  not emulated; caller injects #UD.
+ */
 int
-svm_nested_vmrun(struct svm_vcpu *vcpu, struct vmcb *l1_vmcb)
+svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 {
 	struct svm_nested *ns;
-	struct vmcb *vmcb12;
+	struct vmcb *vmcb, *vmcb12;
+	struct vmcb_ctrl *ctrl;
 	uint64_t gpa;
 	void *cookie;
+	int i;
 
-	if (vcpu == NULL || l1_vmcb == NULL)
+	if (vcpu == NULL)
 		return (1);
-
 	ns = svm_nested_lookup(vcpu);
-	if (ns == NULL)
+	if (ns == NULL || ns->nested_in_l2)
 		return (1);
+	vmcb = svm_get_vmcb(vcpu);
+	ctrl = &vmcb->ctrl;
 
-	gpa = l1_vmcb->state.rax;
-	vmcb12 = svm_nested_hold_vmcb(vcpu, gpa,
-	    VM_PROT_READ | VM_PROT_WRITE, &cookie);
-	if (vmcb12 == NULL)
-		return (1);
-
-	/*
-	 * APM Vol 2: VMRUN is illegal unless the VMCB intercepts VMRUN.
-	 * ASID 0 is reserved on SVM.
-	 */
-	if ((vmcb12->ctrl.intercept[VMCB_CTRL2_INTCPT] &
-	    VMCB_INTCPT_VMRUN) == 0 || vmcb12->ctrl.asid == 0) {
-		vm_gpa_release(cookie);
+	gpa = vmcb->state.rax;
+	vmcb12 = svm_nested_hold_vmcb(vcpu, gpa, VM_PROT_READ | VM_PROT_WRITE,
+	    &cookie);
+	if (vmcb12 == NULL) {
+		SVM_CTR1(vcpu, "nested VMRUN: unmappable VMCB12 %#lx",
+		    (unsigned long)gpa);
 		return (1);
 	}
 
-	svm_nested_release_vmcb12(vcpu);
+	if (vmcb12->ctrl.np_enable != 0 && svm_nested_npt_init(vcpu) != 0) {
+		svm_nested_vmrun_invalid(vmcb12);
+		vm_gpa_release(cookie);
+		return (2);
+	}
 
-	ns->l1_state = l1_vmcb->state;
+	if (!svm_nested_vmcb12_consistent(vmcb12) ||
+	    ((vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_IO) != 0 &&
+	    (vmcb12->ctrl.iopm_base_pa & PAGE_MASK) != 0) ||
+	    ((vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_MSR) != 0 &&
+	    (vmcb12->ctrl.msrpm_base_pa & PAGE_MASK) != 0)) {
+		SVM_CTR1(vcpu, "nested VMRUN: inconsistent VMCB12 %#lx",
+		    (unsigned long)gpa);
+		svm_nested_vmrun_invalid(vmcb12);
+		vm_gpa_release(cookie);
+		return (2);
+	}
+
+	/*
+	 * Park L1. The saved RIP is the instruction after VMRUN so the
+	 * eventual #VMEXIT resumes L1 there, not at VMRUN again.
+	 */
+	svm_nested_release_l1_maps(vcpu);
+
+	/*
+	 * Hold L1's IOPM and MSRPM for the exit handler, which runs in a
+	 * critical section and cannot take them then. Only the maps for
+	 * the intercepts L1 enabled are required.
+	 */
+	if ((vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_IO) != 0) {
+		for (i = 0; i < 3; i++)
+			ns->l1_iopm[i] = vm_gpa_hold(vcpu->vcpu,
+			    vmcb12->ctrl.iopm_base_pa + i * PAGE_SIZE, PAGE_SIZE,
+			    VM_PROT_READ, &ns->l1_iopm_cookie[i]);
+	}
+	if ((vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_MSR) != 0) {
+		for (i = 0; i < 2; i++)
+			ns->l1_msrpm[i] = vm_gpa_hold(vcpu->vcpu,
+			    vmcb12->ctrl.msrpm_base_pa + i * PAGE_SIZE, PAGE_SIZE,
+			    VM_PROT_READ, &ns->l1_msrpm_cookie[i]);
+	}
+
+	ns->l1_state = vmcb->state;
+	ns->l1_state.rip = l1_next_rip;
+	ns->l1_intr_shadow = ctrl->intr_shadow;
+	for (i = 0; i < 5; i++)
+		ns->l0_intercept[i] = ctrl->intercept[i];
+	ns->l0_tsc_offset = ctrl->tsc_offset;
+	ns->l0_ncr3 = ctrl->n_cr3;
+	memcpy(&ns->l0_vintr, &ctrl->v_tpr, sizeof(ns->l0_vintr));
+
 	ns->vmcb12_gpa = gpa;
 	ns->vmcb12 = vmcb12;
 	ns->vmcb12_cookie = cookie;
+
+	/*
+	 * Compose VMCB02 in place.
+	 *
+	 * Save area: L2's, verbatim. Its EFER already has SVME set (checked
+	 * above) so the hardware requirement that EFER.SVME be set while
+	 * the guest runs holds.
+	 *
+	 * Control area: L0's intercepts are mandatory; L1's are added on
+	 * top so any exit L1 asked for is taken and can be reflected. The
+	 * virtual-interrupt block (V_TPR..V_INTR_VECTOR), the interrupt
+	 * shadow and the pending event injection come from VMCB12. The
+	 * TSC offset is the sum of L0's and L1's. IOPM/MSRPM/ASID/NPT stay
+	 * L0's: L1's IOPM and MSRPM are consulted at exit time, and L2
+	 * shares L0's ASID with a forced TLB flush on every L1<->L2 switch.
+	 */
+	vmcb->state = vmcb12->state;
+	for (i = 0; i < 5; i++)
+		ctrl->intercept[i] = ns->l0_intercept[i] |
+		    vmcb12->ctrl.intercept[i];
+	ctrl->intercept[VMCB_CTRL2_INTCPT] |= VMCB_INTCPT_VMRUN |
+	    VMCB_INTCPT_VMLOAD | VMCB_INTCPT_VMSAVE | VMCB_INTCPT_STGI |
+	    VMCB_INTCPT_CLGI | VMCB_INTCPT_SKINIT;
+	/* Bring-up aid: see L2's page faults (re-injected by L0). */
+	if (svm_nested_debug)
+		ctrl->intercept[VMCB_EXC_INTCPT] |= 1u << IDT_PF;
+	memcpy(&ctrl->v_tpr, &vmcb12->ctrl.v_tpr, sizeof(ns->l0_vintr));
+	ctrl->intr_shadow = vmcb12->ctrl.intr_shadow;
+	ctrl->tsc_offset = ns->l0_tsc_offset + vmcb12->ctrl.tsc_offset;
+	ctrl->eventinj = vmcb12->ctrl.eventinj;
+
+	/*
+	 * Nested paging: L0's NPT is always on. With L1 nested paging on,
+	 * point the hardware at the shadow of L1's table, discarding the
+	 * shadow when L1 asked for a TLB flush or changed N_CR3 (the
+	 * cached nested translations hardware would drop). Otherwise L2
+	 * GPAs are L1 GPAs and L0's own table is the right one.
+	 */
+	if (vmcb12->ctrl.np_enable != 0) {
+		if (vmcb12->ctrl.tlb_ctrl != VMCB_TLB_FLUSH_NOTHING ||
+		    vmcb12->ctrl.n_cr3 != ns->l1_ncr3) {
+			svm_nested_npt_flush(vcpu);
+			ns->l1_ncr3 = vmcb12->ctrl.n_cr3;
+		}
+		ctrl->n_cr3 = ns->npt02_pa;
+	}
+
 	ns->nested_in_l2 = true;
-	ns->gif = true;
+	ns->gif = true;			/* VMRUN sets GIF */
 
-	/* Enter L2: load L2 save area into the hardware VMCB. */
-	l1_vmcb->state = vmcb12->state;
-	l1_vmcb->ctrl.intercept[VMCB_CTRL2_INTCPT] |=
-	    VMCB_INTCPT_VMRUN | VMCB_INTCPT_VMLOAD | VMCB_INTCPT_VMSAVE |
-	    VMCB_INTCPT_STGI | VMCB_INTCPT_CLGI | VMCB_INTCPT_SKINIT;
-
-	svm_nested_set_vmcb12(vmcb12);
 	svm_set_dirty(vcpu, 0xffffffff);
-	vcpu->nextrip = l1_vmcb->state.rip;
-	SVM_CTR1(vcpu, "nested VMRUN vmcb12_gpa=%#lx", (unsigned long)gpa);
+	svm_nested_tlb_flush(vcpu);
+	if (ns->l1_ncr3 == 0 && ns->debug_count > 0)
+		ns->debug_count = 0;	/* budget starts at the first VMRUN */
+	if (ns->l1_ncr3 == 0)
+		svm_nested_trace(vcpu, "vmrun", gpa, vmcb->state.rip);
+	SVM_CTR2(vcpu, "nested VMRUN vmcb12=%#lx l2_rip=%#lx",
+	    (unsigned long)gpa, (unsigned long)vmcb->state.rip);
 	return (0);
 }
 
@@ -130,7 +318,7 @@ svm_nested_vmsave(struct svm_vcpu *vcpu)
 	    &cookie);
 	if (dst == NULL)
 		return (1);
-	svm_nested_copy_sys_msrs(&dst->state, &vmcb->state);
+	svm_nested_copy_vmload_state(&dst->state, &vmcb->state);
 	vm_gpa_release(cookie);
 	return (0);
 }
@@ -149,9 +337,10 @@ svm_nested_vmload(struct svm_vcpu *vcpu)
 	src = svm_nested_hold_vmcb(vcpu, gpa, VM_PROT_READ, &cookie);
 	if (src == NULL)
 		return (1);
-	svm_nested_copy_sys_msrs(&vmcb->state, &src->state);
-	svm_set_dirty(vcpu, VMCB_CACHE_SEG);
+	svm_nested_copy_vmload_state(&vmcb->state, &src->state);
 	vm_gpa_release(cookie);
+	/* FS/GS/TR/LDTR and the MSRs are not covered by VMCB clean bits. */
+	svm_set_dirty(vcpu, VMCB_CACHE_SEG | VMCB_CACHE_DT);
 	return (0);
 }
 
@@ -179,25 +368,107 @@ svm_nested_stgi(struct svm_vcpu *vcpu)
 	return (0);
 }
 
-void
-svm_nested_skinit(struct svm_vcpu *vcpu)
+bool
+svm_nested_gif(struct svm_vcpu *vcpu)
 {
 	struct svm_nested *ns;
-	struct vmcb *vmcb12;
 
 	ns = svm_nested_lookup(vcpu);
-	vmcb12 = (ns != NULL) ? ns->vmcb12 : NULL;
-	svm_nested_handle_vmexit(vcpu, vmcb12, VMCB_EXIT_INVALID, 0, 0);
+	return (ns == NULL || ns->gif);
 }
 
+/*
+ * Force a TLB flush on the next VMRUN. L1 and L2 share L0's ASID, so
+ * every switch between them must discard the other's translations.
+ * Zeroing the ASID generation makes check_asid() allocate a fresh ASID
+ * (with a flush) before the next entry; ctrl->tlb_ctrl cannot be set
+ * directly because check_asid() resets it.
+ */
 void
 svm_nested_tlb_flush(struct svm_vcpu *vcpu)
 {
-	struct vmcb_ctrl *ctrl;
 
-	if (vcpu == NULL || vcpu->vmcb == NULL)
+	if (vcpu == NULL)
 		return;
-	ctrl = svm_get_vmcb_ctrl(vcpu);
-	ctrl->tlb_ctrl = VMCB_TLB_FLUSH_GUEST;
-	svm_set_dirty(vcpu, VMCB_CACHE_ASID);
+	vcpu->asid.gen = 0;
+}
+
+/*
+ * Drop every L1 page held for the current L2 run.
+ */
+void
+svm_nested_release_l1_maps(struct svm_vcpu *vcpu)
+{
+	struct svm_nested *ns;
+	int i;
+
+	ns = svm_nested_lookup(vcpu);
+	if (ns == NULL)
+		return;
+	for (i = 0; i < 3; i++) {
+		if (ns->l1_iopm[i] != NULL) {
+			vm_gpa_release(ns->l1_iopm_cookie[i]);
+			ns->l1_iopm[i] = NULL;
+			ns->l1_iopm_cookie[i] = NULL;
+		}
+	}
+	for (i = 0; i < 2; i++) {
+		if (ns->l1_msrpm[i] != NULL) {
+			vm_gpa_release(ns->l1_msrpm_cookie[i]);
+			ns->l1_msrpm[i] = NULL;
+			ns->l1_msrpm_cookie[i] = NULL;
+		}
+	}
+	svm_nested_release_vmcb12(vcpu);
+}
+
+/*
+ * vmm_ops.nested for SVM: complete the work the exit handler deferred.
+ * Runs from vm_run() outside the critical section. Sets vme->rip to
+ * the resume address and returns 0, or returns an error to hand the
+ * exit to userland.
+ */
+int
+svm_nested_op(void *vcpui, struct vm_exit *vme)
+{
+	struct svm_vcpu *vcpu = vcpui;
+	struct vmcb_state *state;
+	int error;
+
+	state = svm_get_vmcb_state(vcpu);
+	switch (vme->u.nested.op) {
+	case VM_NESTED_OP_VMRUN:
+		error = svm_nested_vmrun(vcpu, vme->u.nested.info1);
+		if (error == 0)
+			vme->rip = state->rip;		/* now L2's */
+		else if (error == 2)
+			vme->rip = vme->u.nested.info1;	/* VMEXIT_INVALID */
+		else {
+			vm_inject_ud(vcpu->vcpu);
+			vme->rip = state->rip;
+		}
+		return (0);
+	case VM_NESTED_OP_VMLOAD:
+	case VM_NESTED_OP_VMSAVE:
+		if (vme->u.nested.op == VM_NESTED_OP_VMLOAD)
+			error = svm_nested_vmload(vcpu);
+		else
+			error = svm_nested_vmsave(vcpu);
+		if (error == 0) {
+			vme->rip = vme->u.nested.info1;
+		} else {
+			vm_inject_ud(vcpu->vcpu);
+			vme->rip = state->rip;
+		}
+		return (0);
+	case VM_NESTED_OP_L2EXIT:
+		error = svm_nested_l2_exit(vcpu, vme->u.nested.code,
+		    vme->u.nested.info1, vme->u.nested.info2);
+		if (error == 0)
+			return (EINVAL);
+		vme->rip = state->rip;	/* L2's (resolved) or L1's (reflected) */
+		return (0);
+	default:
+		return (EINVAL);
+	}
 }

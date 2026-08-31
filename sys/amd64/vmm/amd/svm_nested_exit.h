@@ -40,16 +40,25 @@ struct svm_vcpu;
  *   - L1 ASID TLB entries are flushed (T29b) to drop L2
  *     translations.
  */
-void	 svm_nested_handle_vmexit(struct svm_vcpu *vcpu, struct vmcb *vmcb12,
-	     uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2);
-
+/*
+ * Critical-section safe: does an exit taken while running L2 need the
+ * nested machinery (reflection to L1 or a shadow-NPT fill)? Uses only
+ * the VMCB12 and the L1 IOPM/MSRPM pages held at VMRUN.
+ */
+bool	 svm_nested_l2_exit_needed(struct svm_vcpu *vcpu, uint64_t exitcode,
+	     uint64_t exitinfo1);
+/*
+ * vm_run() context: complete an L2 exit. Returns 2 when the fault was
+ * resolved and L2 resumes, 1 when the exit was delivered to L1, 0 when
+ * the exit was not for the nested machinery.
+ */
+int	 svm_nested_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
+	     uint64_t exitinfo1, uint64_t exitinfo2);
+void	 svm_nested_reflect_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
+	     uint64_t exitinfo1, uint64_t exitinfo2);
 /*
  * Direct writer of the L1 VMCB12 exit-info fields. Useful when the
  * caller has already inspected the L2 exit and wants to push the
  * raw values into L1 without going through the full dispatch.
  */
-void	 svm_nested_reflect_exit_info_to_vmcb12(struct svm_vcpu *vcpu,
-	     struct vmcb *vmcb12, uint64_t exitcode, uint64_t exitinfo1,
-	     uint64_t exitinfo2);
-
 #endif /* _VMM_SVM_NESTED_EXIT_H_ */

@@ -47,48 +47,57 @@
  * 32-byte alignment and zero-init.
  */
 #define	SVM_NESTED_PIR_WORDS	4
-static uint64_t svm_nested_pir[MAXCPU][SVM_NESTED_PIR_WORDS];
 
-static void
-svm_nested_pir_set(int vcpuid, uint8_t vector)
+/* The PIR lives in the per-vCPU nested state so VMs cannot alias. */
+static uint64_t *
+svm_nested_pir_of(struct svm_vcpu *vcpu)
 {
-	uint64_t mask;
-	unsigned idx;
+	struct svm_nested *ns;
 
-	if (vcpuid < 0 || vcpuid >= MAXCPU)
-		return;
-	if (vector >= 256)
-		return;
-	idx = vector / 64;
-	mask = (uint64_t)1 << (vector % 64);
-	svm_nested_pir[vcpuid][idx] |= mask;
+	ns = svm_nested_lookup(vcpu);
+	return (ns != NULL ? ns->pir : NULL);
 }
 
 static void
-svm_nested_pir_clear(int vcpuid, uint8_t vector)
+svm_nested_pir_set(struct svm_vcpu *vcpu, uint8_t vector)
 {
-	uint64_t mask;
+	uint64_t *pir, mask;
 	unsigned idx;
 
-	if (vcpuid < 0 || vcpuid >= MAXCPU)
-		return;
-	if (vector >= 256)
+	pir = svm_nested_pir_of(vcpu);
+	if (pir == NULL)
 		return;
 	idx = vector / 64;
 	mask = (uint64_t)1 << (vector % 64);
-	svm_nested_pir[vcpuid][idx] &= ~mask;
+	pir[idx] |= mask;
+}
+
+static void
+svm_nested_pir_clear(struct svm_vcpu *vcpu, uint8_t vector)
+{
+	uint64_t *pir, mask;
+	unsigned idx;
+
+	pir = svm_nested_pir_of(vcpu);
+	if (pir == NULL)
+		return;
+	idx = vector / 64;
+	mask = (uint64_t)1 << (vector % 64);
+	pir[idx] &= ~mask;
 }
 
 static int
-svm_nested_pir_highest(int vcpuid)
+svm_nested_pir_highest(struct svm_vcpu *vcpu)
 {
+	uint64_t *pir;
 	int word;
 
-	if (vcpuid < 0 || vcpuid >= MAXCPU)
+	pir = svm_nested_pir_of(vcpu);
+	if (pir == NULL)
 		return (-1);
 	for (word = SVM_NESTED_PIR_WORDS - 1; word >= 0; word--) {
-		if (svm_nested_pir[vcpuid][word] != 0) {
-			uint64_t bits = svm_nested_pir[vcpuid][word];
+		if (pir[word] != 0) {
+			uint64_t bits = pir[word];
 			int bit;
 			for (bit = 63; bit >= 0; bit--) {
 				if (bits & ((uint64_t)1 << bit))
@@ -137,7 +146,7 @@ svm_nested_inject_pending_interrupt(struct svm_vcpu *vcpu, uint8_t vector,
 		return;
 
 	if (type == VMCB_EVENTINJ_TYPE_INTR) {
-		svm_nested_pir_set(vcpu->vcpuid, vector);
+		svm_nested_pir_set(vcpu, vector);
 	}
 
 	ctrl->eventinj = svm_nested_encode_eventinj(vector, type, 0, 0);
@@ -153,7 +162,7 @@ svm_nested_inject_extint(struct svm_vcpu *vcpu, uint8_t vector)
 		return;
 	svm_nested_inject_pending_interrupt(vcpu, vector,
 	    VMCB_EVENTINJ_TYPE_INTR);
-	svm_nested_pir_set(vcpu->vcpuid, vector);
+	svm_nested_pir_set(vcpu, vector);
 }
 
 void
@@ -197,11 +206,11 @@ svm_nested_drain_pir(struct svm_vcpu *vcpu)
 
 	if (vcpu == NULL)
 		return (-1);
-	vector = svm_nested_pir_highest(vcpu->vcpuid);
+	vector = svm_nested_pir_highest(vcpu);
 	if (vector < 0)
 		return (-1);
 
-	svm_nested_pir_clear(vcpu->vcpuid, (uint8_t)vector);
+	svm_nested_pir_clear(vcpu, (uint8_t)vector);
 	svm_nested_inject_pending_interrupt(vcpu, (uint8_t)vector,
 	    VMCB_EVENTINJ_TYPE_INTR);
 	SVM_CTR1(vcpu, "pir_drain: delivered vector=%d", vector);

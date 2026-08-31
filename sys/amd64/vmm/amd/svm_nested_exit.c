@@ -4,21 +4,19 @@
  * Copyright (c) 2026 The FreeBSD Project Contributors.
  * All rights reserved.
  *
- * General nested #VMEXIT synthesis infrastructure for AMD SVM (T25a).
+ * Nested SVM #VMEXIT reflection: L2 -> L1.
  *
- * When L2 takes a #VMEXIT while L1 is parked, L0 must reflect the
- * exit reason back to L1 via the L1-stated VMCB12 (ExitCode,
- * ExitInfo1, ExitInfo2, ExitIntInfo) per AMD APM Vol 2 §15.5.
+ * Every #VMEXIT taken while the vCPU is running L2 comes through
+ * svm_nested_l2_exit(). If L1 asked to intercept the condition (its
+ * VMCB12 intercept vectors, IOPM or MSRPM), the L2 save area is written
+ * back to VMCB12 together with the exit information, the parked L1
+ * state is restored into the hardware VMCB and L1 resumes after VMRUN
+ * with GIF clear, exactly as hardware would deliver a #VMEXIT to it.
+ * Otherwise L0 handles the exit itself on behalf of L2 (CPUID, I/O to
+ * L0-emulated devices, nested page faults under the flat-NPT model).
  *
- * The dispatch table below covers the most-common L2 exit reasons
- * (NPF, INTR, NMI, VINTR, CR/DR R/W, CPUID, RDTSC, RDPMC, HLT,
- * PAUSE, IOIO, MSR, TRIPLE_FAULT, TASK_SWITCH). Anything outside
- * this set is reflected as a generic VMEXIT with the exit code
- * preserved and a warning logged so the operator notices an L2
- * instruction class L0 did not enumerate.
- *
- * Original BSD code; KVM arch/x86/kvm/svm/svm.c::nested_svm_exit_handled
- * was consulted for the dispatch order only. No source copied.
+ * Original BSD code; AMD APM Vol 2 §15.6 and §15.7 are referenced for
+ * the #VMEXIT semantics and the exit-code / intercept-bit mapping.
  */
 
 #include <sys/cdefs.h>
@@ -27,25 +25,19 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 
+#include <vm/vm.h>
+#include <vm/pmap.h>
+
 #include <machine/vmm.h>
 #include <dev/vmm/vmm_mem.h>
+#include <dev/vmm/vmm_ktr.h>
 
 #include "svm_softc.h"
 #include "svm_nested.h"
 #include "svm_nested_exit.h"
+#include "svm_nested_stubs.h"
 #include "vmm_nested.h"
-#include <dev/vmm/vmm_ktr.h>
 #include "vmcb.h"
-
-/*
- * Apply the four exit-info fields to the L1 VMCB12 (mapped by the
- * caller via vm_gpa_hold). The address is taken from a thread-local
- * 'vmcb12' pointer that the wave5 entry path installs on each L2
- * entry; if no VMCB12 is installed (test code with no L1 backing),
- * the function is a no-op so the unit tests can exercise the
- * dispatcher without a real L1 mapping.
- */
-static struct vmcb *svm_nested_vmcb12 = NULL;
 
 struct svm_nested *
 svm_nested_lookup(struct svm_vcpu *vcpu)
@@ -56,11 +48,13 @@ svm_nested_lookup(struct svm_vcpu *vcpu)
 	return (&vcpu->nested);
 }
 
-void
-svm_nested_set_vmcb12(struct vmcb *vmcb12)
+bool
+svm_nested_in_l2(struct svm_vcpu *vcpu)
 {
+	struct svm_nested *ns;
 
-	svm_nested_vmcb12 = vmcb12;
+	ns = svm_nested_lookup(vcpu);
+	return (ns != NULL && ns->nested_in_l2);
 }
 
 void
@@ -77,160 +71,241 @@ svm_nested_release_vmcb12(struct svm_vcpu *vcpu)
 	}
 	ns->vmcb12 = NULL;
 	ns->vmcb12_gpa = 0;
-	svm_nested_set_vmcb12(NULL);
 }
 
-void
-svm_nested_reflect_exit_info_to_vmcb12(struct svm_vcpu *vcpu,
-    struct vmcb *vmcb12, uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2)
-{
-
-	struct vmcb_ctrl *ctrl;
-
-	(void)vcpu;
-
-	if (vmcb12 == NULL) {
-		/*
-		 * No L1 VMCB12 mapped: nothing to reflect. Used by
-		 * the unit-test path that exercises the dispatcher in
-		 * isolation. The caller can inspect the captured
-		 * 'last_reflected_*' variables via the test module.
-		 */
-		return;
-	}
-
-	ctrl = &vmcb12->ctrl;
-	ctrl->exitcode = exitcode;
-	ctrl->exitinfo1 = exitinfo1;
-	ctrl->exitinfo2 = exitinfo2;
-}
-
-void
-svm_nested_handle_vmexit(struct svm_vcpu *vcpu, struct vmcb *vmcb12,
-    uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2)
+/*
+ * Does L1's IOPM intercept 'port'? One bit per port (APM §15.10.1); the
+ * pages were held at VMRUN so this is safe in the exit handler. A page
+ * that could not be held reads as "intercept" (fail closed).
+ */
+static bool
+svm_nested_l1_iopm_intercepts(struct svm_vcpu *vcpu, uint64_t exitinfo1)
 {
 	struct svm_nested *ns;
-	uint64_t reflected_exitinfo1 = exitinfo1;
-	uint64_t reflected_exitinfo2 = exitinfo2;
-
-	if (vcpu == NULL)
-		return;
+	unsigned port, byte;
 
 	ns = svm_nested_lookup(vcpu);
-	if (vmcb12 == NULL && ns != NULL)
-		vmcb12 = ns->vmcb12;
+	port = (exitinfo1 >> 16) & 0xffff;
+	byte = port / 8;
+	if (ns->l1_iopm[byte / PAGE_SIZE] == NULL)
+		return (true);
+	return ((ns->l1_iopm[byte / PAGE_SIZE][byte % PAGE_SIZE] &
+	    (1 << (port % 8))) != 0);
+}
+
+/*
+ * Does L1's MSRPM intercept the MSR in RCX? svm_msr_bitmap_locate()
+ * gives the read bit, the write bit follows it; EXITINFO1 bit 0 is set
+ * for WRMSR. MSRs outside the mapped ranges always exit.
+ */
+static bool
+svm_nested_l1_msrpm_intercepts(struct svm_vcpu *vcpu, uint64_t exitinfo1)
+{
+	struct svm_nested *ns;
+	struct svm_regctx *ctx;
+	size_t byte;
+	unsigned bit;
+
+	ns = svm_nested_lookup(vcpu);
+	ctx = svm_get_guest_regctx(vcpu);
+	if (svm_msr_bitmap_locate((uint32_t)ctx->sctx_rcx, &byte, &bit) != 0)
+		return (true);
+	if ((exitinfo1 & 1) != 0)
+		bit++;
+	if (ns->l1_msrpm[byte / PAGE_SIZE] == NULL)
+		return (true);
+	return ((ns->l1_msrpm[byte / PAGE_SIZE][byte % PAGE_SIZE] &
+	    (1u << bit)) != 0);
+}
+
+/*
+ * Would L1 have taken this exit? Exit codes below 0xA0 map directly
+ * onto the five 32-bit intercept vectors (APM §15.7 / Appendix C).
+ */
+static bool
+svm_nested_l1_intercepts(struct svm_vcpu *vcpu, uint64_t exitcode,
+    uint64_t exitinfo1);
+
+bool
+svm_nested_l2_exit_needed(struct svm_vcpu *vcpu, uint64_t exitcode,
+    uint64_t exitinfo1)
+{
+	struct svm_nested *ns;
+
+	ns = svm_nested_lookup(vcpu);
+	if (ns == NULL || !ns->nested_in_l2 || ns->vmcb12 == NULL)
+		return (false);
+	if (exitcode == VMCB_EXIT_NPF)
+		return (ns->vmcb12->ctrl.np_enable != 0);
+	return (svm_nested_l1_intercepts(vcpu, exitcode, exitinfo1));
+}
+
+static bool
+svm_nested_l1_intercepts(struct svm_vcpu *vcpu, uint64_t exitcode,
+    uint64_t exitinfo1)
+{
+	struct svm_nested *ns;
+	const struct vmcb_ctrl *c12;
+	unsigned word, bit;
+
+	ns = svm_nested_lookup(vcpu);
+	c12 = &ns->vmcb12->ctrl;
 
 	switch (exitcode) {
-	case VMCB_EXIT_NPF:
-		/*
-		 * Nested page fault. L0 already filled EXITINFO1 with
-		 * the NPF error code and EXITINFO2 with the GPA; L1's
-		 * VMCB12 wants the same fields. No remapping: L2's
-		 * GPAs are L1's GPAs.
-		 */
-		SVM_CTR3(vcpu, "npf_reflect: gpa=%#lx err=%#lx code=%#lx",
-		    (unsigned long)exitinfo2, (unsigned long)exitinfo1,
-		    (unsigned long)exitcode);
-		break;
-
-	case VMCB_EXIT_INTR:
-		/*
-		 * Physical interrupt. L0 cannot decide which vector to
-		 * deliver to L2; L1 picks. Reflect as-is and let L1's
-		 * interrupt-window logic inject via T25b.
-		 */
-		reflected_exitinfo2 = 0;
-		break;
-
-	case VMCB_EXIT_NMI:
-		reflected_exitinfo2 = 0;
-		break;
-
-	case VMCB_EXIT_VINTR:
-		/*
-		 * Virtual interrupt — handled inside L1 (L1 set up the
-		 * interrupt-window intercept). Pass through unchanged.
-		 */
-		break;
-
-	case 0x20 ... 0x2F:	/* DR0..DR7 read */
-	case 0x30 ... 0x3F:	/* DR0..DR7 write */
-		break;
-
-	case VMCB_EXIT_CPUID:
-		reflected_exitinfo2 = 0;
-		break;
-
-	case VMCB_EXIT_HLT:
-	case VMCB_EXIT_PAUSE:
-		reflected_exitinfo2 = 0;
-		break;
-
+	case VMCB_EXIT_INVALID:
+		/* The hardware rejected the composed VMCB: L1's problem. */
+		return (true);
 	case VMCB_EXIT_IO:
-		/*
-		 * IOIO intercept. EXITINFO1 carries port, size, and
-		 * direction (per AMD APM Vol 2 §15.7). EXITINFO2 is
-		 * the data (for OUT) or zero.
-		 */
-		break;
-
+		if ((c12->intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_IO) == 0)
+			return (false);
+		return (svm_nested_l1_iopm_intercepts(vcpu, exitinfo1));
 	case VMCB_EXIT_MSR:
-		/*
-		 * MSR intercept. EXITINFO1 carries the MSR number
-		 * (low 32 bits) and the read/write flag (bit 0). EXITINFO2
-		 * carries the value (for WRMSR) or zero.
-		 */
-		break;
-
-	case VMCB_EXIT_SHUTDOWN:
-		/*
-		 * Triple fault: L2 is unrecoverable. Mark L2 as gone
-		 * so the next L2 entry is forced to rebuild the L2
-		 * VMCB. The L1 hypervisor sees a normal SHUTDOWN exit
-		 * and decides whether to terminate or restart.
-		 */
-		if (ns != NULL)
-			ns->nested_in_l2 = false;
-		break;
-
-	case VMCB_EXIT_IRET:
-		/*
-		 * IRET intercepted by L1's NMI-blocking or
-		 * interrupt-window logic. Pass through.
-		 */
-		break;
-
+		if ((c12->intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_MSR) == 0)
+			return (false);
+		return (svm_nested_l1_msrpm_intercepts(vcpu, exitinfo1));
 	default:
-		/*
-		 * Uncommon exit reason: reflect as-is and log. The
-		 * unknown reason survives in the L1 VMCB12 so the L1
-		 * hypervisor (which understands all of its own
-		 * intercepts) can decide what to do.
-		 */
-		SVM_CTR2(vcpu, "vmexit: uncommon exitcode %#lx info1=%#lx",
-		    (unsigned long)exitcode, (unsigned long)exitinfo1);
 		break;
 	}
+	if (exitcode >= 0xa0)
+		return (false);
+	word = exitcode / 32;
+	bit = exitcode % 32;
+	return ((c12->intercept[word] & (1u << bit)) != 0);
+}
 
-	svm_nested_reflect_exit_info_to_vmcb12(vcpu, vmcb12, exitcode,
-	    reflected_exitinfo1, reflected_exitinfo2);
+int
+svm_nested_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
+    uint64_t exitinfo1, uint64_t exitinfo2)
+{
+	struct svm_nested *ns;
+	int error;
 
-	if (ns != NULL && ns->nested_in_l2) {
+	ns = svm_nested_lookup(vcpu);
+	if (ns == NULL || !ns->nested_in_l2 || ns->vmcb12 == NULL)
+		return (0);
+
+	if (exitcode == VMCB_EXIT_NPF) {
 		/*
-		 * Park L2: restore L1 save area into the hardware VMCB
-		 * so the next VMRUN (L0) re-enters L1, not L2.
+		 * Nested page fault under the shadow NPT: install the
+		 * translation and resume L2, or reflect to L1 if its
+		 * table does not map the address. With L1 nested paging
+		 * off, L2 GPAs are L1 GPAs and L0 handles the fault.
 		 */
-		vcpu->vmcb->state = ns->l1_state;
-		ns->nested_in_l2 = false;
-		svm_set_dirty(vcpu, 0xffffffff);
+		error = svm_nested_npt_fault(vcpu, exitinfo2, exitinfo1);
+		if (error < 0)
+			return (0);
+		return (error == 0 ? 2 : 1);
 	}
+
+	if (!svm_nested_l1_intercepts(vcpu, exitcode, exitinfo1)) {
+		svm_nested_trace(vcpu, "l2-exit-l0", exitcode,
+		    svm_get_vmcb_state(vcpu)->rip);
+		SVM_CTR1(vcpu, "L2 exit %#lx handled by L0",
+		    (unsigned long)exitcode);
+		return (0);
+	}
+	svm_nested_reflect_l2_exit(vcpu, exitcode, exitinfo1, exitinfo2);
+	return (1);
+}
+
+/*
+ * #VMEXIT restores only part of the host (L1) state from the host save
+ * area: the segment registers ES/CS/SS/DS, GDTR/IDTR, EFER, CR0/CR3/CR4,
+ * RFLAGS, RIP, RSP and RAX (APM Vol 2 §15.5.2 / §15.6). FS, GS, TR,
+ * LDTR, KernelGsBase, STAR/LSTAR/CSTAR/SFMASK and the SYSENTER MSRs are
+ * deliberately left as L2 loaded them, so that L1's VMSAVE after the
+ * exit captures L2's values and L1 reloads its own with its usual
+ * wrmsr/ltr/lldt sequence.
+ */
+static void
+svm_nested_restore_l1_host_state(struct vmcb_state *hw,
+    const struct vmcb_state *l1)
+{
+
+	hw->es = l1->es;
+	hw->cs = l1->cs;
+	hw->ss = l1->ss;
+	hw->ds = l1->ds;
+	hw->gdt = l1->gdt;
+	hw->idt = l1->idt;
+	hw->cpl = l1->cpl;
+	hw->efer = l1->efer;
+	hw->cr4 = l1->cr4;
+	hw->cr3 = l1->cr3;
+	hw->cr0 = l1->cr0;
+	hw->dr7 = l1->dr7;
+	hw->dr6 = l1->dr6;
+	hw->rflags = l1->rflags;
+	hw->rip = l1->rip;
+	hw->rsp = l1->rsp;
+	hw->rax = l1->rax;
+	hw->cr2 = l1->cr2;
+	hw->g_pat = l1->g_pat;
+	hw->dbgctl = l1->dbgctl;
+}
+
+/*
+ * Deliver #VMEXIT(exitcode) to L1 for the L2 that is running.
+ */
+void
+svm_nested_reflect_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
+    uint64_t exitinfo1, uint64_t exitinfo2)
+{
+	struct svm_nested *ns;
+	struct vmcb *vmcb, *vmcb12;
+	struct vmcb_ctrl *ctrl;
+	int i;
+
+	ns = svm_nested_lookup(vcpu);
+	KASSERT(ns->nested_in_l2 && ns->vmcb12 != NULL,
+	    ("svm_nested_reflect_l2_exit: not in L2"));
+	if (exitcode != VMCB_EXIT_INTR && exitcode != VMCB_EXIT_NPF) {
+		svm_nested_trace(vcpu, "reflect", exitcode,
+		    svm_get_vmcb_state(vcpu)->rip);
+		svm_nested_trace(vcpu, "reflect-info", exitinfo1, exitinfo2);
+	}
+
+	vmcb = svm_get_vmcb(vcpu);
+	ctrl = &vmcb->ctrl;
+	vmcb12 = ns->vmcb12;
 
 	/*
-	 * T29b: drop L2 translations so L1 cannot observe them.
+	 * #VMEXIT to L1: write the L2 save area and the exit information
+	 * into VMCB12. The event that was being delivered when the exit
+	 * happened (EXITINTINFO) belongs to L1 now; clear it in the
+	 * hardware VMCB so L0 does not re-inject it into L1.
 	 */
+	vmcb12->state = vmcb->state;
+	vmcb12->ctrl.exitcode = exitcode;
+	vmcb12->ctrl.exitinfo1 = exitinfo1;
+	vmcb12->ctrl.exitinfo2 = exitinfo2;
+	vmcb12->ctrl.exitintinfo = ctrl->exitintinfo;
+	vmcb12->ctrl.nrip = ctrl->nrip;
+	vmcb12->ctrl.inst_len = ctrl->inst_len;
+	memcpy(vmcb12->ctrl.inst_bytes, ctrl->inst_bytes,
+	    sizeof(vmcb12->ctrl.inst_bytes));
+	memcpy(&vmcb12->ctrl.v_tpr, &ctrl->v_tpr, sizeof(ns->l0_vintr));
+	vmcb12->ctrl.intr_shadow = ctrl->intr_shadow;
+	vmcb12->ctrl.eventinj = 0;
+	ctrl->exitintinfo = 0;
+
+	/* Restore L1 (the #VMEXIT-restored subset) and L0's control fields. */
+	svm_nested_restore_l1_host_state(&vmcb->state, &ns->l1_state);
+	for (i = 0; i < 5; i++)
+		ctrl->intercept[i] = ns->l0_intercept[i];
+	memcpy(&ctrl->v_tpr, &ns->l0_vintr, sizeof(ns->l0_vintr));
+	ctrl->intr_shadow = ns->l1_intr_shadow;
+	ctrl->tsc_offset = ns->l0_tsc_offset;
+	ctrl->n_cr3 = ns->l0_ncr3;
+	ctrl->eventinj = 0;
+
+	ns->nested_in_l2 = false;
+	ns->gif = false;		/* #VMEXIT clears GIF */
+	svm_nested_release_l1_maps(vcpu);
+	svm_set_dirty(vcpu, 0xffffffff);
 	svm_nested_tlb_flush(vcpu);
 
-	SVM_CTR3(vcpu, "vmexit_reflect: code=%#lx info1=%#lx info2=%#lx",
-	    (unsigned long)exitcode, (unsigned long)reflected_exitinfo1,
-	    (unsigned long)reflected_exitinfo2);
+	SVM_CTR3(vcpu, "L2 exit %#lx info1=%#lx reflected to L1 rip=%#lx",
+	    (unsigned long)exitcode, (unsigned long)exitinfo1,
+	    (unsigned long)vmcb->state.rip);
 }

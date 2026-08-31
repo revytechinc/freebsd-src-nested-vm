@@ -77,22 +77,47 @@
 #include "io/ppt.h"
 
 /*
- * Nested-virt dispatcher (T25-T29b) wiring scaffold.
- *
- * The nSVM launch/exit/interrupt implementation lives in svm_nested.c,
- * svm_nested_exit.c, and svm_nested_intr.c. The wave5 branch defined
- * the entry points but did not wire them into svm_vmexit(), so nSVM
- * launch was dead code. This file pulls them into the dispatcher.
- *
- * Prototypes come from svm_nested_exit.h / svm_nested_intr.h. The
- * 5-arg svm_nested_handle_vmexit signature (vmcb12 may be NULL until
- * the dispatcher can derive it) must match those headers; a stale
- * file-local 4-arg prototype fails -Werror on the call sites.
+ * Nested SVM: instruction emulation and the L2 exit path live in
+ * svm_nested_stubs.c / svm_nested_exit.c / svm_nested_npt.c. Work that
+ * needs guest memory is completed from vm_run() through
+ * VM_EXITCODE_NESTED (vmm_ops.nested = svm_nested_op).
  */
 extern int vmm_nested_enable;	/* declared in sys/amd64/vmm/vmm.c */
 int	 svm_nested_status;
 
 static int svm_nested_l0_warned;
+
+/*
+ * While L2 runs, an interrupt or NMI pending for L1 must not be injected
+ * into L2: if L1 intercepts INTR/NMI, hardware would deliver a #VMEXIT
+ * to L1 instead. Returns the exit code to reflect, or 0 when nothing is
+ * pending that L1 intercepts.
+ */
+static uint64_t
+svm_nested_l1_pending_exit(struct svm_vcpu *vcpu, struct vlapic *vlapic)
+{
+	struct svm_nested *ns;
+	uint32_t intcpt;
+
+	ns = svm_nested_lookup(vcpu);
+	if (ns == NULL || !ns->nested_in_l2 || ns->vmcb12 == NULL)
+		return (0);
+	intcpt = ns->vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT];
+	if ((intcpt & VMCB_INTCPT_NMI) != 0 && vm_nmi_pending(vcpu->vcpu)) {
+		return (VMCB_EXIT_NMI);
+	}
+	if ((intcpt & VMCB_INTCPT_INTR) != 0) {
+		int vector = -1;
+
+		if (vm_extint_pending(vcpu->vcpu)) {
+			return (VMCB_EXIT_INTR);
+		}
+		if (vlapic_pending_intr(vlapic, &vector)) {
+			return (VMCB_EXIT_INTR);
+		}
+	}
+	return (0);
+}
 
 static inline bool
 svm_nested_active(struct svm_softc *svm_sc)
@@ -159,7 +184,7 @@ SYSCTL_NODE(_hw_vmm, OID_AUTO, svm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     NULL);
 
 SYSCTL_DECL(_hw_vmm_nested);
-SYSCTL_NODE(_hw_vmm, OID_AUTO, nested, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
+SYSCTL_NODE(_hw_vmm, OID_AUTO, nested, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     "Nested virtualization preflight status");
 SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm, CTLFLAG_RD,
     &svm_nested_status, 0,
@@ -747,6 +772,7 @@ svm_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 	vcpu->vmcb = malloc_aligned(sizeof(struct vmcb), PAGE_SIZE, M_SVM,
 	    M_WAITOK | M_ZERO);
 	vcpu->nextrip = ~0;
+	vcpu->nested.gif = true;
 	vcpu->lastcpu = NOCPU;
 	vcpu->vmcb_pa = vtophys(vcpu->vmcb);
 	vmcb_init(sc, vcpu, vtophys(sc->iopm_bitmap), vtophys(sc->msr_bitmap),
@@ -1316,10 +1342,14 @@ svm_write_efer(struct svm_softc *sc, struct svm_vcpu *vcpu, uint64_t newval,
 			goto gpf;
 	}
 
+	if (svm_nested_active(sc))
+		svm_nested_trace(vcpu, "wrmsr-efer", newval, oldval);
 	error = svm_setreg(vcpu, VM_REG_GUEST_EFER, newval);
 	KASSERT(error == 0, ("%s: error %d updating efer", __func__, error));
 	return (0);
 gpf:
+	if (svm_nested_active(sc))
+		svm_nested_trace(vcpu, "efer-gp", newval, oldval);
 	vm_inject_gp(vcpu->vcpu);
 	return (0);
 }
@@ -1467,6 +1497,27 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 	vmm_stat_incr(vcpu->vcpu, VMEXIT_COUNT, 1);
 
 	/*
+	 * Exit taken while running L2 that L1 intercepts, or a nested
+	 * page fault against the shadow NPT: both need guest pages, which
+	 * cannot be held here (vm_run() holds a critical section around
+	 * us), so hand the exit to vm_run() via VM_EXITCODE_NESTED.
+	 */
+	if (svm_nested_in_l2(vcpu) && code == 0x40 + IDT_PF) {
+		svm_nested_trace(vcpu, "l2-pf", state->rip, info2);
+		svm_nested_trace(vcpu, "l2-pf-err/cr3", info1, state->cr3);
+	}
+	if (svm_nested_active(svm_sc) &&
+	    svm_nested_l2_exit_needed(vcpu, code, info1)) {
+		vmexit->exitcode = VM_EXITCODE_NESTED;
+		vmexit->u.nested.op = VM_NESTED_OP_L2EXIT;
+		vmexit->u.nested.code = code;
+		vmexit->u.nested.info1 = info1;
+		vmexit->u.nested.info2 = info2;
+		vmexit->inst_length = 0;
+		return (0);
+	}
+
+	/*
 	 * #VMEXIT(INVALID) needs to be handled early because the VMCB is
 	 * in an inconsistent state and can trigger assertions that would
 	 * never happen otherwise.
@@ -1501,29 +1552,9 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 		break;
 	case VMCB_EXIT_INTR:	/* external interrupt */
 		vmm_stat_incr(vcpu->vcpu, VMEXIT_EXTINT, 1);
-		if (svm_nested_active(svm_sc)) {
-			/*
-			 * T25a: reflect the L2 INTR into L1's VMCB12
-			 * via the wave5 dispatcher. Leave handled=0 so
-			 * the L0 vmexit is also surfaced to the L0
-			 * userspace hypervisor (bhyve) which decides
-			 * whether to re-deliver or coalesce.
-			 */
-			svm_nested_handle_vmexit(vcpu, NULL, code, info1, info2);
-			break;
-		}
 		handled = 1;
 		break;
 	case VMCB_EXIT_NMI:	/* external NMI */
-		if (svm_nested_active(svm_sc)) {
-			/*
-			 * T25a: NMI while L2 is active. Same path as
-			 * INTR — reflect into L1's VMCB12, fall through
-			 * to userspace so L0 retains veto.
-			 */
-			svm_nested_handle_vmexit(vcpu, NULL, code, info1, info2);
-			break;
-		}
 		handled = 1;
 		break;
 	case 0x40 ... 0x5F:
@@ -1675,6 +1706,9 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 			val = (uint64_t)edx << 32 | eax;
 			SVM_CTR2(vcpu, "wrmsr %#x val %#lx", ecx, val);
 			if (emulate_wrmsr(svm_sc, vcpu, ecx, val, &retu)) {
+				if (svm_nested_active(svm_sc))
+					svm_nested_trace(vcpu, "wrmsr-unhandled",
+					    ecx, val);
 				vmexit->exitcode = VM_EXITCODE_WRMSR;
 				vmexit->u.msr.code = ecx;
 				vmexit->u.msr.wval = val;
@@ -1688,6 +1722,9 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 			SVM_CTR1(vcpu, "rdmsr %#x", ecx);
 			vmm_stat_incr(vcpu->vcpu, VMEXIT_RDMSR, 1);
 			if (emulate_rdmsr(vcpu, ecx, &retu)) {
+				if (svm_nested_active(svm_sc))
+					svm_nested_trace(vcpu, "rdmsr-unhandled",
+					    ecx, 0);
 				vmexit->exitcode = VM_EXITCODE_RDMSR;
 				vmexit->u.msr.code = ecx;
 			} else if (!retu) {
@@ -1719,17 +1756,6 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 		break;
 	case VMCB_EXIT_NPF:
 		/* EXITINFO2 contains the faulting guest physical address */
-		if (svm_nested_active(svm_sc)) {
-			/*
-			 * T25a: L2 NPF must reach L1's VMCB12 so L1
-			 * can resolve it against its own NPT. L2's GPAs
-			 * are L1's GPAs (no remap), so info1/error and
-			 * info2/GPA are forwarded verbatim.
-			 */
-			svm_nested_handle_vmexit(vcpu, NULL, code, info1, info2);
-			vmm_stat_incr(vcpu->vcpu, VMEXIT_NESTED_FAULT, 1);
-			break;
-		}
 		if (info1 & VMCB_NPF_INFO1_RSV) {
 			SVM_CTR2(vcpu, "nested page fault with "
 			    "reserved bits set: info1(%#lx) info2(%#lx)",
@@ -1794,34 +1820,23 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 		break;
 	}
 	case VMCB_EXIT_VMRUN:
-		/*
-		 * T25: nested dispatch. On VMRUN the L1 hypervisor wants
-		 * to enter its L2 guest. Forward to svm_nested_vmrun()
-		 * with the active L1 VMCB as the L1-side context; on
-		 * success the guest is re-launched into L2 (handled=1),
-		 * on failure fall through to #UD (legacy non-nested).
-		 */
-		if (svm_nested_active(svm_sc) &&
-		    svm_nested_vmrun(vcpu, svm_get_vmcb(vcpu)) == 0) {
-			handled = 1;
-			break;
-		}
-		vm_inject_ud(vcpu->vcpu);
-		handled = 1;
-		break;
-	case VMCB_EXIT_VMSAVE:
-		if (svm_nested_active(svm_sc) &&
-		    svm_nested_vmsave(vcpu) == 0) {
-			handled = 1;
-			break;
-		}
-		vm_inject_ud(vcpu->vcpu);
-		handled = 1;
-		break;
 	case VMCB_EXIT_VMLOAD:
-		if (svm_nested_active(svm_sc) &&
-		    svm_nested_vmload(vcpu) == 0) {
-			handled = 1;
+	case VMCB_EXIT_VMSAVE:
+		/*
+		 * Emulated for an L1 hypervisor. The emulation reads L1
+		 * memory, so it is completed by svm_nested_op() from
+		 * vm_run(); info1 carries where L1 continues on success.
+		 */
+		if (svm_nested_active(svm_sc)) {
+			vmexit->exitcode = VM_EXITCODE_NESTED;
+			vmexit->u.nested.op = code == VMCB_EXIT_VMRUN ?
+			    VM_NESTED_OP_VMRUN : code == VMCB_EXIT_VMLOAD ?
+			    VM_NESTED_OP_VMLOAD : VM_NESTED_OP_VMSAVE;
+			vmexit->u.nested.code = code;
+			vmexit->u.nested.info1 = nrip_valid(code) ? ctrl->nrip :
+			    state->rip + 3;
+			vmexit->u.nested.info2 = 0;
+			vmexit->inst_length = 0;
 			break;
 		}
 		vm_inject_ud(vcpu->vcpu);
@@ -1847,21 +1862,9 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 		break;
 	case VMCB_EXIT_SKINIT:
 		/*
-		 * SKINIT from L1 is not legal under nested-virt; the
-		 * T27 wave returns VMEXIT_INVALID into the L1 VMCB12.
-		 * Do NOT fall through to #UD when nested — the
-		 * exitcode must reach L1 untouched.
+		 * SKINIT is never emulated. From L2 it is reflected to L1
+		 * above if L1 intercepts it; otherwise (and from L1) #UD.
 		 */
-		if (svm_nested_active(svm_sc)) {
-			(void)svm_nested_skinit(vcpu);
-			/*
-			 * Leave handled=0 so the legacy path reports
-			 * a generic SVM exit; svm_nested_skinit has
-			 * already stamped VMCB_EXIT_INVALID into the
-			 * L1 VMCB12 via the wave5 dispatcher.
-			 */
-			break;
-		}
 		vm_inject_ud(vcpu->vcpu);
 		handled = 1;
 		break;
@@ -1965,6 +1968,20 @@ svm_inj_interrupts(struct svm_softc *sc, struct svm_vcpu *vcpu,
 	 * by the hypervisor (e.g. #PF during instruction emulation).
 	 */
 	svm_inj_intinfo(sc, vcpu);
+
+	/*
+	 * With GIF clear (CLGI, or between #VMEXIT and STGI in an L1
+	 * hypervisor) neither NMIs nor interrupts are taken; they stay
+	 * pending until STGI, which re-enters this function.
+	 */
+	if (!svm_nested_gif(vcpu)) {
+		SVM_CTR0(vcpu, "Cannot inject NMI/interrupt: GIF clear");
+		goto done;
+	}
+	if (svm_nested_l1_pending_exit(vcpu, vlapic) != 0) {
+		/* Belongs to L1; svm_run() exits to L1 before entering L2. */
+		goto done;
+	}
 
 	/* NMI event has priority over interrupts. */
 	if (vm_nmi_pending(vcpu->vcpu)) {
@@ -2320,7 +2337,7 @@ svm_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 	struct vmcb_ctrl *ctrl;
 	struct vm_exit *vmexit;
 	struct vlapic *vlapic;
-	uint64_t vmcb_pa;
+	uint64_t vmcb_pa, code;
 	int handled;
 	uint16_t ldt_sel;
 
@@ -2399,6 +2416,23 @@ svm_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 			break;
 		}
 
+		/*
+		 * L1 interrupt pending while L2 is loaded: deliver it as a
+		 * #VMEXIT to L1 (from vm_run(), where VMCB12 can be written)
+		 * rather than injecting it into L2.
+		 */
+		if ((code = svm_nested_l1_pending_exit(vcpu, vlapic)) != 0) {
+			enable_gintr();
+			vmexit->exitcode = VM_EXITCODE_NESTED;
+			vmexit->u.nested.op = VM_NESTED_OP_L2EXIT;
+			vmexit->u.nested.code = code;
+			vmexit->u.nested.info1 = 0;
+			vmexit->u.nested.info2 = 0;
+			vmexit->rip = state->rip;
+			vmexit->inst_length = 0;
+			break;
+		}
+
 		if (vcpu_debugged(vcpu->vcpu)) {
 			enable_gintr();
 			vm_exit_debug(vcpu->vcpu, state->rip);
@@ -2432,16 +2466,6 @@ svm_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 		svm_launch(vmcb_pa, gctx, get_pcpu());
 		svm_dr_leave_guest(gctx);
 
-		/*
-		 * T25b: drain the L2 PIR after each VMRESUME. When L2
-		 * exits with VMEXIT_INTR the wave5 dispatcher recorded
-		 * the vector in the per-vCPU PIR; deliver it now so
-		 * the next L2 entry point does not lose the interrupt.
-		 * A no-op when the PIR is empty.
-		 */
-		if (svm_nested_active(svm_sc))
-			(void)svm_nested_drain_pir(vcpu);
-
 		svm_pmap_deactivate(pmap);
 
 		/*
@@ -2474,7 +2498,8 @@ svm_vcpu_cleanup(void *vcpui)
 {
 	struct svm_vcpu *vcpu = vcpui;
 
-	svm_nested_release_vmcb12(vcpu);
+	svm_nested_release_l1_maps(vcpu);
+	svm_nested_npt_cleanup(vcpu);
 	free(vcpu->vmcb, M_SVM);
 	free(vcpu, M_SVM);
 }
@@ -3051,4 +3076,5 @@ const struct vmm_ops vmm_ops_amd = {
 	.vcpu_snapshot	= svm_vcpu_snapshot,
 	.restore_tsc	= svm_restore_tsc,
 #endif
+	.nested		= svm_nested_op,
 };

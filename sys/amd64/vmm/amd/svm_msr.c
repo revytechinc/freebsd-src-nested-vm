@@ -47,6 +47,7 @@
 #include "svm_softc.h"
 #include "svm_msr.h"
 #include "vmm_nested.h"
+#include "svm_nested_stubs.h"
 #include <dev/vmm/vmm_ktr.h>
 
 #ifndef MSR_AMDK8_IPM
@@ -139,17 +140,15 @@ extern int vmm_nested_enable;
 static int
 nested_hv_validate_gpa(struct svm_vcpu *vcpu, uint64_t gpa)
 {
-	void *cookie;
-	void *mapping;
 
 	if (vcpu->vcpu == NULL)
 		return (0);
 	if ((gpa & ~(uint64_t)MSR_HV_HYPERCALL_PAGE_MASK) != 0)
 		return (0);
-	mapping = vm_gpa_hold(vcpu->vcpu, gpa, 1, VM_PROT_READ, &cookie);
-	if (mapping == NULL)
-		return (0);
-	vm_gpa_release(cookie);
+	/*
+	 * Only alignment can be checked here: MSR emulation runs inside
+	 * vm_run()'s critical section, where guest pages cannot be held.
+	 */
 	return (1);
 }
 
@@ -429,6 +428,35 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		}
 		*result = rdtsc();
 		break;
+	case MSR_DEBUGCTLMSR:
+		/*
+		 * An L1 hypervisor saves and restores IA32_DEBUGCTL around
+		 * its own VMRUN. Hand back the value it last wrote (kept in
+		 * the VMCB save area); non-nested VMs keep the userland
+		 * fall-through.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		*result = svm_get_vmcb_state(vcpu)->dbgctl;
+		break;
+	case MSR_VM_CR:
+		/*
+		 * SVM feature control. An L1 hypervisor checks SVMDIS (and
+		 * the LOCK bit) before using SVM; report "enabled, unlocked"
+		 * rather than the host's value. Non-nested VMs keep the
+		 * existing userland fall-through.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		*result = 0;
+		svm_nested_trace(vcpu, "rdmsr-vm_cr", 0, 0);
+		break;
 	case MSR_VM_HSAVE_PA:
 		/*
 		 * T8: nested-virt L1 HSAVE GPA read.
@@ -593,6 +621,27 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 #endif
 	case MSR_EXTFEATURES:
 		break;
+	case MSR_DEBUGCTLMSR:
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		/* Only the value is kept; LBR virtualization is not offered. */
+		svm_get_vmcb_state(vcpu)->dbgctl = val;
+		svm_set_dirty(vcpu, VMCB_CACHE_LBR);
+		break;
+	case MSR_VM_CR:
+		/*
+		 * Writes only matter for the LOCK/SVMDIS bits, which L0
+		 * does not let L1 change; accept and ignore for nested VMs.
+		 */
+		if (vcpu->vcpu == NULL ||
+		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
+			error = EINVAL;
+			break;
+		}
+		break;
 	case MSR_VM_HSAVE_PA:
 		/*
 		 * T8: nested-virt L1 HSAVE GPA write.
@@ -627,19 +676,13 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 			vm_inject_gp(vcpu->vcpu);
 			break;
 		}
-		if (val != 0) {
-			void *cookie;
-			void *mapping;
-
-			mapping = vm_gpa_hold(vcpu->vcpu, val, 1,
-			    VM_PROT_READ, &cookie);
-			if (mapping == NULL) {
-				vm_inject_gp(vcpu->vcpu);
-				break;
-			}
-			vm_gpa_release(cookie);
-		}
+		/*
+		 * The page is not validated here: MSR emulation runs inside
+		 * vm_run()'s critical section, where guest pages cannot be
+		 * held. The HSAVE area is never dereferenced by L0.
+		 */
 		nested_hsave_gpa[vcpu->vcpuid] = val;
+		svm_nested_trace(vcpu, "wrmsr-hsave", val, 0);
 		SVM_CTR1(vcpu, "nested HSAVE_PA set to %#lx",
 		    (unsigned long)val);
 		break;
