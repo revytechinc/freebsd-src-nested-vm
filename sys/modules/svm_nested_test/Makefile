@@ -14,14 +14,16 @@
 #
 # Architecture (T4/T5 single-architecture decision):
 #   - All nested impl code is compiled into vmm.ko (no separate *_nested.ko).
-#   - Only the TEST modules are separate klds. Build will fail until T11
-#     lands svm_nested_test.c at sys/amd64/vmm/amd/svm_nested_test.c.
+#   - Only the TEST modules are separate klds.
 #
 # DO NOT add svm_nested.c to vmm.ko SRCS — runtime gating is the contract.
 
 PACKAGE=	tests
 
 .PATH: ${SRCTOP}/sys/amd64/vmm/amd
+
+CFLAGS+= -I${SRCTOP}/sys/amd64/vmm/amd
+CFLAGS+= -I${SRCTOP}/sys/amd64/vmm
 
 KMOD=	svm_nested_test
 SRCS=	svm_nested_test.c

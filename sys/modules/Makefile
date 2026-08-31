@@ -424,6 +424,8 @@ SUBDIR=	\
 	vkbd \
 	${_vmd} \
 	${_vmm} \
+	${_vmx_nested_test} \
+	${_svm_nested_test} \
 	${_vmware} \
 	vr \
 	vte \
@@ -902,6 +904,10 @@ _hwt=		hwt
 .if ${MK_BHYVE} != "no" || defined(ALL_MODULES)
 .if ${KERN_OPTS:MSMP}
 _vmm=		vmm
+.if ${MACHINE_CPUARCH} == "amd64"
+_vmx_nested_test=	vmx_nested_test
+_svm_nested_test=	svm_nested_test
+.endif
 .endif
 .endif
 .endif
