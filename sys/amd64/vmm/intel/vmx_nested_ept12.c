@@ -33,9 +33,9 @@
 #include <dev/vmm/vmm_vm.h>
 
 #include "vmm_host.h"
+#include "vmx_cpufunc.h"
 #include "vmcs.h"
 #include "vmx.h"
-#include "vmx_cpufunc.h"
 #include "vmx_nested.h"
 
 extern int vmm_nested_enable;

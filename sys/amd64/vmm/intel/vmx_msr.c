@@ -35,8 +35,13 @@
 #include <machine/md_var.h>
 #include <machine/pcb.h>
 #include <machine/specialreg.h>
+#include <vm/vm.h>
+#include <vm/pmap.h>
+
 #include <machine/vmm.h>
 
+#include "vmx_cpufunc.h"
+#include "vmcs.h"
 #include "vmx.h"
 #include "vmx_msr.h"
 #include "x86.h"
@@ -737,6 +742,17 @@ vmx_rdmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t *val, bool *retu)
 	}
 
 	/*
+	 * Nested-VMX: an L1 hypervisor saves and restores IA32_DEBUGCTL
+	 * around its own VM entries. Hand back the guest field of the
+	 * VMCS (this runs in the exit handler with the VMCS current).
+	 */
+	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
+	    vcpu->vmx->vm->nested_enabled && num == MSR_DEBUGCTLMSR) {
+		*val = vmcs_read(VMCS_GUEST_IA32_DEBUGCTL);
+		return (0);
+	}
+
+	/*
 	 * Nested-VMX (T16): the VMX-fixed and VMCS-enumeration MSRs
 	 * are reporting-only — they tell L1 which bits of CR0/CR4
 	 * the architecture forces 1 or 0 in VMX operation, and which
@@ -854,6 +870,13 @@ vmx_wrmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 	    vcpu->vmx->vm->nested_enabled &&
 	    num == MSR_IA32_FEATURE_CONTROL) {
 		vm_inject_gp(vcpu->vcpu);
+		return (0);
+	}
+
+	/* Nested-VMX: keep L1's IA32_DEBUGCTL in the guest VMCS field. */
+	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
+	    vcpu->vmx->vm->nested_enabled && num == MSR_DEBUGCTLMSR) {
+		vmcs_write(VMCS_GUEST_IA32_DEBUGCTL, val);
 		return (0);
 	}
 

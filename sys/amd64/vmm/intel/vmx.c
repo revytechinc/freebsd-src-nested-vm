@@ -142,16 +142,6 @@ SYSCTL_INT(_hw_vmm_nested, OID_AUTO, vmx, CTLFLAG_RD,
 int vmxon_enabled[MAXCPU];
 static uint8_t *vmxon_region;
 
-/*
- * Per-vCPU shadow VMCS12 region GPA for nested virtualization (T0c).
- * When a nested-enabled L1 guest executes VMXON, we capture the
- * operand GPA (from guest RAX in 64-bit mode) here and refuse to
- * execute VMXON (it would clobber L0's VMCS). VMXOFF clears the
- * entry. Bounded by MAXCPU; vcpuid is validated at vm creation.
- * TODO: relocate this to the per-vCPU nested state (struct
- * nested_vcpu_state) once that lands as part of T8.
- */
-static uint64_t	nested_vmcs12_region[MAXCPU];
 
 /*
  * Host-wide nested-virt gate (T2). Defined in sys/amd64/vmm/vmm.c;
@@ -215,17 +205,17 @@ vmx_nested_active(struct vmx *vmx)
 static uint32_t pinbased_ctls, procbased_ctls, procbased_ctls2;
 static uint32_t exit_ctls, entry_ctls;
 
-static uint64_t cr0_ones_mask, cr0_zeros_mask;
+uint64_t vmx_cr0_ones_mask, vmx_cr0_zeros_mask;
 SYSCTL_ULONG(_hw_vmm_vmx, OID_AUTO, cr0_ones_mask, CTLFLAG_RD,
-	     &cr0_ones_mask, 0, NULL);
+	     &vmx_cr0_ones_mask, 0, NULL);
 SYSCTL_ULONG(_hw_vmm_vmx, OID_AUTO, cr0_zeros_mask, CTLFLAG_RD,
-	     &cr0_zeros_mask, 0, NULL);
+	     &vmx_cr0_zeros_mask, 0, NULL);
 
-static uint64_t cr4_ones_mask, cr4_zeros_mask;
+uint64_t vmx_cr4_ones_mask, vmx_cr4_zeros_mask;
 SYSCTL_ULONG(_hw_vmm_vmx, OID_AUTO, cr4_ones_mask, CTLFLAG_RD,
-	     &cr4_ones_mask, 0, NULL);
+	     &vmx_cr4_ones_mask, 0, NULL);
 SYSCTL_ULONG(_hw_vmm_vmx, OID_AUTO, cr4_zeros_mask, CTLFLAG_RD,
-	     &cr4_zeros_mask, 0, NULL);
+	     &vmx_cr4_zeros_mask, 0, NULL);
 
 static int vmx_initialized;
 SYSCTL_INT(_hw_vmm_vmx, OID_AUTO, initialized, CTLFLAG_RD,
@@ -581,14 +571,14 @@ u_long
 vmx_fix_cr0(u_long cr0)
 {
 
-	return ((cr0 | cr0_ones_mask) & ~cr0_zeros_mask);
+	return ((cr0 | vmx_cr0_ones_mask) & ~vmx_cr0_zeros_mask);
 }
 
 u_long
 vmx_fix_cr4(u_long cr4)
 {
 
-	return ((cr4 | cr4_ones_mask) & ~cr4_zeros_mask);
+	return ((cr4 | vmx_cr4_ones_mask) & ~vmx_cr4_zeros_mask);
 }
 
 static void
@@ -1044,25 +1034,25 @@ vmx_modinit(int ipinum)
 	 */
 	fixed0 = rdmsr(MSR_VMX_CR0_FIXED0);
 	fixed1 = rdmsr(MSR_VMX_CR0_FIXED1);
-	cr0_ones_mask = fixed0 & fixed1;
-	cr0_zeros_mask = ~fixed0 & ~fixed1;
+	vmx_cr0_ones_mask = fixed0 & fixed1;
+	vmx_cr0_zeros_mask = ~fixed0 & ~fixed1;
 
 	/*
 	 * CR0_PE and CR0_PG can be set to zero in VMX non-root operation
 	 * if unrestricted guest execution is allowed.
 	 */
 	if (cap_unrestricted_guest)
-		cr0_ones_mask &= ~(CR0_PG | CR0_PE);
+		vmx_cr0_ones_mask &= ~(CR0_PG | CR0_PE);
 
 	/*
 	 * Do not allow the guest to set CR0_NW or CR0_CD.
 	 */
-	cr0_zeros_mask |= (CR0_NW | CR0_CD);
+	vmx_cr0_zeros_mask |= (CR0_NW | CR0_CD);
 
 	fixed0 = rdmsr(MSR_VMX_CR4_FIXED0);
 	fixed1 = rdmsr(MSR_VMX_CR4_FIXED1);
-	cr4_ones_mask = fixed0 & fixed1;
-	cr4_zeros_mask = ~fixed0 & ~fixed1;
+	vmx_cr4_ones_mask = fixed0 & fixed1;
+	vmx_cr4_zeros_mask = ~fixed0 & ~fixed1;
 
 	vpid_init();
 
@@ -1131,11 +1121,11 @@ vmx_setup_cr_shadow(int which, struct vmcs *vmcs, uint32_t initial)
 
 	if (which == 0) {
 		mask_ident = VMCS_CR0_MASK;
-		mask_value = cr0_ones_mask | cr0_zeros_mask;
+		mask_value = vmx_cr0_ones_mask | vmx_cr0_zeros_mask;
 		shadow_ident = VMCS_CR0_SHADOW;
 	} else {
 		mask_ident = VMCS_CR4_MASK;
-		mask_value = cr4_ones_mask | cr4_zeros_mask;
+		mask_value = vmx_cr4_ones_mask | vmx_cr4_zeros_mask;
 		shadow_ident = VMCS_CR4_SHADOW;
 	}
 
@@ -2033,8 +2023,8 @@ vmx_emulate_cr0_access(struct vmx_vcpu *vcpu, uint64_t exitqual)
 
 	vmcs_write(VMCS_CR0_SHADOW, regval);
 
-	crval = regval | cr0_ones_mask;
-	crval &= ~cr0_zeros_mask;
+	crval = regval | vmx_cr0_ones_mask;
+	crval &= ~vmx_cr0_zeros_mask;
 	vmcs_write(VMCS_GUEST_CR0, crval);
 
 	if (regval & CR0_PG) {
@@ -2091,8 +2081,8 @@ vmx_emulate_cr4_access(struct vmx_vcpu *vcpu, uint64_t exitqual)
 
 	vmcs_write(VMCS_CR4_SHADOW, regval);
 
-	crval = regval | cr4_ones_mask;
-	crval &= ~cr4_zeros_mask;
+	crval = regval | vmx_cr4_ones_mask;
+	crval &= ~vmx_cr4_zeros_mask;
 	vmcs_write(VMCS_GUEST_CR4, crval);
 
 	return (HANDLED);
@@ -2127,7 +2117,7 @@ vmx_emulate_cr8_access(struct vmx *vmx, struct vmx_vcpu *vcpu,
 /*
  * From section "Guest Register State" in the Intel SDM: CPL = SS.DPL
  */
-static int
+int
 vmx_cpl(void)
 {
 	uint32_t ssar;
@@ -2136,7 +2126,7 @@ vmx_cpl(void)
 	return ((ssar >> 5) & 0x3);
 }
 
-static enum vm_cpu_mode
+enum vm_cpu_mode
 vmx_cpu_mode(void)
 {
 	uint32_t csar;
@@ -2235,7 +2225,7 @@ inout_str_seginfo(struct vmx_vcpu *vcpu, uint32_t inst_info, int in,
 	KASSERT(error == 0, ("%s: vmx_getdesc error %d", __func__, error));
 }
 
-static void
+void
 vmx_paging_info(struct vm_guest_paging *paging)
 {
 	paging->cr3 = vmcs_guest_cr3();
@@ -2990,57 +2980,7 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 		handled = HANDLED;
 		break;
 	case EXIT_REASON_VMXON:
-		/*
-		 * VMXON is a ring-0 instruction that causes a VM exit
-		 * on L0. When the guest is a nested-enabled L1
-		 * hypervisor (e.g., L1 bhyve/KVM), capture the operand
-		 * GPA (in 64-bit mode, the L1 %rax value) into the
-		 * per-vCPU shadow VMCS12 region and mark the exit
-		 * HANDLED so the L1 advances past the instruction.
-		 * Do NOT actually execute VMXON: that would clobber
-		 * L0's VMCS. For non-nested VMs, fall through to the
-		 * generic VM_EXITCODE_VMINSN reporting so userland
-		 * handles it as before.
-		 */
-		if (vmx_nested_active(vmx)) {
-			/*
-			 * L1 is running outside VMX operation by
-			 * definition; a double-VMXON at L1 is a #GP
-			 * per Intel SDM. We do not enforce that here
-			 * because T25 (VMLAUNCH/VMRESUME) will own the
-			 * state machine once it lands; the immediate
-			 * requirement is just "do not clobber L0".
-			 */
-			KASSERT(vcpu->vcpuid >= 0 && vcpu->vcpuid < MAXCPU,
-			    ("vcpuid %d out of bounds", vcpu->vcpuid));
-			nested_vmcs12_region[vcpu->vcpuid] = vmxctx->guest_rax;
-			VMX_CTR1(vcpu, "nested VMXON: vmcs12 GPA=%#lx",
-			    (unsigned long)nested_vmcs12_region[vcpu->vcpuid]);
-			handled = HANDLED;
-			break;
-		}
-		SDT_PROBE3(vmm, vmx, exit, vminsn, vmx, vcpuid, vmexit);
-		vmexit->exitcode = VM_EXITCODE_VMINSN;
-		break;
 	case EXIT_REASON_VMXOFF:
-		/*
-		 * Mirror of VMXON handling: when a nested-enabled L1
-		 * issues VMXOFF, clear the per-vCPU shadow VMCS12
-		 * region GPA and advance past the instruction. Do
-		 * not actually execute VMXOFF. Non-nested VMs keep
-		 * the existing VM_EXITCODE_VMINSN behavior.
-		 */
-		if (vmx_nested_active(vmx)) {
-			KASSERT(vcpu->vcpuid >= 0 && vcpu->vcpuid < MAXCPU,
-			    ("vcpuid %d out of bounds", vcpu->vcpuid));
-			nested_vmcs12_region[vcpu->vcpuid] = 0;
-			VMX_CTR0(vcpu, "nested VMXOFF: vmcs12 cleared");
-			handled = HANDLED;
-			break;
-		}
-		SDT_PROBE3(vmm, vmx, exit, vminsn, vmx, vcpuid, vmexit);
-		vmexit->exitcode = VM_EXITCODE_VMINSN;
-		break;
 	case EXIT_REASON_VMCALL:
 	case EXIT_REASON_VMCLEAR:
 	case EXIT_REASON_VMLAUNCH:
@@ -3057,51 +2997,21 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 		 * declined (in which case we fall through to the
 		 * VM_EXITCODE_VMINSN userland path for backwards compat).
 		 */
+		/*
+		 * Nested-enabled VM: the instruction is emulated for L1 by
+		 * vmx_nested_op() from vm_run(), outside the critical
+		 * section, because the emulation reads and writes L1
+		 * memory. info1 records the instruction length so the
+		 * handler can advance RIP; the VMCS is reloaded there.
+		 */
 		if (vmx_nested_active(vmx)) {
-			int nested_handled;
-
-			nested_handled = 0;
-			switch (reason) {
-			case EXIT_REASON_VMPTRLD:
-				nested_handled =
-				    vmx_nested_exit_vmptrld(vcpu);
-				break;
-			case EXIT_REASON_VMCLEAR:
-				nested_handled =
-				    vmx_nested_exit_vmclear(vcpu);
-				break;
-			case EXIT_REASON_VMREAD:
-				nested_handled =
-				    vmx_nested_exit_vmread(vcpu);
-				break;
-			case EXIT_REASON_VMWRITE:
-				nested_handled =
-				    vmx_nested_exit_vmwrite(vcpu);
-				break;
-			case EXIT_REASON_VMLAUNCH:
-				nested_handled =
-				    vmx_nested_exit_vmlaunch(vcpu);
-				break;
-			case EXIT_REASON_VMRESUME:
-				nested_handled =
-				    vmx_nested_exit_vmresume(vcpu);
-				break;
-			case EXIT_REASON_VMCALL:
-				nested_handled =
-				    vmx_nested_exit_vmcall(vcpu);
-				break;
-			case EXIT_REASON_VMPTRST:
-				nested_handled =
-				    vmx_nested_exit_vmptrst(vcpu);
-				break;
-			default:
-				nested_handled = -1;
-				break;
-			}
-			if (nested_handled == 0) {
-				handled = HANDLED;
-				break;
-			}
+			vmexit->exitcode = VM_EXITCODE_NESTED;
+			vmexit->u.nested.op = VM_NESTED_OP_VMXINSN;
+			vmexit->u.nested.code = reason;
+			vmexit->u.nested.info1 = vmexit->inst_length;
+			vmexit->u.nested.info2 = 0;
+			vmexit->inst_length = 0;
+			break;
 		}
 		SDT_PROBE3(vmm, vmx, exit, vminsn, vmx, vcpuid, vmexit);
 		vmexit->exitcode = VM_EXITCODE_VMINSN;
@@ -3118,18 +3028,13 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 		 * BOGUS / unknown path.
 		 */
 		if (vmx_nested_active(vmx)) {
-			int nested_handled = 0;
-
-			if (reason == EXIT_REASON_INVEPT)
-				nested_handled =
-				    vmx_nested_exit_invept(vcpu);
-			else
-				nested_handled =
-				    vmx_nested_exit_invvpid(vcpu);
-			if (nested_handled == 0) {
-				handled = HANDLED;
-				break;
-			}
+			vmexit->exitcode = VM_EXITCODE_NESTED;
+			vmexit->u.nested.op = VM_NESTED_OP_VMXINSN;
+			vmexit->u.nested.code = reason;
+			vmexit->u.nested.info1 = vmexit->inst_length;
+			vmexit->u.nested.info2 = 0;
+			vmexit->inst_length = 0;
+			break;
 		}
 		SDT_PROBE4(vmm, vmx, exit, unknown,
 		    vmx, vcpuid, vmexit, reason);
@@ -3551,13 +3456,8 @@ vmx_vcpu_cleanup(void *vcpui)
 	 */
 	if (vcpu->nvmcs12 != NULL)
 		free(vcpu->nvmcs12, M_VMX);
-	if (vcpu->nested_state != NULL) {
-		if (vcpu->nested_state->vmcs_field_dirty != NULL)
-			free(vcpu->nested_state->vmcs_field_dirty, M_VMX);
-		if (vcpu->nested_state->vmcs_field_ro != NULL)
-			free(vcpu->nested_state->vmcs_field_ro, M_VMX);
+	if (vcpu->nested_state != NULL)
 		free(vcpu->nested_state, M_VMX);
-	}
 	free(vcpu->pir_desc, M_VMX);
 	free(vcpu->apic_page, M_VMX);
 	free(vcpu->vmcs, M_VMX);
@@ -4615,4 +4515,5 @@ const struct vmm_ops vmm_ops_intel = {
 	.vcpu_snapshot	= vmx_vcpu_snapshot,
 	.restore_tsc	= vmx_restore_tsc,
 #endif
+	.nested		= vmx_nested_op,
 };

@@ -4,16 +4,19 @@
  * Copyright (c) 2026 The FreeBSD Project Contributors.
  * All rights reserved.
  *
- * VMCS12 encoding -> (offset, width) layout table.  Extracted from
- * vmx_nested_vmread.c (wave-5 fixed) so the apply step in
- * vmx_nested_shadow.c can share the same field map.
+ * VMCS12 field layout.
  *
- * The table matches the Intel SDM Vol 3 Appendix B field encoding
- * map; widths are 16/32/64-bit natural values stored packed into
- * the 4KB VMCS12 image.
+ * L1's VMCS is never interpreted in place: VMPTRLD copies the page
+ * into a private per-vCPU buffer (struct vmcs12) and VMREAD/VMWRITE
+ * are emulated against that buffer using the table below, so the
+ * offsets are our own and only the revision ID at offset 0 has to
+ * match what L1 wrote. Every field an L1 hypervisor may legitimately
+ * access has a slot; fields in the read-only VM-exit information
+ * class (SDM Vol 3 App. B, encoding bits 11:10 == 01) reject VMWRITE
+ * with VM-instruction error 13.
  *
- * Original BSD code; Intel SDM Vol 3 Appendix B is referenced for
- * the field encoding map.
+ * Original BSD code; Intel SDM Vol 3 Appendix B is referenced for the
+ * encodings and widths.
  */
 
 #include <sys/param.h>
@@ -22,126 +25,219 @@
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
-#include <machine/cpufunc.h>
 #include <machine/vmm.h>
 
-#include <dev/vmm/vmm_vm.h>
-
+#include "vmx_cpufunc.h"
 #include "vmcs.h"
+#include "vmx_nested.h"
 #include "vmx_nested_layout.h"
 
-static const struct vmcs12_layout vmcs12_fields_table[] = {
-	/* 16-bit control fields (subset, common to L1) */
-	{ VMCS_VPID,			0x0000, VMCS_W_16, VMCS12_F_READONLY },
-	{ VMCS_GUEST_ES_SELECTOR,	0x0002, VMCS_W_16, 0 },
-	{ VMCS_GUEST_CS_SELECTOR,	0x0004, VMCS_W_16, 0 },
-	{ VMCS_GUEST_SS_SELECTOR,	0x0006, VMCS_W_16, 0 },
-	{ VMCS_GUEST_DS_SELECTOR,	0x0008, VMCS_W_16, 0 },
-	{ VMCS_GUEST_FS_SELECTOR,	0x000A, VMCS_W_16, 0 },
-	{ VMCS_GUEST_GS_SELECTOR,	0x000C, VMCS_W_16, 0 },
-	{ VMCS_GUEST_LDTR_SELECTOR,	0x000E, VMCS_W_16, 0 },
-	{ VMCS_GUEST_TR_SELECTOR,	0x0010, VMCS_W_16, 0 },
-	{ VMCS_GUEST_INTERRUPTIBILITY,	0x0012, VMCS_W_16, 0 },
+#define	F16(enc)	{ (enc), 0, VMCS_W_16, 0 }
+#define	F32(enc)	{ (enc), 0, VMCS_W_32, 0 }
+#define	F64(enc)	{ (enc), 0, VMCS_W_64, 0 }
+#define	RO32(enc)	{ (enc), 0, VMCS_W_32, VMCS12_F_READONLY }
+#define	RO64(enc)	{ (enc), 0, VMCS_W_64, VMCS12_F_READONLY }
 
-	/* 16-bit guest-state fields (segment AR fields, etc.) */
-	{ VMCS_GUEST_ES_LIMIT,		0x0014, VMCS_W_16, 0 },
-	{ VMCS_GUEST_CS_LIMIT,		0x0016, VMCS_W_16, 0 },
-	{ VMCS_GUEST_SS_LIMIT,		0x0018, VMCS_W_16, 0 },
-	{ VMCS_GUEST_DS_LIMIT,		0x001A, VMCS_W_16, 0 },
-	{ VMCS_GUEST_FS_LIMIT,		0x001C, VMCS_W_16, 0 },
-	{ VMCS_GUEST_GS_LIMIT,		0x001E, VMCS_W_16, 0 },
-	{ VMCS_GUEST_LDTR_LIMIT,	0x0020, VMCS_W_16, 0 },
-	{ VMCS_GUEST_TR_LIMIT,		0x0022, VMCS_W_16, 0 },
-	{ VMCS_GUEST_GDTR_LIMIT,	0x0024, VMCS_W_16, 0 },
-	{ VMCS_GUEST_IDTR_LIMIT,	0x0026, VMCS_W_16, 0 },
-	{ VMCS_GUEST_ES_ACCESS_RIGHTS,	0x0028, VMCS_W_16, 0 },
-	{ VMCS_GUEST_CS_ACCESS_RIGHTS,	0x002A, VMCS_W_16, 0 },
-	{ VMCS_GUEST_SS_ACCESS_RIGHTS,	0x002C, VMCS_W_16, 0 },
-	{ VMCS_GUEST_DS_ACCESS_RIGHTS,	0x002E, VMCS_W_16, 0 },
-	{ VMCS_GUEST_FS_ACCESS_RIGHTS,	0x0030, VMCS_W_16, 0 },
-	{ VMCS_GUEST_GS_ACCESS_RIGHTS,	0x0032, VMCS_W_16, 0 },
-	{ VMCS_GUEST_LDTR_ACCESS_RIGHTS,	0x0034, VMCS_W_16, 0 },
-	{ VMCS_GUEST_TR_ACCESS_RIGHTS,	0x0036, VMCS_W_16, 0 },
-	{ VMCS_GUEST_IA32_SYSENTER_CS,	0x0038, VMCS_W_16, 0 },
-
-	/* 32-bit control fields */
-	{ VMCS_PIN_BASED_CTLS,		0x003A, VMCS_W_32, 0 },
-	{ VMCS_PRI_PROC_BASED_CTLS,	0x003E, VMCS_W_32, 0 },
-	{ VMCS_EXCEPTION_BITMAP,		0x0042, VMCS_W_32, 0 },
-	{ VMCS_PF_ERROR_MASK,		0x0046, VMCS_W_32, 0 },
-	{ VMCS_PF_ERROR_MATCH,		0x004A, VMCS_W_32, 0 },
-	{ VMCS_EXIT_CTLS,		0x004E, VMCS_W_32, 0 },
-	{ VMCS_EXIT_MSR_STORE_COUNT,	0x0052, VMCS_W_32, 0 },
-	{ VMCS_EXIT_MSR_LOAD_COUNT,	0x0056, VMCS_W_32, 0 },
-	{ VMCS_ENTRY_CTLS,		0x005A, VMCS_W_32, 0 },
-	{ VMCS_ENTRY_MSR_LOAD_COUNT,	0x005E, VMCS_W_32, 0 },
-	{ VMCS_ENTRY_INTR_INFO,		0x0062, VMCS_W_32, 0 },
-	{ VMCS_ENTRY_EXCEPTION_ERROR,	0x0066, VMCS_W_32, 0 },
-	{ VMCS_ENTRY_INST_LENGTH,	0x006A, VMCS_W_32, 0 },
-
-	/* 32-bit guest-state fields beyond the 16-bit segment ones */
-	{ VMCS_GUEST_SMBASE,		0x006E, VMCS_W_32, 0 },
-	{ VMCS_PREEMPTION_TIMER_VALUE,	0x0072, VMCS_W_32, 0 },
-
+/*
+ * Offsets are assigned on first use by vmcs12_layout_init() so the
+ * table stays readable; the struct vmcs12 header (revision, abort,
+ * launch state) occupies the first 16 bytes.
+ */
+static struct vmcs12_layout vmcs12_fields_table[] = {
+	/* 16-bit control fields */
+	F16(VMCS_VPID),
+	F16(VMCS_PIR_VECTOR),
+	/* 16-bit guest state */
+	F16(VMCS_GUEST_ES_SELECTOR),
+	F16(VMCS_GUEST_CS_SELECTOR),
+	F16(VMCS_GUEST_SS_SELECTOR),
+	F16(VMCS_GUEST_DS_SELECTOR),
+	F16(VMCS_GUEST_FS_SELECTOR),
+	F16(VMCS_GUEST_GS_SELECTOR),
+	F16(VMCS_GUEST_LDTR_SELECTOR),
+	F16(VMCS_GUEST_TR_SELECTOR),
+	F16(VMCS_GUEST_INTR_STATUS),
+	/* 16-bit host state */
+	F16(VMCS_HOST_ES_SELECTOR),
+	F16(VMCS_HOST_CS_SELECTOR),
+	F16(VMCS_HOST_SS_SELECTOR),
+	F16(VMCS_HOST_DS_SELECTOR),
+	F16(VMCS_HOST_FS_SELECTOR),
+	F16(VMCS_HOST_GS_SELECTOR),
+	F16(VMCS_HOST_TR_SELECTOR),
 	/* 64-bit control fields */
-	{ VMCS_IO_BITMAP_A,		0x0076, VMCS_W_64, 0 },
-	{ VMCS_IO_BITMAP_B,		0x007E, VMCS_W_64, 0 },
-	{ VMCS_MSR_BITMAP,		0x0086, VMCS_W_64, 0 },
-	{ VMCS_EXIT_MSR_STORE,		0x008E, VMCS_W_64, 0 },
-	{ VMCS_EXIT_MSR_LOAD,		0x0096, VMCS_W_64, 0 },
-	{ VMCS_ENTRY_MSR_LOAD,		0x009E, VMCS_W_64, 0 },
-	{ VMCS_TSC_OFFSET,		0x00A6, VMCS_W_64, 0 },
-	{ VMCS_VIRTUAL_APIC,		0x00AE, VMCS_W_64, 0 },
-	{ VMCS_APIC_ACCESS,		0x00B6, VMCS_W_64, 0 },
-	{ VMCS_EPTP,			0x00BE, VMCS_W_64, 0 },
-	{ VMCS_GUEST_IA32_DEBUGCTL,	0x00C6, VMCS_W_64, 0 },
-	{ VMCS_GUEST_IA32_PAT,		0x00CE, VMCS_W_64, 0 },
-	{ VMCS_GUEST_IA32_EFER,		0x00D6, VMCS_W_64, 0 },
-	{ VMCS_GUEST_PDPTE0,		0x00DE, VMCS_W_64, 0 },
-	{ VMCS_GUEST_PDPTE1,		0x00E6, VMCS_W_64, 0 },
-	{ VMCS_GUEST_PDPTE2,		0x00EE, VMCS_W_64, 0 },
-	{ VMCS_GUEST_PDPTE3,		0x00F6, VMCS_W_64, 0 },
-
-	/* Natural-width control fields */
-	{ VMCS_CR0_MASK,		0x00FE, VMCS_W_64, 0 },
-	{ VMCS_CR4_MASK,		0x0106, VMCS_W_64, 0 },
-	{ VMCS_CR0_SHADOW,		0x010E, VMCS_W_64, 0 },
-	{ VMCS_CR4_SHADOW,		0x0116, VMCS_W_64, 0 },
-	{ VMCS_CR3_TARGET0,		0x011E, VMCS_W_64, 0 },
-	{ VMCS_CR3_TARGET1,		0x0126, VMCS_W_64, 0 },
-	{ VMCS_CR3_TARGET2,		0x012E, VMCS_W_64, 0 },
-	{ VMCS_CR3_TARGET3,		0x0136, VMCS_W_64, 0 },
-
-	/* Natural-width guest-state fields */
-	{ VMCS_GUEST_CR0,		0x013E, VMCS_W_64, 0 },
-	{ VMCS_GUEST_CR3,		0x0146, VMCS_W_64, 0 },
-	{ VMCS_GUEST_CR4,		0x014E, VMCS_W_64, 0 },
-	{ VMCS_GUEST_ES_BASE,		0x0156, VMCS_W_64, 0 },
-	{ VMCS_GUEST_CS_BASE,		0x015E, VMCS_W_64, 0 },
-	{ VMCS_GUEST_SS_BASE,		0x0166, VMCS_W_64, 0 },
-	{ VMCS_GUEST_DS_BASE,		0x016E, VMCS_W_64, 0 },
-	{ VMCS_GUEST_FS_BASE,		0x0176, VMCS_W_64, 0 },
-	{ VMCS_GUEST_GS_BASE,		0x017E, VMCS_W_64, 0 },
-	{ VMCS_GUEST_LDTR_BASE,		0x0186, VMCS_W_64, 0 },
-	{ VMCS_GUEST_TR_BASE,		0x018E, VMCS_W_64, 0 },
-	{ VMCS_GUEST_GDTR_BASE,		0x0196, VMCS_W_64, 0 },
-	{ VMCS_GUEST_IDTR_BASE,		0x019E, VMCS_W_64, 0 },
-	{ VMCS_GUEST_DR7,		0x01A6, VMCS_W_64, 0 },
-	{ VMCS_GUEST_RSP,		0x01AE, VMCS_W_64, 0 },
-	{ VMCS_GUEST_RIP,		0x01B6, VMCS_W_64, 0 },
-	{ VMCS_GUEST_RFLAGS,		0x01BE, VMCS_W_64, 0 },
-	{ VMCS_GUEST_PENDING_DBG_EXCEPTIONS, 0x01C6, VMCS_W_64, 0 },
-	{ VMCS_GUEST_IA32_SYSENTER_ESP,	0x01CE, VMCS_W_64, 0 },
-	{ VMCS_GUEST_IA32_SYSENTER_EIP,	0x01D6, VMCS_W_64, 0 },
+	F64(VMCS_IO_BITMAP_A),
+	F64(VMCS_IO_BITMAP_B),
+	F64(VMCS_MSR_BITMAP),
+	F64(VMCS_EXIT_MSR_STORE),
+	F64(VMCS_EXIT_MSR_LOAD),
+	F64(VMCS_ENTRY_MSR_LOAD),
+	F64(VMCS_EXECUTIVE_VMCS),
+	F64(VMCS_TSC_OFFSET),
+	F64(VMCS_VIRTUAL_APIC),
+	F64(VMCS_APIC_ACCESS),
+	F64(VMCS_PIR_DESC),
+	F64(VMCS_EPTP),
+	F64(VMCS_EOI_EXIT0),
+	F64(VMCS_EOI_EXIT1),
+	F64(VMCS_EOI_EXIT2),
+	F64(VMCS_EOI_EXIT3),
+	/* 64-bit read-only data */
+	RO64(VMCS_GUEST_PHYSICAL_ADDRESS),
+	/* 64-bit guest state */
+	F64(VMCS_LINK_POINTER),
+	F64(VMCS_GUEST_IA32_DEBUGCTL),
+	F64(VMCS_GUEST_IA32_PAT),
+	F64(VMCS_GUEST_IA32_EFER),
+	F64(VMCS_GUEST_IA32_PERF_GLOBAL_CTRL),
+	F64(VMCS_GUEST_PDPTE0),
+	F64(VMCS_GUEST_PDPTE1),
+	F64(VMCS_GUEST_PDPTE2),
+	F64(VMCS_GUEST_PDPTE3),
+	/* 64-bit host state */
+	F64(VMCS_HOST_IA32_PAT),
+	F64(VMCS_HOST_IA32_EFER),
+	F64(VMCS_HOST_IA32_PERF_GLOBAL_CTRL),
+	/* 32-bit control fields */
+	F32(VMCS_PIN_BASED_CTLS),
+	F32(VMCS_PRI_PROC_BASED_CTLS),
+	F32(VMCS_EXCEPTION_BITMAP),
+	F32(VMCS_PF_ERROR_MASK),
+	F32(VMCS_PF_ERROR_MATCH),
+	F32(VMCS_CR3_TARGET_COUNT),
+	F32(VMCS_EXIT_CTLS),
+	F32(VMCS_EXIT_MSR_STORE_COUNT),
+	F32(VMCS_EXIT_MSR_LOAD_COUNT),
+	F32(VMCS_ENTRY_CTLS),
+	F32(VMCS_ENTRY_MSR_LOAD_COUNT),
+	F32(VMCS_ENTRY_INTR_INFO),
+	F32(VMCS_ENTRY_EXCEPTION_ERROR),
+	F32(VMCS_ENTRY_INST_LENGTH),
+	F32(VMCS_TPR_THRESHOLD),
+	F32(VMCS_SEC_PROC_BASED_CTLS),
+	F32(VMCS_PLE_GAP),
+	F32(VMCS_PLE_WINDOW),
+	/* 32-bit read-only data */
+	RO32(VMCS_INSTRUCTION_ERROR),
+	RO32(VMCS_EXIT_REASON),
+	RO32(VMCS_EXIT_INTR_INFO),
+	RO32(VMCS_EXIT_INTR_ERRCODE),
+	RO32(VMCS_IDT_VECTORING_INFO),
+	RO32(VMCS_IDT_VECTORING_ERROR),
+	RO32(VMCS_EXIT_INSTRUCTION_LENGTH),
+	RO32(VMCS_EXIT_INSTRUCTION_INFO),
+	/* 32-bit guest state */
+	F32(VMCS_GUEST_ES_LIMIT),
+	F32(VMCS_GUEST_CS_LIMIT),
+	F32(VMCS_GUEST_SS_LIMIT),
+	F32(VMCS_GUEST_DS_LIMIT),
+	F32(VMCS_GUEST_FS_LIMIT),
+	F32(VMCS_GUEST_GS_LIMIT),
+	F32(VMCS_GUEST_LDTR_LIMIT),
+	F32(VMCS_GUEST_TR_LIMIT),
+	F32(VMCS_GUEST_GDTR_LIMIT),
+	F32(VMCS_GUEST_IDTR_LIMIT),
+	F32(VMCS_GUEST_ES_ACCESS_RIGHTS),
+	F32(VMCS_GUEST_CS_ACCESS_RIGHTS),
+	F32(VMCS_GUEST_SS_ACCESS_RIGHTS),
+	F32(VMCS_GUEST_DS_ACCESS_RIGHTS),
+	F32(VMCS_GUEST_FS_ACCESS_RIGHTS),
+	F32(VMCS_GUEST_GS_ACCESS_RIGHTS),
+	F32(VMCS_GUEST_LDTR_ACCESS_RIGHTS),
+	F32(VMCS_GUEST_TR_ACCESS_RIGHTS),
+	F32(VMCS_GUEST_INTERRUPTIBILITY),
+	F32(VMCS_GUEST_ACTIVITY),
+	F32(VMCS_GUEST_SMBASE),
+	F32(VMCS_GUEST_IA32_SYSENTER_CS),
+	F32(VMCS_PREEMPTION_TIMER_VALUE),
+	/* 32-bit host state */
+	F32(VMCS_HOST_IA32_SYSENTER_CS),
+	/* natural-width control fields */
+	F64(VMCS_CR0_MASK),
+	F64(VMCS_CR4_MASK),
+	F64(VMCS_CR0_SHADOW),
+	F64(VMCS_CR4_SHADOW),
+	F64(VMCS_CR3_TARGET0),
+	F64(VMCS_CR3_TARGET1),
+	F64(VMCS_CR3_TARGET2),
+	F64(VMCS_CR3_TARGET3),
+	/* natural-width read-only data */
+	RO64(VMCS_EXIT_QUALIFICATION),
+	RO64(VMCS_IO_RCX),
+	RO64(VMCS_IO_RSI),
+	RO64(VMCS_IO_RDI),
+	RO64(VMCS_IO_RIP),
+	RO64(VMCS_GUEST_LINEAR_ADDRESS),
+	/* natural-width guest state */
+	F64(VMCS_GUEST_CR0),
+	F64(VMCS_GUEST_CR3),
+	F64(VMCS_GUEST_CR4),
+	F64(VMCS_GUEST_ES_BASE),
+	F64(VMCS_GUEST_CS_BASE),
+	F64(VMCS_GUEST_SS_BASE),
+	F64(VMCS_GUEST_DS_BASE),
+	F64(VMCS_GUEST_FS_BASE),
+	F64(VMCS_GUEST_GS_BASE),
+	F64(VMCS_GUEST_LDTR_BASE),
+	F64(VMCS_GUEST_TR_BASE),
+	F64(VMCS_GUEST_GDTR_BASE),
+	F64(VMCS_GUEST_IDTR_BASE),
+	F64(VMCS_GUEST_DR7),
+	F64(VMCS_GUEST_RSP),
+	F64(VMCS_GUEST_RIP),
+	F64(VMCS_GUEST_RFLAGS),
+	F64(VMCS_GUEST_PENDING_DBG_EXCEPTIONS),
+	F64(VMCS_GUEST_IA32_SYSENTER_ESP),
+	F64(VMCS_GUEST_IA32_SYSENTER_EIP),
+	/* natural-width host state */
+	F64(VMCS_HOST_CR0),
+	F64(VMCS_HOST_CR3),
+	F64(VMCS_HOST_CR4),
+	F64(VMCS_HOST_FS_BASE),
+	F64(VMCS_HOST_GS_BASE),
+	F64(VMCS_HOST_TR_BASE),
+	F64(VMCS_HOST_GDTR_BASE),
+	F64(VMCS_HOST_IDTR_BASE),
+	F64(VMCS_HOST_IA32_SYSENTER_ESP),
+	F64(VMCS_HOST_IA32_SYSENTER_EIP),
+	F64(VMCS_HOST_RSP),
+	F64(VMCS_HOST_RIP),
 };
 
 const u_int vmcs12_fields_count = nitems(vmcs12_fields_table);
+
+static bool vmcs12_layout_ready;
+
+/*
+ * Lay the fields out back to back after the struct vmcs12 header,
+ * naturally aligned. Idempotent; called from every lookup so no explicit init
+ * ordering is needed.
+ */
+static void
+vmcs12_layout_init(void)
+{
+	u_int i, off;
+
+	if (vmcs12_layout_ready)
+		return;
+	off = offsetof(struct vmcs12, data);
+	for (i = 0; i < vmcs12_fields_count; i++) {
+		struct vmcs12_layout *f = &vmcs12_fields_table[i];
+
+		off = roundup2(off, f->width);
+		f->offset = off;
+		off += f->width;
+	}
+	KASSERT(off <= PAGE_SIZE, ("vmcs12 layout overflows a page: %u", off));
+	vmcs12_layout_ready = true;
+}
 
 const struct vmcs12_layout *
 vmcs12_lookup(uint32_t encoding)
 {
 	u_int i;
 
+	vmcs12_layout_init();
 	for (i = 0; i < vmcs12_fields_count; i++) {
 		if (vmcs12_fields_table[i].encoding == encoding)
 			return (&vmcs12_fields_table[i]);
@@ -153,6 +249,7 @@ const struct vmcs12_layout *
 vmcs12_at(u_int index)
 {
 
+	vmcs12_layout_init();
 	if (index >= vmcs12_fields_count)
 		return (NULL);
 	return (&vmcs12_fields_table[index]);
@@ -195,6 +292,11 @@ vmcs12_read_field(const struct vmcs12 *vmcs12, uint32_t encoding,
 	return (0);
 }
 
+/*
+ * L0-side write: used both for VMWRITE emulation (which checks the
+ * read-only flag itself) and for filling in exit information, so it
+ * does not reject read-only fields.
+ */
 int
 vmcs12_write_field(struct vmcs12 *vmcs12, uint32_t encoding, uint64_t val)
 {
@@ -204,8 +306,6 @@ vmcs12_write_field(struct vmcs12 *vmcs12, uint32_t encoding, uint64_t val)
 		return (-1);
 	f = vmcs12_lookup(encoding);
 	if (f == NULL)
-		return (-1);
-	if ((f->flags & VMCS12_F_READONLY) != 0)
 		return (-1);
 
 	switch (f->width) {
