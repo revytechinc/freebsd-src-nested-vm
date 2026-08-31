@@ -96,28 +96,3 @@ vmx_nested_state(struct vmx_vcpu *vcpu)
  * addresses, MSR bitmap address, and EPT12 pointer.  Everything
  * else is L0-owned / read-only.
  */
-void
-vmx_nested_shadow_init(struct vmx_nested_state *ns)
-{
-
-	if (ns == NULL)
-		return;
-	if (ns->vmcs_field_dirty == NULL)
-		return;
-	if (ns->vmcs_field_ro == NULL)
-		return;
-
-	memset(ns->vmcs_field_dirty, 0, VMCS_FIELD_BITMAP_SIZE);
-	memset(ns->vmcs_field_ro, 0, VMCS_FIELD_BITMAP_SIZE);
-}
-
-void
-vmx_nested_shadow_mark_dirty(struct vmx_nested_state *ns, uint32_t encoding)
-{
-
-	if (ns == NULL || ns->vmcs_field_dirty == NULL)
-		return;
-	if (encoding >= VMCS_FIELD_BITMAP_SIZE * 8)
-		return;
-	ns->vmcs_field_dirty[encoding / 8] |= (uint8_t)(1u << (encoding % 8));
-}
