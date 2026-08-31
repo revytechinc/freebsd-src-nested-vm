@@ -131,6 +131,7 @@ DEFINE_VMMOPS_IFUNC(int, modcleanup, (void))
 DEFINE_VMMOPS_IFUNC(void, modsuspend, (void))
 DEFINE_VMMOPS_IFUNC(void, modresume, (void))
 DEFINE_VMMOPS_IFUNC(void *, init, (struct vm *vm, struct pmap *pmap))
+DEFINE_VMMOPS_IFUNC(int, nested, (void *vcpui, struct vm_exit *vme))
 DEFINE_VMMOPS_IFUNC(int, run, (void *vcpui, register_t rip, struct pmap *pmap,
     struct vm_eventinfo *info))
 DEFINE_VMMOPS_IFUNC(void, cleanup, (void *vmi))
@@ -213,7 +214,14 @@ vmm_nested_enable_sysctl(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
-SYSCTL_PROC(_hw_vmm, OID_AUTO, nested_enable,
+/*
+ * hw.vmm.nested.enable: host-wide gate, documented in vmm_nested(9).
+ * The tunable of the same name is fetched by hand in vmm_init() once
+ * the vendor preflight status is known (NOFETCH prevents the sysctl
+ * framework from fetching it too early and refusing it).
+ */
+SYSCTL_DECL(_hw_vmm_nested);
+SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, enable,
     CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
     vmm_nested_enable_sysctl, "I",
     "Enable nested virtualization support (per-VM opt-in via VMMCTL_CREATE_NESTED)");
@@ -884,6 +892,31 @@ vm_handle_hlt(struct vcpu *vcpu, bool intr_disabled, bool *retu)
 	return (0);
 }
 
+/*
+ * Nested virtualization work deferred by the vendor exit handler, which
+ * runs inside a critical section and cannot hold guest pages. The
+ * vendor hook does the work and sets vme->rip to the resume address.
+ */
+static int
+vm_handle_nested(struct vcpu *vcpu, bool *retu)
+{
+	struct vm_exit *vme;
+	int error;
+
+	vme = &vcpu->exitinfo;
+	KASSERT(vme->inst_length == 0, ("%s: invalid inst_length %d",
+	    __func__, vme->inst_length));
+	error = vmmops_nested(vcpu->cookie, vme);
+	if (error == 0) {
+		vcpu->nextrip = vme->rip;
+		*retu = false;
+	} else {
+		/* Surface to userland as an unhandled nested exit. */
+		*retu = true;
+	}
+	return (0);
+}
+
 static int
 vm_handle_paging(struct vcpu *vcpu, bool *retu)
 {
@@ -1237,6 +1270,9 @@ restart:
 			break;
 		case VM_EXITCODE_PAGING:
 			error = vm_handle_paging(vcpu, &retu);
+			break;
+		case VM_EXITCODE_NESTED:
+			error = vm_handle_nested(vcpu, &retu);
 			break;
 		case VM_EXITCODE_INST_EMUL:
 			error = vm_handle_inst_emul(vcpu, &retu);
