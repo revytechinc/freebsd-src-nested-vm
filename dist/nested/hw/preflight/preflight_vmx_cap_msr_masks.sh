@@ -57,6 +57,12 @@ preflight_vmx_cap_msr_masks_unsupported()
 		echo "SKIP: ${SPECIALREG} not present"
 		return 0
 	fi
+	# Synthetic Haswell dmesg cannot be isolated from live
+	# hw.vmm.nested.* while vmm.ko is loaded; skip rather than FAIL.
+	if kldstat 2>/dev/null | grep -qw vmm; then
+		echo "SKIP: vmm.ko loaded; synthetic Haswell dmesg cannot override live nested sysctls"
+		return 0
+	fi
 	if [ "${NESTED_TEST_DRIVER}" = "force-run" ]; then
 		return 1
 	fi

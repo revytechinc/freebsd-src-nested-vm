@@ -1,127 +1,148 @@
-.\" Copyright (c) 2026 FreeBSD Project Contributors
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright (c) 2026 The FreeBSD Project Contributors.
 .\" All rights reserved.
 .\"
-.\" Redistribution and use in source and binary forms, with or without
-.\" modification, are permitted provided that the following conditions
-.\" are met:
-.\" 1. Redistributions of source code must retain the above copyright
-.\"    notice, this list of conditions and the following disclaimer.
-.\" 2. Redistributions in binary form must reproduce the above copyright
-.\"    notice, this list of conditions and the following disclaimer in the
-.\"    documentation and/or other materials provided with the distribution.
-.\"
-.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
-.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
-.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
-.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
-.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-.\" SUCH DAMAGE.
-.\"
-.Dd July 31, 2026
+.Dd August 28, 2026
 .Dt VMM_NESTED 9
 .Os
 .Sh NAME
 .Nm vmm_nested
-.Nd "nested virtualization support for bhyve hypervisor"
+.Nd nested virtualization support in the bhyve hypervisor
 .Sh SYNOPSIS
-.In sys/vmm.h
-.Ft int
-.Fn vm_create "const char *name"
+.Cd "hw.vmm.nested.enable=1"
 .Pp
-To enable at boot, add the following line to
-.Xr loader.conf 5 :
-.Bd -literal -offset indent
-hw.vmm.nested.enable=1
-.Ed
+.In machine/vmm.h
+.In dev/vmm/vmm_dev.h
 .Pp
-The same value may also be written to the sysctl at runtime:
-.Bd -literal -offset indent
-sysctl hw.vmm.nested.enable=1
-.Ed
+.Dv VMMCTL_CREATE_NESTED
+.Pp
+.Dv VMMAPI_OPEN_CREATE_NESTED
 .Sh DESCRIPTION
 The
 .Nm
 facility lets
 .Xr bhyve 8
-expose hardware-assisted CPU virtualization to its guests, so a
-level-1 (L1) guest can in turn run its own level-2 (L2) virtual
-machines.
-Each virtual machine created through
-.Xr vmm 9
-carries a per-VM
-.Va nested_enabled
-flag; the flag is set only when the machine is opened through the
-nested-aware interface described below.
+expose hardware-assisted virtualization
+.Pq Intel VMX or AMD SVM
+to a guest, so that a level-1 (L1) guest can act as a hypervisor for
+its own level-2 (L2) virtual machines.
 .Pp
-The feature is gated behind the
-.Va hw.vmm.nested.enable
-sysctl, which defaults to 0 (off).
-The sysctl is consumed at boot from
+Two gates must both be open before a guest sees the feature:
+.Bl -tag -width indent
+.It Va hw.vmm.nested.enable
+Host-wide switch, default 0.
+It can only be set to 1 when
+.Va hw.vmm.nested.vmx
+or
+.Va hw.vmm.nested.svm
+reports 2, meaning the host CPU supports what the implementation
+needs and the host is not itself a guest;
+otherwise the write fails with
+.Er EOPNOTSUPP .
+As a
 .Xr loader.conf 5
-and may be toggled at runtime through
-.Xr sysctl 8 .
-While the sysctl reads 0, the kernel takes no extra branches and no
-extra memory is reserved for nested VMCS or VMCB shadow state, so the
-fast path of existing bhyve guests is identical to a build without the
-facility.
-.Pp
-Two new kernel interfaces are introduced to opt in to nested mode.
-The kernel ioctl
+tunable the value is applied after the vendor probe runs.
+.It Per-VM opt-in
+A virtual machine created through the
 .Dv VMMCTL_CREATE_NESTED
-allows
-.Xr vmm 9
-to construct a VM with the
-.Va nested_enabled
-flag set in the per-VM structure, and the libvmmapi client flag
+ioctl, or through
+.Xr vm_create 3
+with the
 .Dv VMMAPI_OPEN_CREATE_NESTED
-performs the equivalent opt-in when calling
-.Xr vm_create 3
-(or any wrapper that ultimately opens the VM).
-Both interfaces return the regular
-.Xr vm_create 3
-contract on success; the only difference is the negotiated capability
-set of the resulting VM.
-The per-VM flag is the single source of truth at run time, so a VM
-created through the legacy ioctl never sees nested code paths even
-if the sysctl is left on.
+flag
+.Pq Nm bhyve Fl N ,
+carries the
+.Va nested_enabled
+flag.
+VMs created any other way never enter the nested code paths.
+.El
 .Pp
-When the sysctl is non-zero and the per-VM flag is set, the L1 hypervisor
-translates VMX or SVM intercepts emitted by an L2 guest into the
-corresponding L0 operations on the underlying hardware.
-The translation layer is designed so that no host VMCS or host VMCB
-state is exposed to the L1 guest and no L1-controlled memory is
-mapped into host structures.
-Isolation between L1 guests is enforced through the existing second-level
-address translation pipeline (Intel EPT or AMD NPT), not through any new
-shared host state.
+When both gates are open, CPUID leaf 1 advertises VMX (Intel hosts)
+or leaf 0x80000001 advertises SVM and leaf 0x8000000A reports the
+emulated SVM feature set (AMD hosts).
+.Ss AMD SVM
+An L1 hypervisor's
+.Dv VMRUN ,
+.Dv VMLOAD ,
+.Dv VMSAVE ,
+.Dv CLGI
+and
+.Dv STGI
+instructions are emulated.
+On
+.Dv VMRUN
+the L1 save area is parked, the L2 save area from the guest VMCB is
+loaded into the hardware VMCB together with the union of L0's and
+L1's intercepts, and L2 runs until an exit that L1 asked to intercept
+(intercept vectors, IOPM or MSRPM).
+That exit is then delivered to L1 exactly as hardware would: the L2
+state and exit information are written to the guest VMCB, L1 resumes
+after
+.Dv VMRUN
+with GIF clear.
+Exits L1 did not ask for are handled by L0 on L2's behalf.
 .Pp
-The facility is experimental.
-It does not yet cover live migration of nested VMs, IOMMU virtualization,
-Last Branch Record virtualization, SMM virtualization, or any code
-derived from GPL-licensed hypervisors; those topics are tracked by
-separate later tasks and their own MFCs.
-Programs that depend on those features should not enable the sysctl.
+When L1 enables nested paging for its guest, L2 runs under a per-vCPU
+shadow of L1's nested page table that L0 fills on demand from L2 nested
+page faults and discards when L1 requests a TLB flush or switches
+.Dv N_CR3 ;
+faults L1's table cannot resolve are reflected to L1 as nested page
+faults of its guest.
+When L1 runs its guest without nested paging, L2 guest-physical
+addresses are L1 guest-physical addresses and L0's own table applies.
+The SVM feature leaf advertises nested paging and NRIPS only; AVIC, LBR
+virtualization, flush-by-ASID and VMCB clean bits are not offered.
+.Ss Intel VMX
+.Dv VMXON ,
+.Dv VMXOFF ,
+.Dv VMPTRLD ,
+.Dv VMPTRST ,
+.Dv VMCLEAR ,
+.Dv VMREAD ,
+.Dv VMWRITE ,
+.Dv VMCALL ,
+.Dv INVEPT
+and
+.Dv INVVPID
+are emulated with architectural operand decoding and the
+VMsucceed/VMfail conventions of the SDM.
+L1's VMCS is kept as a private per-vCPU copy that is written back to
+guest memory whenever the current VMCS changes; no L1-supplied value is
+ever written into the hardware VMCS.
+.Pp
+Entering an L2 guest is not implemented yet:
+.Dv VMLAUNCH
+and
+.Dv VMRESUME
+pass the instruction-level checks and then complete as a
+.Dq VM-entry failure due to invalid guest state
+delivered to L1 through the VMCS host-state area, which every L1
+hypervisor treats as a fatal error for that L2 guest.
+.Sh SYSCTL VARIABLES
+.Bl -tag -width "hw.vmm.nested.enable"
+.It Va hw.vmm.nested.enable
+Host-wide gate, see above.
+.It Va hw.vmm.nested.vmx , Va hw.vmm.nested.svm
+Read-only vendor probe status: 0 unsupported, 1 the host is itself a
+guest, 2 ready.
+.It Va hw.vmm.nested.svm_debug
+Log the first few hundred nested-SVM events per vCPU (VMRUN, exits
+reflected to L1, L2 page faults) to the console.
+Slow; bring-up only.
+Default 0.
+.El
 .Sh SEE ALSO
 .Xr vm_create 3 ,
 .Xr vmm 4 ,
 .Xr loader.conf 5 ,
 .Xr bhyve 8 ,
-.Xr sysctl 8 ,
-.Xr vmm 9
+.Xr sysctl 8
 .Sh HISTORY
-.Nm
-first appeared in
-.Fx 17.0 .
-Initial documentation skeleton introduced as part of the nested
-virtualization work-in-progress; the ioctl and libvmmapi constants
-documented here are defined in their respective task MFCs.
-.Sh AUTHORS
-.An -nosplit
-This manual page was written by the
-.An .Sy nested-virt
-project contributors.
+Nested virtualization support first appeared in the CloudBSD
+.Fx 16.0-CURRENT
+tree.
+.Sh BUGS
+The feature is experimental and off by default.
+L2 execution exists only on AMD; live migration and snapshots of nested
+VMs are not supported.

@@ -34,7 +34,10 @@
 # systems should keep DDB enabled for fault diagnosis. See the companion
 # man page disable-panic-debugger(8).
 
-SYSCTL_CONF=/etc/sysctl.conf
+# ROOT=/mnt/be points the edits at a mounted boot environment instead of
+# the running system (live sysctls are then left alone).
+ROOT=${ROOT:-}
+SYSCTL_CONF=${ROOT}/etc/sysctl.conf
 
 # Required sysctl assignments (key=value form, no trailing whitespace).
 LINE_DEBUGGER="debug.debugger_on_panic=0"
@@ -110,6 +113,10 @@ apply_live()
 	_key=${_kv%%=*}
 	_val=${_kv#*=}
 	if ! command -v sysctl >/dev/null 2>&1; then
+		return 0
+	fi
+	if [ -n "$ROOT" ]; then
+		log "live ${_key} not applied (ROOT=${ROOT})"
 		return 0
 	fi
 	if [ "$(id -u)" -ne 0 ]; then

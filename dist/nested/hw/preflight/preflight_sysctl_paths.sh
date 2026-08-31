@@ -26,7 +26,7 @@
 #
 # T0a / Wave 0a: preflight integration -- sysctl path reachability.
 # Verifies that hw.vmm.nested.svm and hw.vmm.nested.vmx are reachable OIDs
-# with integer values, and that hw.vmm.nested_enable responds as expected
+# with integer values, and that hw.vmm.nested.enable responds as expected
 # (succeeds on capable silicon, or prints the L0/refusal message otherwise).
 # Requires root and vmm.ko.
 
@@ -83,16 +83,18 @@ preflight_sysctl_paths_main()
 	# Exercise the master switch: on capable silicon it succeeds; on
 	# L0-conflict or unsupported hardware it returns EOPNOTSUPP.  Either
 	# path is a pass as long as the kernel responds predictably.
-	if sysctl hw.vmm.nested_enable=1 >/dev/null 2>&1; then
-		echo "  hw.vmm.nested_enable=1 accepted"
-		sysctl hw.vmm.nested_enable=0 >/dev/null 2>&1 || true
-	elif sysctl hw.vmm.nested_enable=1 2>&1 | \
-	    grep -q 'refusing nested-virt'; then
-		echo "  hw.vmm.nested_enable=1 refused (L0/refusal gate active)"
+	if sysctl hw.vmm.nested.enable=1 >/dev/null 2>&1; then
+		echo "  hw.vmm.nested.enable=1 accepted"
+		sysctl hw.vmm.nested.enable=0 >/dev/null 2>&1 || true
 	else
-		echo "FAIL: hw.vmm.nested_enable=1 produced unexpected output"
-		sysctl hw.vmm.nested_enable=1 2>&1 || true
-		exit 1
+		out=$(sysctl hw.vmm.nested.enable=1 2>&1 || true)
+		if echo "$out" | grep -Eq 'refusing nested-virt|not available|not supported'; then
+			echo "  hw.vmm.nested.enable=1 refused (gate: $out)"
+		else
+			echo "FAIL: hw.vmm.nested.enable=1 produced unexpected output"
+			echo "$out"
+			exit 1
+		fi
 	fi
 
 	echo "PASS: preflight_sysctl_paths reachable, integer, in range"
@@ -103,7 +105,7 @@ preflight_sysctl_paths_main "$@"
 atf_test_case "preflight_sysctl_paths"
 preflight_sysctl_paths_head()
 {
-	atf_set "descr" "hw.vmm.nested.{svm,vmx} sysctls reachable + hw.vmm.nested_enable responds"
+	atf_set "descr" "hw.vmm.nested.{svm,vmx} sysctls reachable + hw.vmm.nested.enable responds"
 	atf_set "require.user" "root"
 	atf_set "require.kmods" "vmm"
 }

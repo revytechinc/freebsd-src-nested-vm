@@ -29,5 +29,6 @@ atf_test_program{
 		"preflight_arch_output_test.sh",
 		"preflight_arch_consistency_test.sh",
 		"preflight_critical_bugfix_test.sh",
+		"preflight_nsvm_dispatcher.sh",
 	},
 }
