@@ -17,41 +17,22 @@
 #include "vmcb.h"
 
 /*
- * AMD SVM MSR Permission Map (MSRPM) layout.
- *
- * The MSRPM is an 8-Kbyte (2 page) bitmap. Per AMD APM Vol 2 §15.11:
- *
- *   Page 0 (offsets 0x0000-0x0FFF): MSRs 0x00000000-0x00001FFF
- *     - Read map : offsets 0x0000-0x07FF (2 KB)
- *     - Write map: offsets 0x0800-0x0FFF (2 KB)
- *   Page 1 (offsets 0x1000-0x1FFF): MSRs 0xC0000000-0xC001FFFF
- *     - Read map : offsets 0x1000-0x17FF (2 KB)
- *     - Write map: offsets 0x1800-0x1FFF (2 KB)
- *
- * The C001 bank uses the same page-1 positions as the C000 bank; the
- * bank-select bits do not contribute to the offset within the page.
- *
- * Within each 2 KB read or write map, 4 MSRs are encoded per byte:
- *   byte_offset_within_2KB = (msr_index_within_page) / 4
- *   bit_position_within_byte = (msr_index_within_page % 4) * 2
- *     - bit b+0: read intercept for that MSR
- *     - bit b+1: write intercept for that MSR
- *
- * Bit semantics follow the existing bhyve convention (see svm.c):
- * bit cleared (0) = access is allowed (no intercept),
- * bit set   (1)   = access is intercepted.
+ * AMD SVM MSR permission map helpers; layout documented in svm_nested.c
+ * (APM Vol 2 §15.11). Access selectors for the *_intercept() calls:
  */
-#define	SVM_MSR_BITMAP_PAGE0_MSRS	0x2000
-#define	SVM_MSR_BITMAP_PAGE1_BASE	0xC0000000U
-#define	SVM_MSR_BITMAP_PAGE1_END	0xC001FFFFU
-#define	SVM_MSR_BITMAP_PAGE1_INDEX_MASK	0x00001FFFU
+#ifndef MSR_BITMAP_ACCESS_READ
+#define	MSR_BITMAP_ACCESS_READ	0x1
+#endif
+#ifndef MSR_BITMAP_ACCESS_WRITE
+#define	MSR_BITMAP_ACCESS_WRITE	0x2
+#endif
+#ifndef MSR_BITMAP_ACCESS_RW
+#define	MSR_BITMAP_ACCESS_RW	(MSR_BITMAP_ACCESS_READ | MSR_BITMAP_ACCESS_WRITE)
+#endif
 
-#define	SVM_MSR_BITMAP_PAGE1_BASE_OFF	0x1000	/* page 1 starts at 4 KB */
-#define	SVM_MSR_BITMAP_WRITE_HALF_OFF	0x0800	/* write map offset within
-						   a 4 KB page */
-#define	SVM_MSR_BITMAP_MSRS_PER_BYTE	4
-#define	SVM_MSR_BITMAP_BITS_PER_MSR	2
+int	 svm_msr_bitmap_locate(uint32_t msr, size_t *byte, unsigned *bit);
 
+struct pmap;
 struct svm_softc;
 struct svm_vcpu;
 
@@ -62,12 +43,30 @@ struct svm_vcpu;
  * pointer, the cached L2 VMCB, and the L2 IDT/GDT/CR state.
  */
 struct svm_nested {
-	bool		nested_in_l2;
-	bool		gif;		/* STGI/CLGI guest interrupt flag */
-	uint64_t	vmcb12_gpa;
-	struct vmcb	*vmcb12;
+	bool		nested_in_l2;	/* hardware VMCB holds L2 state */
+	bool		gif;		/* global interrupt flag (STGI/CLGI) */
+	uint64_t	vmcb12_gpa;	/* L1 GPA of the VMCB passed to VMRUN */
+	struct vmcb	*vmcb12;	/* held mapping of that page, while in L2 */
 	void		*vmcb12_cookie;
 	struct vmcb_state l1_state;	/* L1 save area parked during L2 */
+	uint64_t	l1_intr_shadow;	/* L1 interrupt shadow during L2 */
+	uint32_t	l0_intercept[5]; /* L0 intercept vectors during L2 */
+	uint64_t	l0_tsc_offset;
+	uint64_t	l0_vintr;	/* VMCB ctrl bytes 0x60-0x67 (V_TPR..) */
+	uint64_t	pir[4];		/* pending L2 vectors (svm_nested_intr.c) */
+	struct pmap	*npt02;		/* shadow NPT: L2 GPA -> host */
+	uint64_t	npt02_pa;
+	uint64_t	l0_ncr3;	/* L0 N_CR3 parked during L2 */
+	uint64_t	l1_ncr3;	/* VMCB12.N_CR3 the shadow was built for */
+	int		debug_count;	/* hw.vmm.nested.svm_debug budget */
+	/*
+	 * L1's IOPM (3 pages) and MSRPM (2 pages), held while L2 runs so
+	 * the exit handler can consult them without taking locks.
+	 */
+	uint8_t		*l1_iopm[3];
+	void		*l1_iopm_cookie[3];
+	uint8_t		*l1_msrpm[2];
+	void		*l1_msrpm_cookie[2];
 };
 
 /*
@@ -111,24 +110,22 @@ int	 svm_msr_bitmap_test_intercept(const struct nested_bitmap *nb,
 void	 svm_nested_build_msrpm(struct svm_softc *sc, struct svm_vcpu *vcpu);
 
 /*
- * Install the per-thread 'current VMCB12' pointer that the
- * svm_nested_handle_vmexit dispatcher writes to. The wave-5 entry
- * path calls this once on each L2 entry; if no VMCB12 is installed,
- * the reflection helpers degrade to no-ops so the unit tests can
- * exercise the dispatcher without a real L1 mapping.
+ * Per-vCPU nested state, and the VMCB12 mapping held while L2 runs.
  */
 struct svm_nested *svm_nested_lookup(struct svm_vcpu *vcpu);
-void	 svm_nested_set_vmcb12(struct vmcb *vmcb12);
 void	 svm_nested_release_vmcb12(struct svm_vcpu *vcpu);
+bool	 svm_nested_in_l2(struct svm_vcpu *vcpu);
 
 /*
- * Drop L2-translated TLB entries so L1 cannot observe them. Called
- * from the svm_nested_handle_vmexit epilogue (T29b).
+ * Force a TLB flush before the next VMRUN (L1 and L2 share L0's ASID).
  */
 void	 svm_nested_tlb_flush(struct svm_vcpu *vcpu);
 
-#ifdef SVM_NESTED_TEST
-void	 svm_nested_test_msrpm_range(void);
-#endif
+/* svm_nested_npt.c */
+int	 svm_nested_npt_init(struct svm_vcpu *vcpu);
+void	 svm_nested_npt_flush(struct svm_vcpu *vcpu);
+void	 svm_nested_npt_cleanup(struct svm_vcpu *vcpu);
+int	 svm_nested_npt_fault(struct svm_vcpu *vcpu, uint64_t g2,
+	     uint64_t exitinfo1);
 
 #endif /* _VMM_SVM_NESTED_H_ */

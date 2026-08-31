@@ -136,6 +136,26 @@ x86_emulate_cpuid(struct vcpu *vcpu, uint64_t *rax, uint64_t *rbx,
 		case CPUID_8000_0006:
 			cpuid_count(func, param, regs);
 			break;
+		case CPUID_8000_000A:
+			/*
+			 * SVM feature leaf. Advertise only what the nested
+			 * SVM code emulates: nested paging (shadowed) and
+			 * NRIPS (needed for L1 to decode its own exits). LBR
+			 * virtualization, VMCB clean bits, flush-by-ASID,
+			 * AVIC and the rest are not emulated. The ASID count is the host's; L2
+			 * shares L0's ASID and only requires it non-zero.
+			 */
+			if (vm->nested_enabled && vmm_nested_enable &&
+			    vmm_is_svm()) {
+				cpuid_count(func, param, regs);
+				regs[0] = 1;	/* SVM revision */
+				regs[2] = 0;
+				regs[3] &= CPUID_SVM_FEAT_NP | CPUID_SVM_FEAT_NRIPS;
+			} else {
+				regs[0] = regs[1] = regs[2] = regs[3] = 0;
+			}
+			break;
+
 		case CPUID_8000_0008:
 			cpuid_count(func, param, regs);
 			if (vmm_is_svm()) {
