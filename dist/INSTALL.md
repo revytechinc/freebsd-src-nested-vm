@@ -73,16 +73,19 @@ sudo bectl create wave7-preflight
 sudo bectl mount wave7-preflight /tmp/be
 sudo install -m 555 kernel.amd64 /tmp/be/boot/kernel/kernel
 sudo install -m 555 vmm.ko.amd64   /tmp/be/boot/kernel/vmm.ko
+
+# 3. Fail-reboot contract, applied to the CANDIDATE BE while it is still
+#    mounted (the scripts edit /etc/sysctl.conf, /etc/rc.conf and
+#    /boot/loader.conf under ROOT; running them against the live root
+#    would leave the candidate booting with DDB on and no watchdog):
+#    DDB off, power-cycle on panic, watchdog for hangs, vmm not autoloaded.
+sudo env ROOT=/tmp/be ./nested/scripts/disable-panic-debugger.sh
+sudo env ROOT=/tmp/be ./nested/scripts/enable-fail-watchdog.sh
+sudo env ROOT=/tmp/be ./nested/scripts/disable-vmm-autoload.sh
 sudo bectl umount wave7-preflight
 
-# 3. Install preflight.sh into PATH (NOT into /boot - /boot is reserved for boot files)
+# 4. Install preflight.sh into PATH (NOT into /boot - /boot is reserved for boot files)
 sudo install -m 755 preflight.sh /usr/local/bin/preflight
-
-# 4. Fail-reboot contract BEFORE the first candidate boot:
-#    DDB off, power-cycle on panic, watchdog for hangs, vmm not autoloaded.
-sudo ./nested/scripts/disable-panic-debugger.sh
-sudo ./nested/scripts/enable-fail-watchdog.sh
-sudo ./nested/scripts/disable-vmm-autoload.sh
 # Confirm zpool bootfs still names the KNOWN-GOOD BE. Do NOT
 # `zpool set bootfs=.../wave7-preflight` — that is how a failed
 # nested BE never reverts (008).

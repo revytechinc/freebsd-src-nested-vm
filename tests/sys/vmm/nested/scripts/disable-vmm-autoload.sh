@@ -35,7 +35,9 @@
 # where vmm panics are possible -- auto-load would create an unbreakable
 # panic loop without physical / IPMI access.
 
-LOADER_CONF=/boot/loader.conf
+# ROOT=/mnt/be edits a mounted boot environment instead of the live root.
+ROOT=${ROOT:-}
+LOADER_CONF=${ROOT}/boot/loader.conf
 
 # Required loader.conf entry. vmm_load="NO" is the canonical disable form
 # for the loader(8) autoboot mechanism.

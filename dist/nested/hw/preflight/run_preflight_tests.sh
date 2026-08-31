@@ -20,11 +20,16 @@ skipped=0
 failed=0
 
 for test_script in "${tests[@]}"; do
-    result=$(bash "${test_script}") || {
+    # Strip ATF glue into a sibling file so $0 dirname (repo_root) is preserved.
+    run_copy="${test_script}.run"
+    sed '/^atf_test_case/,$d' "${test_script}" > "${run_copy}"
+    result=$(bash "${run_copy}") || {
+        rm -f "${run_copy}"
         failed=$((failed + 1))
         printf 'FAIL: %s\n' "$(basename "${test_script}")"
         continue
     }
+    rm -f "${run_copy}"
     printf '%s\n' "${result}"
     if grep -q '^SKIP:' <<<"${result}"; then
         skipped=$((skipped + 1))
@@ -39,16 +44,19 @@ if ((failed != 0)); then
     exit 1
 fi
 
-atf_test_case preflight_integrity
-preflight_integrity_head()
-{
-    atf_set "descr" "Wave 0a + Wave 5/6 preflight test matrix (4 baseline + 10 wave-5+6 regression)"
-}
-preflight_integrity_body()
-{
-    bash "$0"
-}
-atf_init_test_cases()
-{
-    atf_add_test_case preflight_integrity
-}
+# Kyua/ATF glue — not used for standalone bash runs.
+if command -v atf_init_test_cases >/dev/null 2>&1; then
+    atf_test_case preflight_integrity
+    preflight_integrity_head()
+    {
+        atf_set "descr" "Wave 0a + Wave 5/6 preflight test matrix"
+    }
+    preflight_integrity_body()
+    {
+        bash "$0"
+    }
+    atf_init_test_cases()
+    {
+        atf_add_test_case preflight_integrity
+    }
+fi

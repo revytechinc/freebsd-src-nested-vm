@@ -144,3 +144,33 @@ cd /usr/tests/sys/vmm/nested && kyua test deployment_safety
 * Plan: `.sisyphus/plans/nested-virt-register-virtualization.md` task T0b
 * Man page: `share/man/man9/vmm_nested.9`
 * Spec: `tunables(9)`, `loader.conf(5)`, `sysctl(8)`
+## Applying the fail-reboot contract to a candidate BE
+
+`disable-panic-debugger.sh`, `enable-fail-watchdog.sh` and
+`disable-vmm-autoload.sh` edit `/etc/sysctl.conf`, `/etc/rc.conf` and
+`/boot/loader.conf`. Run them with `ROOT=<mountpoint>` while the candidate
+boot environment is mounted so the *candidate* boots with DDB off,
+power-cycle-on-panic and watchdogd; run against the live root they only
+protect the currently running BE. `enable-fail-watchdog.sh` also arms a
+reachability probe (`watchdogd -e`, default gateway, `WATCHDOG_PROBE_HOST`
+to override) so a box whose NIC died but whose kernel is still patting the
+watchdog is reset too.
+
+## Behavioral L2 test
+
+`integration/l2_smoke.sh` is the one test that proves an L2 guest ran. On
+an L0 host with this tree's `vmm.ko` loaded and a `bhyve` built from this
+tree (it must accept `-N`), run as root:
+
+```sh
+L1_IMAGE=/path/to/FreeBSD-16.0-CURRENT-amd64-ufs.raw \
+BHYVE=/path/to/obj/usr.sbin/bhyve/bhyve \
+    sh tests/sys/vmm/nested/integration/l2_smoke.sh
+```
+
+It boots the image as L1 with `-N`, logs in on the serial console, loads
+`vmm` inside L1, runs `bhyveload -h /boot` + `bhyve` there, and passes only
+when the L2 kernel's copyright banner appears on the L1 console. Exit 77
+means a prerequisite is missing. On Intel hosts L2 entry is not implemented
+yet and the test is expected to FAIL with a VM-entry failure reported by the
+L1 `bhyve`.

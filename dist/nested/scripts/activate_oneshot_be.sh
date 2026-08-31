@@ -60,11 +60,9 @@ log "pool=$POOL"
 log "bootfs(before)=$bootfs"
 log "candidate=$CANDIDATE (activate -t only)"
 
-if ! bectl list "$CANDIDATE" >/dev/null 2>&1; then
-	# bectl list <name> is not portable; scan the first column.
-	if ! bectl list | awk 'NR>1 {print $1}' | grep -qx "$CANDIDATE"; then
-		die "BE $CANDIDATE does not exist"
-	fi
+# bectl list ignores a name argument, so scan the first column.
+if ! bectl list -H | awk '{print $1}' | grep -qx "$CANDIDATE"; then
+	die "BE $CANDIDATE does not exist"
 fi
 
 good=${bootfs##*/}
