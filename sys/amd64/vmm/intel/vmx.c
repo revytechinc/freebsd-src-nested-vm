@@ -3251,6 +3251,8 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 	struct region_descriptor gdtr, idtr;
 	uint16_t ldt_sel;
 	bool in_l2;
+	bool l1_relaunch = false;	/* vmcs01 was VMCLEARed by a reflect;
+					 * its next entry must VMLAUNCH */
 
 	vcpu = vcpui;
 	vmx = vcpu->vmx;
@@ -3444,7 +3446,7 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 					 * VMPTRLD again here.
 					 */
 					in_l2 = false;
-					launched = 1;
+					l1_relaunch = true;
 					rip = vmcs_guest_rip();
 					vmexit->rip = rip;
 					vcpu->state.nextrip = rip;
@@ -3457,7 +3459,11 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 			enable_intr();
 			vmx_exit_inst_error(vmxctx, rc, vmexit);
 		}
-		launched = 1;
+		if (l1_relaunch) {
+			launched = 0;		/* freshly VMCLEARed vmcs01 */
+			l1_relaunch = false;
+		} else
+			launched = 1;
 		vmx_exit_trace(vcpu, rip, exit_reason, handled);
 		rip = vmexit->rip;
 	} while (handled);
