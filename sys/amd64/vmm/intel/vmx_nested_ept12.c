@@ -78,8 +78,8 @@ extern int vmm_nested_enable;
  *   4KB PTE:   bits 51:12 hold the physical address; bits 11:0
  *              are flag bits (R/W/X etc.).
  */
-#define	EPT_PTE_LARGE_ADDR_1GB	0xffffffffc0000000UL
-#define	EPT_PTE_LARGE_ADDR_2MB	0xffffffffffe00000UL
+#define	EPT_PTE_LARGE_ADDR_1GB	0x000fffffc0000000UL
+#define	EPT_PTE_LARGE_ADDR_2MB	0x000fffffffe00000UL
 #define	EPT_PTE_4KB_ADDR	0x000ffffffffff000UL
 
 /*

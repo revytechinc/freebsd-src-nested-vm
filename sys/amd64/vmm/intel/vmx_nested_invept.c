@@ -67,6 +67,11 @@ vmx_nested_invept_handle(struct vmx_vcpu *vcpu, uint64_t type, uint64_t eptp)
 	desc.eptp = 0;
 	desc._res = 0;
 	invept(INVEPT_TYPE_ALL_CONTEXTS, desc);
+	/*
+	 * Also drop our shadow of (EPT12 o EPT01): L1 just invalidated EPT12,
+	 * so cached ept02 mappings may now be stale.
+	 */
+	vmx_nested_ept02_flush(vcpu);
 	return (VM_SUCCESS);
 }
 
