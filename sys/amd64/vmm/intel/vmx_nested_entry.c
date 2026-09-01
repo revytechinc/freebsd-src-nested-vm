@@ -370,16 +370,6 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	vmwrite(VMCS_ENTRY_MSR_LOAD_COUNT, 0);
 	vmwrite(VMCS_EXIT_MSR_LOAD_COUNT, 0);
 	vmwrite(VMCS_EXIT_MSR_STORE_COUNT, 0);
-	/*
-	 * Do NOT acknowledge external interrupts on VM exit from L2: leave the
-	 * host interrupt pending so vmx_run()'s enable_intr() delivers it
-	 * through the normal host path (which EOIs it). If it were ACKed here,
-	 * the vector would be consumed with nobody to EOI it and the local
-	 * APIC would wedge.
-	 */
-	vmwrite(VMCS_EXIT_CTLS,
-	    vmcs_read(VMCS_EXIT_CTLS) & ~(uint64_t)VM_EXIT_ACKNOWLEDGE_INTERRUPT);
-
 	{
 		uint64_t efer = 0, entry;
 		vmcs12_read_field(v12, VMCS_GUEST_IA32_EFER, &efer);
@@ -515,16 +505,26 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 		vmexit->u.nested.info1 = vmcs_read(VMCS_GUEST_PHYSICAL_ADDRESS);
 		vmexit->u.nested.info2 = qual;
 		return (2);			/* leave vmx_run to defer */
-	case EXIT_REASON_EXT_INTR:
+	case EXIT_REASON_EXT_INTR: {
+		uint32_t intr_info;
+
 		/*
-		 * A host interrupt fired while L2 was running. build_vmcs02()
-		 * clears "acknowledge interrupt on exit" from vmcs02, so the
-		 * vector is left PENDING (not consumed): vmx_run()'s enable_intr()
-		 * (already done before this call) delivers it through the normal
-		 * host interrupt path, which EOIs it. Running the ISR by hand
-		 * here instead (vmx_trigger_hostintr) corrupts the thread's
-		 * critical-section state mid-exit. Nothing to do; resume L2.
+		 * A host interrupt fired while L2 was running. vmcs02 inherits
+		 * bhyve's "acknowledge interrupt on exit", so the CPU has
+		 * already ACKed the vector into VMCS_EXIT_INTR_INFO -- it is NOT
+		 * left pending, so enable_intr() alone will NOT run the host
+		 * ISR. Dispatch it to the host handler exactly as
+		 * vmx_exit_process() does for L1; otherwise the vector is never
+		 * EOIed, the CPU's local APIC wedges, and the next all-CPU
+		 * smp_rendezvous()/TLB shootdown deadlocks the whole host.
+		 * Then resume L2.
 		 */
+		intr_info = vmcs_read(VMCS_EXIT_INTR_INFO);
+		if ((intr_info & VMCS_INTR_VALID) != 0 &&
+		    (intr_info & VMCS_INTR_T_MASK) == VMCS_INTR_T_HWINTR)
+			vmx_trigger_hostintr(intr_info & 0xff);
+		return (1);
+	}
 	case EXIT_REASON_NMI_WINDOW:
 	case EXIT_REASON_INTR_WINDOW:
 		/* Nothing to do at L0; resume L2. */
