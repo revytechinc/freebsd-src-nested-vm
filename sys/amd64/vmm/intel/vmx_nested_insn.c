@@ -452,14 +452,19 @@ vmx_nested_vmexit_to_l1(struct vmx_vcpu *vcpu, uint32_t reason,
 
 	vmcs12_write_field(v12, VMCS_EXIT_REASON, reason);
 	vmcs12_write_field(v12, VMCS_EXIT_QUALIFICATION, qualification);
-	vmcs12_write_field(v12, VMCS_EXIT_INTR_INFO, 0);
-	vmcs12_write_field(v12, VMCS_EXIT_INTR_ERRCODE, 0);
+	/*
+	 * The IDT-vectoring fields are cleared for every exit delivered to L1:
+	 * no event was mid-delivery. The instruction-length, instruction-info,
+	 * interrupt-info/errcode and guest-address fields are NOT touched here
+	 * -- they belong to whoever describes the exit. For a genuine L2 exit
+	 * vmx_nested_reflect_copy() has already filled them from vmcs02, and L1
+	 * needs the real EXIT_INSTRUCTION_LENGTH to advance L2's RIP past the
+	 * faulting instruction (e.g. CPUID); zeroing it here made L1 advance by
+	 * 0 and spin L2 forever on that instruction. The VM-entry-failure
+	 * caller, which has no vmcs02 exit to copy, zeroes them itself.
+	 */
 	vmcs12_write_field(v12, VMCS_IDT_VECTORING_INFO, 0);
 	vmcs12_write_field(v12, VMCS_IDT_VECTORING_ERROR, 0);
-	vmcs12_write_field(v12, VMCS_EXIT_INSTRUCTION_LENGTH, 0);
-	vmcs12_write_field(v12, VMCS_EXIT_INSTRUCTION_INFO, 0);
-	vmcs12_write_field(v12, VMCS_GUEST_LINEAR_ADDRESS, 0);
-	vmcs12_write_field(v12, VMCS_GUEST_PHYSICAL_ADDRESS, 0);
 
 	vmcs12_read_field(v12, VMCS_EXIT_CTLS, &exit_ctls);
 	host64 = (exit_ctls & VM_EXIT_HOST_LMA) != 0;
