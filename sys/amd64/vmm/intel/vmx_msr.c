@@ -43,6 +43,7 @@
 #include "vmx_cpufunc.h"
 #include "vmcs.h"
 #include "vmx.h"
+#include "vmx_controls.h"
 #include "vmx_msr.h"
 #include "x86.h"
 
@@ -590,6 +591,23 @@ vmx_nested_cap_msr_read(struct vmx_vcpu *vcpu __unused, u_int msr, uint64_t *val
 	host_val = vmx_cap_host_read(msr);
 	*val = (host_val & vmx_cap_map[idx].and_mask) |
 	    vmx_cap_map[idx].or_mask;
+	/*
+	 * Do not advertise APICv to L1 for running L2. L0's nested L2 path
+	 * runs vmcs02 with APICv OFF (it does not replicate the virtual-APIC
+	 * page), so if L1 enabled APICv for L2 the guest's local-APIC accesses
+	 * would be neither hardware-virtualized nor intercepted and would
+	 * reach L0's physical LAPIC, corrupting host timekeeping. Clearing the
+	 * allowed-1 (high 32) APICv bits forces L1 to fall back to software
+	 * vlapic emulation, so it intercepts L2's APIC accesses and L0 can
+	 * reflect them to L1. Likewise drop "process posted interrupts".
+	 */
+	if (msr == MSR_VMX_PROCBASED_CTLS2)
+		*val &= ~((uint64_t)(PROCBASED2_VIRTUALIZE_APIC_ACCESSES |
+		    PROCBASED2_VIRTUALIZE_X2APIC_MODE |
+		    PROCBASED2_APIC_REGISTER_VIRTUALIZATION |
+		    PROCBASED2_VIRTUAL_INTERRUPT_DELIVERY) << 32);
+	if (msr == MSR_VMX_PINBASED_CTLS || msr == MSR_VMX_TRUE_PINBASED_CTLS)
+		*val &= ~((uint64_t)PINBASED_POSTED_INTERRUPT << 32);
 	return (0);
 }
 

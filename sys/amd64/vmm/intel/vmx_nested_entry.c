@@ -170,6 +170,8 @@ vmx_nested_ept02_cleanup(struct vmx_vcpu *vcpu)
 	pmap_remove(ns->ept02, 0, VM_MAXUSER_ADDRESS);
 	pmap_release(ns->ept02);
 	PMAP_LOCK_DESTROY(ns->ept02);
+if (ns->msr_bitmap02 != NULL)
+		free(ns->msr_bitmap02, M_VMX_NESTED);
 	free(ns->ept02, M_VMX_NESTED);
 	ns->ept02 = NULL;
 	ns->ept02_eptp = 0;
@@ -272,6 +274,11 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 		ns->vmcs02->identifier = vmx_revision();
 		ns->vmcs02_launched = false;
 	}
+	if (ns->msr_bitmap02 == NULL) {
+		ns->msr_bitmap02 = malloc_aligned(PAGE_SIZE, PAGE_SIZE,
+		    M_VMX_NESTED, M_WAITOK | M_ZERO);
+		ns->msr_bitmap02_pa = vtophys(ns->msr_bitmap02);
+	}
 
 	/*
 	 * Snapshot vmcs01 host + control fields. This runs from vm_run()'s
@@ -281,6 +288,34 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	 * bogus control fields (VM entry fails with "invalid control field").
 	 */
 	VMPTRLD(vcpu->vmcs);
+	{
+		/*
+		 * vmcs02 runs L2 with APICv OFF, but the MSR bitmap inherited
+		 * from vmcs01 was built for L1 WITH APICv and therefore lets
+		 * x2APIC MSR accesses pass through. Uncaught, L2's writes to its
+		 * local-APIC timer (LVT/initial-count, MSRs 0x800-0x8ff) would
+		 * hit L0's PHYSICAL LAPIC and destroy the host's timekeeping.
+		 * Build a private vmcs02 bitmap: copy vmcs01's, then force the
+		 * whole x2APIC range to intercept so those accesses exit and are
+		 * reflected to L1 (which emulates L2's vlapic).
+		 */
+		uint64_t l1_bm = vmcs_read(VMCS_MSR_BITMAP);
+		if (l1_bm != 0)
+			memcpy(ns->msr_bitmap02,
+			    (void *)PHYS_TO_DMAP(l1_bm), PAGE_SIZE);
+		/* read-low bitmap base 0x000; write-low base 0x800; MSRs
+		 * 0x800..0x8ff occupy bytes 0x100..0x11f of each. */
+		memset(ns->msr_bitmap02 + 0x100, 0xff, 0x20);
+		memset(ns->msr_bitmap02 + 0x900, 0xff, 0x20);
+		/*
+		 * IA32_TSC_DEADLINE (0x6e0): FreeBSD programs the local-APIC
+		 * timer in TSC-deadline mode via this MSR, which is outside the
+		 * x2APIC range. Intercept it too so L2 cannot arm L0's physical
+		 * deadline timer. byte = 0x6e0>>3 = 0xdc, bit 0.
+		 */
+		ns->msr_bitmap02[0x0dc] |= 0x01;	/* read-low  */
+		ns->msr_bitmap02[0x8dc] |= 0x01;	/* write-low */
+	}
 	for (i = 0; i < nitems(vmcs02_host_fields); i++)
 		hostv[i] = vmcs_read(vmcs02_host_fields[i]);
 	for (i = 0; i < nitems(vmcs02_ctrl_fields); i++)
@@ -380,6 +415,7 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 			entry &= ~(uint64_t)VM_ENTRY_GUEST_LMA;
 		vmwrite(VMCS_ENTRY_CTLS, entry);
 	}
+	vmwrite(VMCS_MSR_BITMAP, ns->msr_bitmap02_pa);
 	vmwrite(VMCS_EPTP, ns->ept02_eptp);
 	vmwrite(VMCS_LINK_POINTER, ~0UL);
 	if (vmcs12_read_field(v12, VMCS_TSC_OFFSET, &val) == 0)
