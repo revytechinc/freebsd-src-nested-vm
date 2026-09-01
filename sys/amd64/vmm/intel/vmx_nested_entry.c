@@ -511,11 +511,28 @@ vmx_nested_op_l2_ept(struct vmx_vcpu *vcpu, uint64_t gpa, uint64_t qual)
 	 * VMCLEAR balances the critical section) and do not leave any VMCS
 	 * loaded; vmx_run()'s prologue reloads vmcs01 since in_l2 is cleared.
 	 */
-	if (vmx_nested_ept02_fault(vcpu, gpa, qual) != 0) {
-		VMPTRLD(ns->vmcs02);
-		vmx_nested_reflect_copy(vcpu, EXIT_REASON_EPT_FAULT, qual, gpa);
-		VMCLEAR(ns->vmcs02);
-		ns->in_l2 = false;
+	{
+		int r = vmx_nested_ept02_fault(vcpu, gpa, qual);
+		if (r != 0) {
+			/*
+			 * Reflect the EPT violation to L1. Save L2 guest state
+			 * into vmcs12 (needs vmcs02 current), then deliver the
+			 * exit to L1 by loading vmcs12's host-state area into
+			 * vmcs01 so L1 resumes at its VM-exit handler
+			 * (HOST_RIP). vmx_nested_vmexit_to_l1() clears the
+			 * guest-physical-address field, so re-stamp the faulting
+			 * GPA afterwards for L1's EPT handler. It also clears
+			 * in_l2.
+			 */
+			VMPTRLD(ns->vmcs02);
+			vmx_nested_reflect_copy(vcpu, EXIT_REASON_EPT_FAULT,
+			    qual, gpa);
+			VMCLEAR(ns->vmcs02);
+			vmx_nested_vmexit_to_l1(vcpu, EXIT_REASON_EPT_FAULT,
+			    qual);
+			vmcs12_write_field(vcpu->nvmcs12,
+			    VMCS_GUEST_PHYSICAL_ADDRESS, gpa);
+		}
 	}
 	return (0);
 }
