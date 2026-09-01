@@ -90,6 +90,18 @@ vmx_nested_vmentry(struct vmx_vcpu *vcpu, bool launch)
 	}
 	VMX_CTR1(vcpu, "nested %s: no L2 support, reporting entry failure",
 	    launch ? "VMLAUNCH" : "VMRESUME");
+	/*
+	 * This is a synthetic VM-entry-failure exit, not a reflected L2 exit,
+	 * so there is no vmcs02 exit information to copy. Present clean
+	 * instruction/event/address fields (vmx_nested_vmexit_to_l1() no longer
+	 * zeroes these -- it leaves them to reflect_copy for real L2 exits).
+	 */
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_EXIT_INTR_INFO, 0);
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_EXIT_INTR_ERRCODE, 0);
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_EXIT_INSTRUCTION_LENGTH, 0);
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_EXIT_INSTRUCTION_INFO, 0);
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_GUEST_LINEAR_ADDRESS, 0);
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_GUEST_PHYSICAL_ADDRESS, 0);
 	vmx_nested_vmexit_to_l1(vcpu,
 	    EXIT_REASON_ENTRY_FAILURE | EXIT_REASON_INVALID_GUEST_STATE, 0);
 	return (1);
