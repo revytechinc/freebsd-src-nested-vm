@@ -209,7 +209,17 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 	 * (vmx_nested_l2_exit), so EPT12 maps this GPA; a failure below is a
 	 * rare L0 backing error -- log and return, and L2 will re-fault.
 	 */
-	if (vmx_nested_ept12_translate(vcpu, l2_gpa, access, &l1_gpa) != 0) {
+	/*
+	 * Translate with READ to decide fill-vs-reflect: we only need to know
+	 * whether L1 maps this L2 GPA at all. Reflecting merely because the
+	 * fault was a write (e.g. a guest page-table A/D-bit update) when L1
+	 * maps the page read/write-through-intermediate-levels would force an
+	 * unnecessary nested VM-exit into L1. Permissions for L2 are granted
+	 * below in ept02 (RWX); a genuinely unmapped GPA still fails here and
+	 * is reflected so L1 can populate EPT12.
+	 */
+	if (vmx_nested_ept12_translate(vcpu, l2_gpa, VM_PROT_READ,
+	    &l1_gpa) != 0) {
 		VMX_CTR1(vcpu, "L2 EPT: gpa %#lx unexpectedly unmapped",
 		    (unsigned long)l2_gpa);
 		return (1);

@@ -644,9 +644,23 @@ vmx_nested_op(void *vcpui, struct vm_exit *vme)
 	struct vmx_vcpu *vcpu = vcpui;
 	int rc;
 
-	if (vme->u.nested.op == VM_NESTED_OP_L2_EPT)
-		return (vmx_nested_op_l2_ept(vcpu, vme->u.nested.info1,
-		    vme->u.nested.info2));
+	if (vme->u.nested.op == VM_NESTED_OP_L2_EPT) {
+		struct vmx_nested_state *ns = vmx_nested_state(vcpu);
+
+		rc = vmx_nested_op_l2_ept(vcpu, vme->u.nested.info1,
+		    vme->u.nested.info2);
+		/*
+		 * If the fault was reflected to L1, vmx_nested_vmexit_to_l1()
+		 * installed L1's host RIP into vmcs01; publish it so vm_run()'s
+		 * nextrip (and the next vmx_run's VMCS_GUEST_RIP write) resumes
+		 * L1 at its VM-exit handler rather than re-writing L2's faulting
+		 * RIP. When the page was filled (still in L2), vme->rip is
+		 * ignored -- vmx_run() reads the RIP from vmcs02.
+		 */
+		if (!ns->in_l2)
+			vme->rip = vmx_nested_vmcs_read(vcpu, VMCS_GUEST_RIP);
+		return (rc);
+	}
 	if (vme->u.nested.op != VM_NESTED_OP_VMXINSN)
 		return (EINVAL);
 
