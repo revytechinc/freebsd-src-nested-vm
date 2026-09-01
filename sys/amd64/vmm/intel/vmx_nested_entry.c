@@ -157,7 +157,16 @@ vmx_nested_ept02_flush(struct vmx_vcpu *vcpu)
 	if (ns->ept02 == NULL)
 		return;
 	pmap_remove(ns->ept02, 0, VM_MAXUSER_ADDRESS);
-	ept_invalidate_mappings(ns->ept02_eptp);
+	/*
+	 * Local INVEPT only: this runs from build_vmcs02() right before L2 is
+	 * (re-)entered on THIS CPU, and ept02 is a per-vcpu shadow. The all-CPU
+	 * smp_rendezvous() of ept_invalidate_mappings() once per INVEPT was the
+	 * flush storm that livelocked the host.
+	 */
+	{
+		struct invept_desc desc = { .eptp = ns->ept02_eptp, ._res = 0 };
+		invept(INVEPT_TYPE_SINGLE_CONTEXT, desc);
+	}
 }
 
 void
@@ -337,6 +346,17 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	    val != ns->ept12_pte) {
 		vmx_nested_ept12_install(vcpu, val);
 		vmx_nested_ept02_flush(vcpu);
+		ns->ept12_gen_flushed = ns->ept12_gen;
+	} else if (ns->ept12_gen != ns->ept12_gen_flushed) {
+		/*
+		 * L1 executed INVEPT (changed EPT12) since our last flush. Drop
+		 * the ept02 shadow so any remapped entry re-faults and
+		 * re-composes against the current EPT12; a stale entry would
+		 * make L2 read another page's contents. Coalesced to at most
+		 * once per L2 (re-)entry by the generation counter.
+		 */
+		vmx_nested_ept02_flush(vcpu);
+		ns->ept12_gen_flushed = ns->ept12_gen;
 	}
 
 	/* Switch to vmcs02 and populate it. */

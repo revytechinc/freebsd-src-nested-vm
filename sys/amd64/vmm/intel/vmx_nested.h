@@ -64,6 +64,8 @@ struct vmx_nested_state {
 	uint64_t		msr_bitmap02_pa;
 	struct pmap		*ept02;		/* shadow EPT: L2 GPA -> host */
 	uint64_t		ept02_eptp;
+	uint64_t		ept12_gen;	/* bumped on each L1 INVEPT */
+	uint64_t		ept12_gen_flushed;/* gen at last ept02 flush */
 };
 
 /* VM-instruction error numbers (SDM Vol 3 §30.4). */
