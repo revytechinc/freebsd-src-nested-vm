@@ -644,6 +644,9 @@ vmx_nested_op(void *vcpui, struct vm_exit *vme)
 	struct vmx_vcpu *vcpu = vcpui;
 	int rc;
 
+	if (vme->u.nested.op == VM_NESTED_OP_L2_EPT)
+		return (vmx_nested_op_l2_ept(vcpu, vme->u.nested.info1,
+		    vme->u.nested.info2));
 	if (vme->u.nested.op != VM_NESTED_OP_VMXINSN)
 		return (EINVAL);
 

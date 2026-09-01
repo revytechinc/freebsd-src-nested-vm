@@ -3246,9 +3246,11 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 	struct vmcs *vmcs;
 	struct vm_exit *vmexit;
 	struct vlapic *vlapic;
+	struct vmx_nested_state *ns;
 	uint32_t exit_reason;
 	struct region_descriptor gdtr, idtr;
 	uint16_t ldt_sel;
+	bool in_l2;
 
 	vcpu = vcpui;
 	vmx = vcpu->vmx;
@@ -3257,29 +3259,38 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 	vlapic = vm_lapic(vcpu->vcpu);
 	vmexit = vm_exitinfo(vcpu->vcpu);
 	launched = 0;
+	ns = vcpu->nested_state;
+	in_l2 = (ns != NULL && ns->in_l2);
 
 	KASSERT(vmxctx->pmap == pmap,
 	    ("pmap %p different than ctx pmap %p", pmap, vmxctx->pmap));
 
 	vmx_msr_guest_enter(vcpu);
 
-	VMPTRLD(vmcs);
-
 	/*
-	 * XXX
-	 * We do this every time because we may setup the virtual machine
-	 * from a different process than the one that actually runs it.
-	 *
-	 * If the life of a virtual machine was spent entirely in the context
-	 * of a single process we could do this once in vmx_init().
+	 * Load the VMCS to run: vmcs02 (L2) when a nested guest is active,
+	 * else the vcpu's own VMCS (L1). HOST_CR3 is refreshed for whichever
+	 * is loaded because the running process may differ from the one that
+	 * set the VM up.
 	 */
+	if (in_l2) {
+		VMPTRLD(ns->vmcs02);
+		launched = ns->vmcs02_launched;
+	} else {
+		VMPTRLD(vmcs);
+	}
 	vmcs_write(VMCS_HOST_CR3, rcr3());
-
-	vmcs_write(VMCS_GUEST_RIP, rip);
-	vmx_set_pcpu_defaults(vmx, vcpu, pmap);
+	if (in_l2) {
+		rip = vmcs_guest_rip();
+	} else {
+		vmcs_write(VMCS_GUEST_RIP, rip);
+		vmx_set_pcpu_defaults(vmx, vcpu, pmap);
+	}
 	do {
-		KASSERT(vmcs_guest_rip() == rip, ("%s: vmcs guest rip mismatch "
-		    "%#lx/%#lx", __func__, vmcs_guest_rip(), rip));
+		if (!in_l2)
+			KASSERT(vmcs_guest_rip() == rip, ("%s: vmcs guest rip "
+			    "mismatch %#lx/%#lx", __func__, vmcs_guest_rip(),
+			    rip));
 
 		handled = UNHANDLED;
 		/*
@@ -3301,7 +3312,8 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 		 * pmap_invalidate_ept().
 		 */
 		disable_intr();
-		vmx_inject_interrupts(vcpu, vlapic, rip);
+		if (!in_l2)
+			vmx_inject_interrupts(vcpu, vlapic, rip);
 
 		/*
 		 * Check for vcpu suspension after injecting events because
@@ -3414,7 +3426,33 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 		if (rc == VMX_GUEST_VMEXIT) {
 			vmx_exit_handle_nmi(vcpu, vmexit);
 			enable_intr();
-			handled = vmx_exit_process(vmx, vcpu, vmexit);
+			if (in_l2) {
+				int nr;
+
+				nr = vmx_nested_l2_exit(vcpu, exit_reason,
+				    vmexit);
+				if (nr == 1) {
+					handled = HANDLED;	/* resume L2 */
+				} else if (nr == 2) {
+					/* defer EPT fill to vm_run() */
+					handled = UNHANDLED;
+				} else {
+					/*
+					 * Reflected to L1: vmx_nested_l2_exit()
+					 * already made vmcs01 current (VMCLEAR
+					 * vmcs02 + VMPTRLD vmcs01), so do not
+					 * VMPTRLD again here.
+					 */
+					in_l2 = false;
+					launched = 1;
+					rip = vmcs_guest_rip();
+					vmexit->rip = rip;
+					vcpu->state.nextrip = rip;
+					handled = HANDLED;
+				}
+			} else {
+				handled = vmx_exit_process(vmx, vcpu, vmexit);
+			}
 		} else {
 			enable_intr();
 			vmx_exit_inst_error(vmxctx, rc, vmexit);
@@ -3437,7 +3475,10 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 	VMX_CTR1(vcpu, "returning from vmx_run: exitcode %d",
 	    vmexit->exitcode);
 
-	VMCLEAR(vmcs);
+	if (in_l2) {
+		VMCLEAR(ns->vmcs02);
+	} else
+		VMCLEAR(vmcs);
 	vmx_msr_guest_exit(vcpu);
 
 	return (0);
@@ -3456,8 +3497,10 @@ vmx_vcpu_cleanup(void *vcpui)
 	 */
 	if (vcpu->nvmcs12 != NULL)
 		free(vcpu->nvmcs12, M_VMX);
-	if (vcpu->nested_state != NULL)
+	if (vcpu->nested_state != NULL) {
+		vmx_nested_ept02_cleanup(vcpu);
 		free(vcpu->nested_state, M_VMX);
+	}
 	free(vcpu->pir_desc, M_VMX);
 	free(vcpu->apic_page, M_VMX);
 	free(vcpu->vmcs, M_VMX);
