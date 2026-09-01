@@ -493,6 +493,18 @@ vmx_nested_reflect_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 	VMPTRLD(vcpu->vmcs);		/* vmcs01 current, keeps its launched
 					 * state; balanced by vmx_run's tail
 					 * VMCLEAR(vmcs) (in_l2 is now false). */
+	/*
+	 * vmcs01's HOST_GS_BASE/TR/GDTR are per-CPU and were last set for
+	 * whichever CPU L1 previously ran on (vmx_set_pcpu_defaults is skipped
+	 * on the in_l2 entry, so vcpu->state.lastcpu is stale). We are about to
+	 * VMRESUME L1 on THIS CPU; if the vcpu migrated since L1 last ran, an
+	 * L1 VM-exit would reload a stale GS base (another CPU's PCPU pointer)
+	 * and corrupt the host scheduler. Refresh them for the running CPU --
+	 * vmcs01 is current so raw vmcs_write() is correct here.
+	 */
+	vmcs_write(VMCS_HOST_TR_BASE, vmm_get_host_trbase());
+	vmcs_write(VMCS_HOST_GDTR_BASE, vmm_get_host_gdtrbase());
+	vmcs_write(VMCS_HOST_GS_BASE, vmm_get_host_gsbase());
 	ns->l1_vmcs_current = true;	/* host-state writes go raw to the
 					 * current vmcs01 (no VMCLEAR that would
 					 * drop its launch state). */
