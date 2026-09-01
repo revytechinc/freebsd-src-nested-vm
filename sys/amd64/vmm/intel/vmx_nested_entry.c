@@ -503,7 +503,7 @@ vmx_nested_op_l2_ept(struct vmx_vcpu *vcpu, uint64_t gpa, uint64_t qual)
 	 */
 	if (vmx_nested_ept02_fault(vcpu, gpa, qual) != 0) {
 		VMPTRLD(ns->vmcs02);
-		vmx_nested_reflect_copy(vcpu, EXIT_REASON_EPT_FAULT, gpa, gpa);
+		vmx_nested_reflect_copy(vcpu, EXIT_REASON_EPT_FAULT, qual, gpa);
 		VMCLEAR(ns->vmcs02);
 		ns->in_l2 = false;
 	}
