@@ -417,12 +417,29 @@ vmx_nested_reflect_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 
 	ns = vmx_nested_state(vcpu);
 
+	/*
+	 * vmcs02 is current: save L2 guest state into vmcs12. Then make vmcs01
+	 * current with a single VMPTRLD -- this flushes vmcs02 to memory but
+	 * leaves it LAUNCHED, and vmcs01 keeps its own launched state -- and
+	 * write vmcs12's host-state area into the now-current vmcs01 with plain
+	 * vmwrites (l1_vmcs_current makes the nested vmcs helpers skip their
+	 * VMPTRLD/VMCLEAR, which would otherwise clear vmcs01's launch state
+	 * and make vmx_run()'s next VMRESUME of L1 fail). Leave vmcs01 current
+	 * and launched: vmx_run()'s loop reads GUEST_RIP (== HOST_RIP) from it
+	 * and VMRESUMEs L1 at its VM-exit handler.
+	 */
 	vmx_nested_reflect_copy(vcpu, reason, qual, gpa);
-
-	/* Back to L1: vmcs02 is current; leave vmcs01 current for the loop. */
-	VMCLEAR(ns->vmcs02);
-	VMPTRLD(vcpu->vmcs);
-	ns->in_l2 = false;
+	VMCLEAR(ns->vmcs02);		/* critical_exit balances the prologue's
+					 * VMPTRLD(vmcs02); vmcs02's launch state
+					 * is rebuilt by build_vmcs02 later. */
+	VMPTRLD(vcpu->vmcs);		/* vmcs01 current, keeps its launched
+					 * state; balanced by vmx_run's tail
+					 * VMCLEAR(vmcs) (in_l2 is now false). */
+	ns->l1_vmcs_current = true;	/* host-state writes go raw to the
+					 * current vmcs01 (no VMCLEAR that would
+					 * drop its launch state). */
+	vmx_nested_vmexit_to_l1(vcpu, reason, qual);
+	ns->l1_vmcs_current = false;
 	VMX_CTR2(vcpu, "L2 exit reason %u reflected to L1 rip %#lx",
 	    reason, (unsigned long)vmcs_read(VMCS_GUEST_RIP));
 }

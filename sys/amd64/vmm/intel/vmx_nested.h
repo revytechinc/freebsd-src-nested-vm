@@ -54,7 +54,8 @@ struct vmx_nested_state {
 	enum vmcs12_state	state;
 	uint64_t		vmcs12_gpa;	/* L1 GPA of the current VMCS */
 	bool			vmcs12_active;	/* a current VMCS exists */
-	bool			in_l2;		/* hardware VMCS holds L2 */
+	bool			in_l2;
+	bool			l1_vmcs_current;	/* vmcs01 is deliberately loaded */		/* hardware VMCS holds L2 */
 	uint64_t		ept12_pte;	/* L1 EPT root (ept12 walker) */
 	/* Nested L2 execution (vmx_nested_entry.c), gated by hw.vmm.nested.vmx_l2 */
 	struct vmcs		*vmcs02;	/* hardware VMCS used to run L2 */

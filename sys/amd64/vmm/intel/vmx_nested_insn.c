@@ -75,7 +75,8 @@ vmx_nested_vmcs_read(struct vmx_vcpu *vcpu, uint32_t encoding)
 	uint64_t val;
 	int error __diagused;
 
-	error = vmcs_getreg(vcpu->vmcs, 0, VMCS_IDENT(encoding), &val);
+	error = vmcs_getreg(vcpu->vmcs,
+	    vmx_nested_state(vcpu)->l1_vmcs_current, VMCS_IDENT(encoding), &val);
 	KASSERT(error == 0, ("vmcs_getreg(%#x): %d", encoding, error));
 	return (val);
 }
@@ -85,7 +86,8 @@ vmx_nested_vmcs_write(struct vmx_vcpu *vcpu, uint32_t encoding, uint64_t val)
 {
 	int error __diagused;
 
-	error = vmcs_setreg(vcpu->vmcs, 0, VMCS_IDENT(encoding), val);
+	error = vmcs_setreg(vcpu->vmcs,
+	    vmx_nested_state(vcpu)->l1_vmcs_current, VMCS_IDENT(encoding), val);
 	KASSERT(error == 0, ("vmcs_setreg(%#x): %d", encoding, error));
 }
 
