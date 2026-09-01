@@ -68,19 +68,22 @@ vmx_nested_invept_handle(struct vmx_vcpu *vcpu, uint64_t type, uint64_t eptp)
 	desc._res = 0;
 	invept(INVEPT_TYPE_ALL_CONTEXTS, desc);
 	/*
-	 * Deliberately do NOT tear down the ept02 shadow here. L1 executes
-	 * INVEPT once per EPT12 update -- during L2 boot that is once per
-	 * handled EPT violation, i.e. tens of thousands of times -- and
-	 * vmx_nested_ept02_flush() does a full pmap_remove() of the shadow
-	 * plus ept_invalidate_mappings(), whose smp_rendezvous() IPIs every
-	 * CPU. At clean-reflect speed that flush storm (full shadow teardown
-	 * + all-CPU rendezvous per INVEPT, each teardown forcing L2 to
-	 * re-fault every page) livelocks/deadlocks the host. Additions to
-	 * EPT12 never make the shadow stale (ept02 only caches translations
-	 * that were valid); only an L1 unmap/remap can, and that narrow
-	 * staleness window is a known limitation for now (TODO: track an
-	 * EPT12 generation and flush lazily on the next L2 entry instead).
+	 * L1 issues INVEPT after changing EPT12. A pure ADDITION never makes
+	 * the ept02 shadow stale: the added L2 GPA had no ept02 mapping (it
+	 * faulted and was reflected because EPT12 did not map it). But an L1
+	 * unmap or remap of a GPA already cached in ept02 -- e.g. a 2MB EPT12
+	 * superpage that pmap later demotes/promotes to a different host frame
+	 * -- would leave ept02 pointing at the OLD frame, so L2 would read
+	 * another page's contents.
+	 *
+	 * Flushing the whole shadow inline on every INVEPT (tens of thousands
+	 * during boot) with an all-CPU rendezvous is the flush storm that
+	 * livelocked the host. Instead just bump a generation; build_vmcs02()
+	 * tears the shadow down lazily at most once per L2 (re-)entry, with a
+	 * local INVEPT rather than a rendezvous. The per-INVEPT local
+	 * invept(ALL_CONTEXTS) above still drops any cached TLB translation.
 	 */
+	vmx_nested_state(vcpu)->ept12_gen++;
 	return (VM_SUCCESS);
 }
 
