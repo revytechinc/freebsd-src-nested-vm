@@ -121,6 +121,7 @@ int	vmx_nested_op(void *vcpui, struct vm_exit *vme);
 
 /* vmx_nested_entry.c -- L2 execution (gated by hw.vmm.nested.vmx_l2) */
 extern int vmx_nested_l2_enable;
+void	vmx_trigger_hostintr(int vector);
 int	vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu);
 void	vmx_nested_reflect_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 	    uint64_t qual, uint64_t gpa);

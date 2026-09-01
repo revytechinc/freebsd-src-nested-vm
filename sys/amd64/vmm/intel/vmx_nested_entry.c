@@ -505,10 +505,29 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 		vmexit->u.nested.info1 = vmcs_read(VMCS_GUEST_PHYSICAL_ADDRESS);
 		vmexit->u.nested.info2 = qual;
 		return (2);			/* leave vmx_run to defer */
-	case EXIT_REASON_EXT_INTR:
+	case EXIT_REASON_EXT_INTR: {
+		uint32_t intr_info;
+
+		/*
+		 * A host interrupt fired while L2 was running. vmcs02 inherits
+		 * bhyve's "acknowledge interrupt on exit", so the CPU has
+		 * already ACKed the vector into VMCS_EXIT_INTR_INFO -- it is NOT
+		 * left pending, so enable_intr() alone will NOT run the host
+		 * ISR. Dispatch it to the host handler exactly as
+		 * vmx_exit_process() does for L1; otherwise the vector is never
+		 * EOIed, the CPU's local APIC wedges, and the next all-CPU
+		 * smp_rendezvous()/TLB shootdown deadlocks the whole host.
+		 * Then resume L2.
+		 */
+		intr_info = vmcs_read(VMCS_EXIT_INTR_INFO);
+		if ((intr_info & VMCS_INTR_VALID) != 0 &&
+		    (intr_info & VMCS_INTR_T_MASK) == VMCS_INTR_T_HWINTR)
+			vmx_trigger_hostintr(intr_info & 0xff);
+		return (1);
+	}
 	case EXIT_REASON_NMI_WINDOW:
 	case EXIT_REASON_INTR_WINDOW:
-		/* L0 already took the host interrupt; resume L2. */
+		/* Nothing to do at L0; resume L2. */
 		return (1);
 	default:
 		/* Everything else goes up to L1's hypervisor. */
