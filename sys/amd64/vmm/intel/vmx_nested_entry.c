@@ -278,10 +278,20 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	tsc01 = vmcs_read(VMCS_TSC_OFFSET);
 	VMCLEAR(vcpu->vmcs);		/* done reading vmcs01; balances VMPTRLD */
 
-	/* Load L1's EPT root for the EPT12 walker. */
-	if (vmcs12_read_field(v12, VMCS_EPTP, &val) == 0)
+	/*
+	 * Load L1's EPT root for the EPT12 walker. Flush the ept02 shadow ONLY
+	 * when L1 switches to a different EPT root: build_vmcs02() runs on every
+	 * VMRESUME (after each reflected L2 exit), and unconditionally flushing
+	 * ept02 there would discard the whole shadow on every re-entry and make
+	 * L2 re-fault every page it touches (a fault storm that stalls L2 boot).
+	 * Staleness from L1 unmapping within the same EPT is handled by flushing
+	 * ept02 on the L1 INVEPT path instead.
+	 */
+	if (vmcs12_read_field(v12, VMCS_EPTP, &val) == 0 &&
+	    val != ns->ept12_pte) {
 		vmx_nested_ept12_install(vcpu, val);
-	vmx_nested_ept02_flush(vcpu);
+		vmx_nested_ept02_flush(vcpu);
+	}
 
 	/* Switch to vmcs02 and populate it. */
 	vmclear(ns->vmcs02);
