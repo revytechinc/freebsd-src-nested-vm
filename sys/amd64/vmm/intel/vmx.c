@@ -1085,7 +1085,7 @@ vmx_modinit(int ipinum)
 	return (0);
 }
 
-static void
+void
 vmx_trigger_hostintr(int vector)
 {
 	uintptr_t func;
