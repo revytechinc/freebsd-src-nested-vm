@@ -48,6 +48,7 @@
 
 #include <machine/pmap.h>
 #include <machine/specialreg.h>
+#include <x86/clock.h>
 #include <machine/vmm.h>
 
 #include <dev/vmm/vmm_mem.h>
@@ -379,8 +380,29 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	 * first-cut L2 that does not yet virtualize APICv.
 	 */
 	val = vmcs_read(VMCS_PIN_BASED_CTLS);
-	vmwrite(VMCS_PIN_BASED_CTLS,
-	    val & ~(uint64_t)PINBASED_POSTED_INTERRUPT);
+	val &= ~(uint64_t)PINBASED_POSTED_INTERRUPT;
+	val |= PINBASED_PREMPTION_TIMER;	/* periodic yield to L1 */
+	vmwrite(VMCS_PIN_BASED_CTLS, val);
+	/*
+	 * Force L2 to VM-exit periodically so L1's vcpu thread gets to run and
+	 * advance L2's software-emulated devices (its vlapic timer) and inject
+	 * L2's pending interrupts. Without this, once L2's memory is mapped it
+	 * spins in a wait loop that never exits, L1 never runs, and the timer
+	 * tick is never delivered (a nested device-emulation livelock).
+	 * "save VMX-preemption timer value" is cleared so the field re-arms to
+	 * the same value on every entry. Aim for roughly 1 ms.
+	 */
+	vmwrite(VMCS_EXIT_CTLS,
+	    vmcs_read(VMCS_EXIT_CTLS) & ~(uint64_t)VM_EXIT_SAVE_PREEMPTION_TIMER);
+	{
+		uint64_t misc = rdmsr(0x485);	/* IA32_VMX_MISC */
+		uint32_t shift = (uint32_t)(misc & 0x1f);
+		uint64_t f = tsc_freq ? tsc_freq : 2600000000UL;
+		uint32_t pt = (uint32_t)((f / 1000) >> shift);
+		if (pt == 0)
+			pt = 1;
+		vmwrite(VMCS_PREEMPTION_TIMER_VALUE, pt);
+	}
 
 	val = vmcs_read(VMCS_PRI_PROC_BASED_CTLS);
 	val &= ~(uint64_t)PROCBASED_USE_TPR_SHADOW;
@@ -528,6 +550,15 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 	qual = vmcs_read(VMCS_EXIT_QUALIFICATION);
 
 	switch (reason) {
+	case EXIT_REASON_VMX_PREEMPT:
+		/*
+		 * L0's periodic yield fired. Give L1 a turn: reflect a spurious
+		 * external interrupt (invalid VMCS_EXIT_INTR_INFO), which L1
+		 * handles by injecting any pending L2 interrupts (its vlapic
+		 * timer tick) and resuming L2.
+		 */
+		vmx_nested_reflect_l2_exit(vcpu, EXIT_REASON_EXT_INTR, 0, 0);
+		return (0);
 	case EXIT_REASON_EPT_FAULT:
 		/*
 		 * Walking EPT12 (vm_gpa_hold) and filling ept02 (pmap_enter)
