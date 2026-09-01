@@ -74,9 +74,20 @@ vmx_nested_vmentry(struct vmx_vcpu *vcpu, bool launch)
 	}
 
 	/*
-	 * No VMCS02 yet: report the entry as failed. The launch state
-	 * is left unchanged (a failed VM entry does not launch).
+	 * Enter L2. With the experimental L2 path enabled, build VMCS02 and
+	 * flip in_l2 so the next vmx_run() runs L2. Otherwise report an
+	 * architectural VM-entry failure (no L2 execution).
 	 */
+	if (vmx_nested_l2_enable) {
+		if (launch)
+			ns->state = VMCS12_STATE_LAUNCHED;
+		if (vmx_nested_build_vmcs02(vcpu) == 0) {
+			VMX_CTR1(vcpu, "nested %s: entering L2",
+			    launch ? "VMLAUNCH" : "VMRESUME");
+			return (1);	/* in_l2 set; next vmx_run runs L2 */
+		}
+		VMX_CTR0(vcpu, "nested entry: vmcs02 build failed");
+	}
 	VMX_CTR1(vcpu, "nested %s: no L2 support, reporting entry failure",
 	    launch ? "VMLAUNCH" : "VMRESUME");
 	vmx_nested_vmexit_to_l1(vcpu,

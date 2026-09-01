@@ -36,4 +36,6 @@ void	ept_invalidate_mappings(u_long eptp);
 struct vmspace *ept_vmspace_alloc(vm_offset_t min, vm_offset_t max);
 void	ept_vmspace_free(struct vmspace *vmspace);
 uint64_t eptp(uint64_t pml4);
+int	ept_pinit_nested(pmap_t pmap);
+
 #endif

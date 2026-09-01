@@ -19,6 +19,7 @@
 struct vmx;
 struct vmx_vcpu;
 struct vmcs;
+struct pmap;
 struct vm_exit;
 struct vcpu;
 struct vm_guest_paging;
@@ -55,6 +56,11 @@ struct vmx_nested_state {
 	bool			vmcs12_active;	/* a current VMCS exists */
 	bool			in_l2;		/* hardware VMCS holds L2 */
 	uint64_t		ept12_pte;	/* L1 EPT root (ept12 walker) */
+	/* Nested L2 execution (vmx_nested_entry.c), gated by hw.vmm.nested.vmx_l2 */
+	struct vmcs		*vmcs02;	/* hardware VMCS used to run L2 */
+	bool			vmcs02_launched;
+	struct pmap		*ept02;		/* shadow EPT: L2 GPA -> host */
+	uint64_t		ept02_eptp;
 };
 
 /* VM-instruction error numbers (SDM Vol 3 §30.4). */
@@ -111,6 +117,21 @@ void	vmx_nested_vmexit_to_l1(struct vmx_vcpu *vcpu, uint32_t reason,
 	    uint64_t qualification);
 int	vmx_nested_exit_vmxon(struct vmx_vcpu *vcpu);
 int	vmx_nested_op(void *vcpui, struct vm_exit *vme);
+
+/* vmx_nested_entry.c -- L2 execution (gated by hw.vmm.nested.vmx_l2) */
+extern int vmx_nested_l2_enable;
+int	vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu);
+void	vmx_nested_reflect_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
+	    uint64_t qual, uint64_t gpa);
+int	vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
+	    struct vm_exit *vmexit);
+int	vmx_nested_op_l2_ept(struct vmx_vcpu *vcpu, uint64_t gpa, uint64_t qual);
+void	vmx_nested_reflect_copy(struct vmx_vcpu *vcpu, uint32_t reason, uint64_t qual, uint64_t gpa);
+int	vmx_nested_ept02_init(struct vmx_vcpu *vcpu);
+void	vmx_nested_ept02_flush(struct vmx_vcpu *vcpu);
+void	vmx_nested_ept02_cleanup(struct vmx_vcpu *vcpu);
+int	vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
+	    uint64_t qual);
 int	vmx_nested_exit_vmxoff(struct vmx_vcpu *vcpu);
 
 /* Instruction emulation building blocks. */

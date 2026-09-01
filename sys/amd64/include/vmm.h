@@ -204,6 +204,7 @@ DECLARE_VMMOPS_FUNC(int, restore_tsc, (void *vcpui, uint64_t now));
 #define	VM_NESTED_OP_VMSAVE	3	/* AMD: info1 = L1 next RIP */
 #define	VM_NESTED_OP_L2EXIT	4	/* AMD: exit taken in L2 (code/info1/info2) */
 #define	VM_NESTED_OP_VMXINSN	5	/* Intel: VMX instruction, code = reason */
+#define	VM_NESTED_OP_L2_EPT	6	/* Intel: fill shadow EPT02 (info1=gpa, info2=qual) */
 
 typedef int	(*vmmops_nested_t)(void *vcpui, struct vm_exit *vme);
 
