@@ -3284,6 +3284,16 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 	vmcs_write(VMCS_HOST_CR3, rcr3());
 	if (in_l2) {
 		rip = vmcs_guest_rip();
+		/*
+		 * The vcpu thread may have migrated CPUs since vmcs02 was
+		 * built. HOST_TR_BASE/GDTR_BASE/GS_BASE are per-CPU (GS_BASE is
+		 * the PCPU pointer); refresh them on the running CPU so that an
+		 * L2 VM-exit restores THIS CPU's host state. Skipping this let
+		 * L2 exits load a stale GS base and corrupt the host scheduler.
+		 */
+		vmcs_write(VMCS_HOST_TR_BASE, vmm_get_host_trbase());
+		vmcs_write(VMCS_HOST_GDTR_BASE, vmm_get_host_gdtrbase());
+		vmcs_write(VMCS_HOST_GS_BASE, vmm_get_host_gsbase());
 	} else {
 		vmcs_write(VMCS_GUEST_RIP, rip);
 		vmx_set_pcpu_defaults(vmx, vcpu, pmap);
