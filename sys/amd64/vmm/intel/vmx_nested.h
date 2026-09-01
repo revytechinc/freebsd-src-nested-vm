@@ -60,6 +60,8 @@ struct vmx_nested_state {
 	/* Nested L2 execution (vmx_nested_entry.c), gated by hw.vmm.nested.vmx_l2 */
 	struct vmcs		*vmcs02;	/* hardware VMCS used to run L2 */
 	bool			vmcs02_launched;
+	char			*msr_bitmap02;	/* vmcs02 MSR bitmap (x2APIC intercepted) */
+	uint64_t		msr_bitmap02_pa;
 	struct pmap		*ept02;		/* shadow EPT: L2 GPA -> host */
 	uint64_t		ept02_eptp;
 };
