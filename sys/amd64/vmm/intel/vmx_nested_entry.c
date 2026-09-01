@@ -204,15 +204,9 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 	vm_page_t m;
 	void *cookie, *mapping;
 	uint64_t l1_gpa;
-	int access, prot, error;
+	int prot, error;
 
 	ns = vmx_nested_state(vcpu);
-	if (qual & EPT_VIOLATION_DATA_WRITE)
-		access = VM_PROT_WRITE;
-	else if (qual & EPT_VIOLATION_INST_FETCH)
-		access = VM_PROT_EXECUTE;
-	else
-		access = VM_PROT_READ;
 
 	/*
 	 * Runs from vm_run()'s deferred path: no VMCS is current and reflect
@@ -237,9 +231,16 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 		return (1);
 	}
 
-	/* L1 GPA -> host page via L0's normal guest memory. */
+	/*
+	 * L1 GPA -> host page via L0's normal guest memory. Hold for READ|WRITE
+	 * regardless of the faulting access type: ept02 maps the page RWX and L2
+	 * may write it, so we must not be handed a shared copy-on-write zero page
+	 * (which L2's writes would corrupt, and which several zero-filled L2 GPAs
+	 * would alias). Requesting write makes L0 back the L1 GPA with a private,
+	 * writable frame.
+	 */
 	mapping = vm_gpa_hold(vcpu->vcpu, l1_gpa & ~PAGE_MASK, PAGE_SIZE,
-	    access, &cookie);
+	    VM_PROT_READ | VM_PROT_WRITE, &cookie);
 	if (mapping == NULL) {
 		VMX_CTR1(vcpu, "L2 EPT: l1_gpa %#lx not backed",
 		    (unsigned long)l1_gpa);
@@ -551,8 +552,23 @@ vmx_nested_reflect_copy(struct vmx_vcpu *vcpu, uint32_t reason, uint64_t qual,
 		val = vmcs_read(vmcs02_guest_fields[i]);
 		vmcs12_write_field(v12, vmcs02_guest_fields[i], val);
 	}
-	vmcs12_write_field(v12, VMCS_GUEST_CR0, vmcs_read(VMCS_CR0_SHADOW));
-	vmcs12_write_field(v12, VMCS_GUEST_CR4, vmcs_read(VMCS_CR4_SHADOW));
+	/*
+	 * Save L2's EFFECTIVE CR0/CR4: host-owned (masked) bits come from the
+	 * read shadow, guest-owned (unmasked) bits from the real guest register.
+	 * Saving only the shadow dropped guest-owned bits L2 set itself (e.g.
+	 * CR4.OSXSAVE); after a reflect+rebuild the real guest CR4 lost OSXSAVE
+	 * and L2's XSETBV in fpuinit() then faulted with #UD.
+	 */
+	{
+		uint64_t m0 = vmcs_read(VMCS_CR0_MASK);
+		uint64_t m4 = vmcs_read(VMCS_CR4_MASK);
+		vmcs12_write_field(v12, VMCS_GUEST_CR0,
+		    (vmcs_read(VMCS_GUEST_CR0) & ~m0) |
+		    (vmcs_read(VMCS_CR0_SHADOW) & m0));
+		vmcs12_write_field(v12, VMCS_GUEST_CR4,
+		    (vmcs_read(VMCS_GUEST_CR4) & ~m4) |
+		    (vmcs_read(VMCS_CR4_SHADOW) & m4));
+	}
 
 	vmcs12_write_field(v12, VMCS_EXIT_REASON, reason);
 	vmcs12_write_field(v12, VMCS_EXIT_QUALIFICATION, qual);
