@@ -15,8 +15,6 @@
 #ifdef _KERNEL
 
 #include <sys/types.h>
-#include <vm/vm.h>
-#include <vm/vm_page.h>
 
 struct vmx;
 struct vmx_vcpu;
@@ -64,8 +62,6 @@ struct vmx_nested_state {
 	bool			vmcs02_launched;
 	char			*msr_bitmap02;	/* vmcs02 MSR bitmap (x2APIC intercepted) */
 	uint64_t		msr_bitmap02_pa;
-	vm_page_t		apic_access;	/* vmcs02 APIC-access page (xAPIC MMIO trap) */
-	uint64_t		apic_access_pa;
 	struct pmap		*ept02;		/* shadow EPT: L2 GPA -> host */
 	uint64_t		ept02_eptp;
 	uint64_t		ept12_gen;	/* bumped on each L1 INVEPT */

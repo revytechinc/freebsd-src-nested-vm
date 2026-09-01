@@ -634,7 +634,7 @@ vmx_nested_msr_intercept_init(struct vmx *vmx, struct vmx_vcpu *vcpu)
 	 */
 	for (msr = MSR_VMX_BASIC; msr <= MSR_VMX_TRUE_ENTRY_CTLS; msr++) {
 		if (msr_bitmap_change_access(vmx->msr_bitmap, msr,
-		    MSR_BITMAP_ACCESS_RW) != 0) {
+		    MSR_BITMAP_ACCESS_NONE) != 0) {
 			/*
 			 * MSRs outside the two bitmap ranges
 			 * (0..0x1FFF and 0xC0000000..0xC0001FFF)

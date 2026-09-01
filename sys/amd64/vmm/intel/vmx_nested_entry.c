@@ -180,14 +180,8 @@ vmx_nested_ept02_cleanup(struct vmx_vcpu *vcpu)
 	pmap_remove(ns->ept02, 0, VM_MAXUSER_ADDRESS);
 	pmap_release(ns->ept02);
 	PMAP_LOCK_DESTROY(ns->ept02);
-	if (ns->msr_bitmap02 != NULL)
+if (ns->msr_bitmap02 != NULL)
 		free(ns->msr_bitmap02, M_VMX_NESTED);
-	if (ns->apic_access != NULL) {
-		vm_page_unwire_noq(ns->apic_access);
-		vm_page_free(ns->apic_access);
-		ns->apic_access = NULL;
-		ns->apic_access_pa = 0;
-	}
 	free(ns->ept02, M_VMX_NESTED);
 	ns->ept02 = NULL;
 	ns->ept02_eptp = 0;
@@ -213,23 +207,6 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 	int prot, error;
 
 	ns = vmx_nested_state(vcpu);
-
-	/*
-	 * L2's local-APIC page (xAPIC MMIO, default base 0xfee00000). Map it in
-	 * ept02 to our per-vcpu APIC-access page (VMCS_APIC_ACCESS) so that, with
-	 * virtualize-APIC-accesses enabled in vmcs02, L2's LAPIC MMIO is treated
-	 * as an APIC access (reads served from the virtual-APIC page, writes and a
-	 * few reads trapped and reflected to L1) rather than an EPT violation that
-	 * L1 does not emulate.
-	 */
-	if (l2_gpa >= 0xfee00000UL && l2_gpa < 0xfee01000UL) {
-		vm_page_busy_acquire(ns->apic_access, 0);
-		error = pmap_enter(ns->ept02, l2_gpa & ~PAGE_MASK,
-		    ns->apic_access, VM_PROT_READ | VM_PROT_WRITE,
-		    VM_PROT_READ | VM_PROT_WRITE, 0);
-		vm_page_xunbusy(ns->apic_access);
-		return (error == KERN_SUCCESS ? 0 : 1);
-	}
 
 	/*
 	 * Runs from vm_run()'s deferred path: no VMCS is current and reflect
@@ -285,39 +262,6 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 }
 
 /*
- * Translate a guest-physical address to a host-physical address by walking an
- * EPT pmap's page tables directly through the DMAP -- no pmap lock, so this is
- * safe in the vmx_run() critical section (unlike vm_gpa_hold(), which sleeps).
- * Handles 2MB/1GB EPT leaves. Returns 0 on success.
- */
-static int
-ept_gpa_to_hpa(struct pmap *pm, uint64_t gpa, uint64_t *hpa)
-{
-	static const int sh[4] = { 39, 30, 21, 12 };
-	uint64_t *tbl = (uint64_t *)pm->pm_pmltop;
-	int i;
-
-	for (i = 0; i < 4; i++) {
-		uint64_t pte = tbl[(gpa >> sh[i]) & 0x1ff];
-		uint64_t lmask;
-		if ((pte & 0x7) == 0)			/* R|W|X all clear */
-			return (-1);
-		if (i == 3) {
-			*hpa = (pte & 0x000ffffffffff000UL) | (gpa & 0xfff);
-			return (0);
-		}
-		if ((pte & 0x80) != 0) {		/* 1GB or 2MB leaf */
-			lmask = (1UL << sh[i]) - 1;
-			*hpa = (pte & ~lmask & 0x000fffffffffffffUL) |
-			    (gpa & lmask);
-			return (0);
-		}
-		tbl = (uint64_t *)PHYS_TO_DMAP(pte & 0x000ffffffffff000UL);
-	}
-	return (-1);
-}
-
-/*
  * Build VMCS02 for entry into L2. vmcs01 must be the current VMCS on
  * entry; on return vmcs02 is the current VMCS, ready for vmx_enter_guest.
  */
@@ -345,11 +289,6 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 		ns->msr_bitmap02 = malloc_aligned(PAGE_SIZE, PAGE_SIZE,
 		    M_VMX_NESTED, M_WAITOK | M_ZERO);
 		ns->msr_bitmap02_pa = vtophys(ns->msr_bitmap02);
-	}
-	if (ns->apic_access == NULL) {
-		ns->apic_access = vm_page_alloc_noobj(VM_ALLOC_WIRED |
-		    VM_ALLOC_ZERO);
-		ns->apic_access_pa = VM_PAGE_TO_PHYS(ns->apic_access);
 	}
 
 	/*
@@ -487,42 +426,19 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	}
 
 	val = vmcs_read(VMCS_PRI_PROC_BASED_CTLS);
-	/* Keep TPR shadow: APIC-register virtualization requires it. */
-	val |= PROCBASED_SECONDARY_CONTROLS | PROCBASED_USE_TPR_SHADOW;
+	val &= ~(uint64_t)PROCBASED_USE_TPR_SHADOW;
+	val |= PROCBASED_SECONDARY_CONTROLS;
 	vmwrite(VMCS_PRI_PROC_BASED_CTLS, val);
 
 	val = vmcs_read(VMCS_SEC_PROC_BASED_CTLS);
-	/*
-	 * Virtualize L2's local APIC the way L1 (bhyve) configured it, minus the
-	 * pieces we cannot safely nest yet. Keep virtualize-APIC-accesses and
-	 * APIC-register-virtualization ON, with L1's virtual-APIC page (below):
-	 * L2's xAPIC MMIO reads are served from that page and only a few accesses
-	 * (writes -> APIC-write exits, some reads -> APIC-access exits) reach L1,
-	 * which is what its handlers expect. Without this L2 either spun forever
-	 * on an EPT violation over the APIC page (L1 never advances RIP for that)
-	 * or aborted L1 with an unexpected APIC-access exit for every register.
-	 * Virtual-interrupt delivery, x2APIC-mode and VPID stay OFF: VID needs
-	 * posted-interrupt/EOI plumbing we don't nest yet, and L2's x2APIC MSRs
-	 * are intercepted via the MSR bitmap so it cannot reach L0's physical APIC.
-	 */
-	val &= ~(uint64_t)(PROCBASED2_VIRTUALIZE_X2APIC_MODE |
+	val &= ~(uint64_t)(PROCBASED2_VIRTUALIZE_APIC_ACCESSES |
+	    PROCBASED2_VIRTUALIZE_X2APIC_MODE |
+	    PROCBASED2_APIC_REGISTER_VIRTUALIZATION |
 	    PROCBASED2_VIRTUAL_INTERRUPT_DELIVERY |
 	    PROCBASED2_ENABLE_VPID);
-	val |= PROCBASED2_ENABLE_EPT | PROCBASED2_VIRTUALIZE_APIC_ACCESSES |
-	    PROCBASED2_APIC_REGISTER_VIRTUALIZATION;
+	val |= PROCBASED2_ENABLE_EPT;
 	vmwrite(VMCS_SEC_PROC_BASED_CTLS, val);
 	vmwrite(VMCS_VPID, 0);
-	vmwrite(VMCS_APIC_ACCESS, ns->apic_access_pa);
-	{
-		uint64_t vapic_gpa = 0, vapic_hpa = 0;
-
-		vmcs12_read_field(v12, VMCS_VIRTUAL_APIC, &vapic_gpa);
-		if (vapic_gpa != 0)
-			(void)ept_gpa_to_hpa(vcpu->ctx.pmap,
-			    vapic_gpa & ~PAGE_MASK, &vapic_hpa);
-		vmwrite(VMCS_VIRTUAL_APIC, vapic_hpa);
-		vmwrite(VMCS_TPR_THRESHOLD, 0);
-	}
 
 	/*
 	 * No MSR autoload/store for vmcs02: the count fields were copied from
@@ -653,6 +569,18 @@ vmx_nested_reflect_copy(struct vmx_vcpu *vcpu, uint32_t reason, uint64_t qual,
 		    (vmcs_read(VMCS_GUEST_CR4) & ~m4) |
 		    (vmcs_read(VMCS_CR4_SHADOW) & m4));
 	}
+
+	/*
+	 * Reflect the VM-entry interruption-information back to L1. When L1
+	 * queued an event for L2, build_vmcs02() copied it into vmcs02 and the
+	 * CPU delivered it and cleared the valid bit on VM entry. L1 must see
+	 * that its injection was consumed; otherwise it keeps the field set and
+	 * re-injects on the next VMRESUME -- and if L2 has since disabled
+	 * interrupts (RFLAGS.IF=0), re-injecting an external interrupt makes the
+	 * next VM entry fail with "invalid guest state".
+	 */
+	vmcs12_write_field(v12, VMCS_ENTRY_INTR_INFO,
+	    vmcs_read(VMCS_ENTRY_INTR_INFO));
 
 	vmcs12_write_field(v12, VMCS_EXIT_REASON, reason);
 	vmcs12_write_field(v12, VMCS_EXIT_QUALIFICATION, qual);
