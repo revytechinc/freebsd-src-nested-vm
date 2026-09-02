@@ -72,6 +72,14 @@
 #define	PROCBASED2_VIRTUAL_INTERRUPT_DELIVERY	(1 << 9)
 #define	PROCBASED2_PAUSE_LOOP_EXITING		(1 << 10)
 #define	PROCBASED2_ENABLE_INVPCID		(1 << 12)
+/*
+ * VMCS shadowing (Intel SDM Vol 3 §25.4.2).  Enabling this bit
+ * requires VMCS_LINK_POINTER to point at a valid shadow VMCS -- we
+ * deliberately leave the global procbased_ctls2 shadowing-free and
+ * only OR this bit per-vCPU after the L1 has issued VMPTRLD with a
+ * real shadow VMCS installed.
+ */
+#define	PROCBASED2_VMCS_SHADOWING		(1 << 14)
 
 /* VM Exit Controls */
 #define	VM_EXIT_SAVE_DEBUG_CONTROLS	(1 << 2)

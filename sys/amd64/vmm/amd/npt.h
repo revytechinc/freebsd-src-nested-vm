@@ -33,4 +33,6 @@ int 	svm_npt_init(int ipinum);
 struct	vmspace *svm_npt_alloc(vm_offset_t min, vm_offset_t max);
 void	svm_npt_free(struct vmspace *vmspace);
 
+int	svm_npt_pinit(pmap_t pmap);
+
 #endif /* _SVM_NPT_H_ */

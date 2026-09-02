@@ -70,6 +70,14 @@ npt_pinit(pmap_t pmap)
 	return (pmap_pinit_type(pmap, PT_RVI, npt_flags));
 }
 
+/* For the nested-SVM shadow NPT (svm_nested_npt.c). */
+int
+svm_npt_pinit(pmap_t pmap)
+{
+
+	return (npt_pinit(pmap));
+}
+
 struct vmspace *
 svm_npt_alloc(vm_offset_t min, vm_offset_t max)
 {

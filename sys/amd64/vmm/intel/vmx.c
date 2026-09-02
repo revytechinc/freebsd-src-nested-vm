@@ -73,6 +73,7 @@
 #include "vmx_cpufunc.h"
 #include "vmx.h"
 #include "vmx_msr.h"
+#include "vmx_nested.h"
 #include "x86.h"
 #include "vmx_controls.h"
 #include "io/ppt.h"
@@ -128,28 +129,93 @@ static MALLOC_DEFINE(M_VMX, "vmx", "vmx");
 static MALLOC_DEFINE(M_VLAPIC, "vlapic", "vlapic");
 
 bool vmx_have_msr_tsc_aux;
+int vmx_nested_status;
 
 SYSCTL_DECL(_hw_vmm);
+SYSCTL_DECL(_hw_vmm_nested);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, vmx, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     NULL);
+SYSCTL_INT(_hw_vmm_nested, OID_AUTO, vmx, CTLFLAG_RD,
+    &vmx_nested_status, 0,
+    "VMX nested virtualization preflight status (0=unsupported, 1=L0 conflict, 2=ready)");
 
 int vmxon_enabled[MAXCPU];
 static uint8_t *vmxon_region;
 
+
+/*
+ * Host-wide nested-virt gate (T2). Defined in sys/amd64/vmm/vmm.c;
+ * declared here rather than promoted to a public header per task
+ * file-scope restriction.
+ */
+extern int vmm_nested_enable;
+
+static int vmx_nested_l0_warned;
+
+static inline bool
+vmx_nested_active(struct vmx *vmx)
+{
+	const char *vm_guest_str;
+
+	if (vmm_nested_enable == 0 || vmx_nested_status == 0)
+		return (false);
+	if (vmx == NULL || vmx->vm == NULL || !vmx->vm->nested_enabled)
+		return (false);
+	if (vm_guest == VM_GUEST_NO)
+		return (true);
+
+	switch (vm_guest) {
+	case VM_GUEST_VM:
+		vm_guest_str = "generic";
+		break;
+	case VM_GUEST_XEN:
+		vm_guest_str = "xen";
+		break;
+	case VM_GUEST_HV:
+		vm_guest_str = "hv";
+		break;
+	case VM_GUEST_VMWARE:
+		vm_guest_str = "vmware";
+		break;
+	case VM_GUEST_KVM:
+		vm_guest_str = "kvm";
+		break;
+	case VM_GUEST_BHYVE:
+		vm_guest_str = "bhyve";
+		break;
+	case VM_GUEST_VBOX:
+		vm_guest_str = "vbox";
+		break;
+	case VM_GUEST_PARALLELS:
+		vm_guest_str = "parallels";
+		break;
+	case VM_GUEST_NVMM:
+		vm_guest_str = "nvmm";
+		break;
+	default:
+		vm_guest_str = "unknown";
+		break;
+	}
+	if (atomic_cmpset_int(&vmx_nested_l0_warned, 0, 1))
+		printf("VMX: refusing nested-virt - L0 hypervisor already present (%s)\n",
+		    vm_guest_str);
+	return (false);
+}
+
 static uint32_t pinbased_ctls, procbased_ctls, procbased_ctls2;
 static uint32_t exit_ctls, entry_ctls;
 
-static uint64_t cr0_ones_mask, cr0_zeros_mask;
+uint64_t vmx_cr0_ones_mask, vmx_cr0_zeros_mask;
 SYSCTL_ULONG(_hw_vmm_vmx, OID_AUTO, cr0_ones_mask, CTLFLAG_RD,
-	     &cr0_ones_mask, 0, NULL);
+	     &vmx_cr0_ones_mask, 0, NULL);
 SYSCTL_ULONG(_hw_vmm_vmx, OID_AUTO, cr0_zeros_mask, CTLFLAG_RD,
-	     &cr0_zeros_mask, 0, NULL);
+	     &vmx_cr0_zeros_mask, 0, NULL);
 
-static uint64_t cr4_ones_mask, cr4_zeros_mask;
+uint64_t vmx_cr4_ones_mask, vmx_cr4_zeros_mask;
 SYSCTL_ULONG(_hw_vmm_vmx, OID_AUTO, cr4_ones_mask, CTLFLAG_RD,
-	     &cr4_ones_mask, 0, NULL);
+	     &vmx_cr4_ones_mask, 0, NULL);
 SYSCTL_ULONG(_hw_vmm_vmx, OID_AUTO, cr4_zeros_mask, CTLFLAG_RD,
-	     &cr4_zeros_mask, 0, NULL);
+	     &vmx_cr4_zeros_mask, 0, NULL);
 
 static int vmx_initialized;
 SYSCTL_INT(_hw_vmm_vmx, OID_AUTO, initialized, CTLFLAG_RD,
@@ -505,14 +571,14 @@ u_long
 vmx_fix_cr0(u_long cr0)
 {
 
-	return ((cr0 | cr0_ones_mask) & ~cr0_zeros_mask);
+	return ((cr0 | vmx_cr0_ones_mask) & ~vmx_cr0_zeros_mask);
 }
 
 u_long
 vmx_fix_cr4(u_long cr4)
 {
 
-	return ((cr4 | cr4_ones_mask) & ~cr4_zeros_mask);
+	return ((cr4 | vmx_cr4_ones_mask) & ~vmx_cr4_zeros_mask);
 }
 
 static void
@@ -672,7 +738,10 @@ vmx_modinit(int ipinum)
 	int error;
 	uint64_t basic, fixed0, fixed1, feature_control;
 	uint32_t tmp, procbased2_vid_bits;
+	int nested_hw;
 
+	vmx_nested_status = 0;
+	nested_hw = 0;
 	/* CPUID.1:ECX[bit 5] must be 1 for processor to support VMX */
 	if (!(cpu_feature2 & CPUID2_VMX)) {
 		printf("vmx_modinit: processor does not support VMX "
@@ -726,6 +795,10 @@ vmx_modinit(int ipinum)
 		    "secondary processor-based controls\n");
 		return (error);
 	}
+	nested_hw = vmx_set_ctlreg(MSR_VMX_PROCBASED_CTLS2,
+	    MSR_VMX_PROCBASED_CTLS2,
+	    PROCBASED2_UNRESTRICTED_GUEST | PROCBASED2_VMCS_SHADOWING,
+	    0, &tmp) == 0;
 
 	/* Check support for VPID */
 	error = vmx_set_ctlreg(MSR_VMX_PROCBASED_CTLS2, MSR_VMX_PROCBASED_CTLS2,
@@ -961,25 +1034,25 @@ vmx_modinit(int ipinum)
 	 */
 	fixed0 = rdmsr(MSR_VMX_CR0_FIXED0);
 	fixed1 = rdmsr(MSR_VMX_CR0_FIXED1);
-	cr0_ones_mask = fixed0 & fixed1;
-	cr0_zeros_mask = ~fixed0 & ~fixed1;
+	vmx_cr0_ones_mask = fixed0 & fixed1;
+	vmx_cr0_zeros_mask = ~fixed0 & ~fixed1;
 
 	/*
 	 * CR0_PE and CR0_PG can be set to zero in VMX non-root operation
 	 * if unrestricted guest execution is allowed.
 	 */
 	if (cap_unrestricted_guest)
-		cr0_ones_mask &= ~(CR0_PG | CR0_PE);
+		vmx_cr0_ones_mask &= ~(CR0_PG | CR0_PE);
 
 	/*
 	 * Do not allow the guest to set CR0_NW or CR0_CD.
 	 */
-	cr0_zeros_mask |= (CR0_NW | CR0_CD);
+	vmx_cr0_zeros_mask |= (CR0_NW | CR0_CD);
 
 	fixed0 = rdmsr(MSR_VMX_CR4_FIXED0);
 	fixed1 = rdmsr(MSR_VMX_CR4_FIXED1);
-	cr4_ones_mask = fixed0 & fixed1;
-	cr4_zeros_mask = ~fixed0 & ~fixed1;
+	vmx_cr4_ones_mask = fixed0 & fixed1;
+	vmx_cr4_zeros_mask = ~fixed0 & ~fixed1;
 
 	vpid_init();
 
@@ -991,11 +1064,28 @@ vmx_modinit(int ipinum)
 	smp_rendezvous(NULL, vmx_enable, NULL, NULL);
 
 	vmx_initialized = 1;
+	vmx_nested_status = nested_hw ? (vm_guest == VM_GUEST_NO ? 2 : 1) : 0;
+
+	/*
+	 * Nested-VMX (T15, T18): we deliberately do NOT OR the
+	 * VMCS-shadowing bit into the global `procbased_ctls2` here.
+	 * The Intel SDM (Vol 3 §25.4.2) requires that, when
+	 * VMCS shadowing is enabled, the shadow VMCS address in the
+	 * L0 VMCS must point at a valid, populated shadow VMCS --
+	 * otherwise VM-entry fails.  bhyve always writes
+	 * VMCS_LINK_POINTER = ~0 in vmcs_init(), which is the
+	 * correct value for a non-shadowing VMCS but is illegal
+	 * when shadowing is on.  So we leave the global ctl2
+	 * shadowing-free and only enable it per-vCPU, after
+	 * vmx_nested_load_vmcs12() has installed a real shadow VMCS
+	 * for the L1 (see `nested_enabled && ns->vmcs12_active`
+	 * below and the vmwrite in vmx_nested_load_vmcs12).
+	 */
 
 	return (0);
 }
 
-static void
+void
 vmx_trigger_hostintr(int vector)
 {
 	uintptr_t func;
@@ -1031,11 +1121,11 @@ vmx_setup_cr_shadow(int which, struct vmcs *vmcs, uint32_t initial)
 
 	if (which == 0) {
 		mask_ident = VMCS_CR0_MASK;
-		mask_value = cr0_ones_mask | cr0_zeros_mask;
+		mask_value = vmx_cr0_ones_mask | vmx_cr0_zeros_mask;
 		shadow_ident = VMCS_CR0_SHADOW;
 	} else {
 		mask_ident = VMCS_CR4_MASK;
-		mask_value = cr4_ones_mask | cr4_zeros_mask;
+		mask_value = vmx_cr4_ones_mask | vmx_cr4_zeros_mask;
 		shadow_ident = VMCS_CR4_SHADOW;
 	}
 
@@ -1146,6 +1236,38 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 	vcpu->vcpuid = vcpuid;
 	vcpu->vmcs = malloc_aligned(sizeof(*vmcs), PAGE_SIZE, M_VMX,
 	    M_WAITOK | M_ZERO);
+	/*
+	 * Nested-VMX (T15): allocate the 4KB VMCS12 image only for
+	 * nested-enabled VMs.  The region is plain zero-initialised
+	 * memory at this point; the actual L1-visible content is
+	 * filled in by vmx_nested_load_vmcs12() on the first
+	 * VMPTRLD, which also flips on VMCS shadowing in the
+	 * per-vCPU VMCS and writes this page's HPA into
+	 * VMCS_LINK_POINTER.  We intentionally do not touch the
+	 * shadow bit or link pointer here -- doing so would break
+	 * every nested-enabled VMCS that has not yet installed a
+	 * VMCS12 (Intel SDM Vol 3 §25.4.2 requires a valid link
+	 * pointer when shadowing is on).
+	 */
+	if (vmx->vm->nested_enabled) {
+		vcpu->nvmcs12 = malloc_aligned(sizeof(*vcpu->nvmcs12),
+		    PAGE_SIZE, M_VMX, M_WAITOK | M_ZERO);
+		if (vcpu->nvmcs12 == NULL)
+			panic("vmx_vcpu_init: nvmcs12 alloc failed vcpu %d",
+			    vcpuid);
+		/*
+		 * Wave 4 (T18-T23b): allocate the per-vCPU nested-VMX
+		 * state alongside the existing nvmcs12 buffer.  The
+		 * VMCS-shadow field bitmaps are allocated lazily inside
+		 * vmx_nested_load_vmcs12() on the first VMPTRLD; here
+		 * we only need to anchor the vmx_nested_state struct.
+		 */
+		vcpu->nested_state = malloc(sizeof(*vcpu->nested_state),
+		    M_VMX, M_WAITOK | M_ZERO);
+		if (vcpu->nested_state == NULL)
+			panic("vmx_vcpu_init: nested_state alloc failed vcpu %d",
+			    vcpuid);
+	}
 	vcpu->apic_page = malloc_aligned(PAGE_SIZE, PAGE_SIZE, M_VMX,
 	    M_WAITOK | M_ZERO);
 	vcpu->pir_desc = malloc_aligned(sizeof(*vcpu->pir_desc), 64, M_VMX,
@@ -1232,13 +1354,25 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 	 * Set up the CR0/4 shadows, and init the read shadow
 	 * to the power-on register value from the Intel Sys Arch.
 	 *  CR0 - 0x60000010
-	 *  CR4 - 0
+	 *  CR4 - 0  (or CR4_VMXE if nested, see comment below)
 	 */
 	error = vmx_setup_cr0_shadow(vmcs, 0x60000010);
 	if (error != 0)
 		panic("vmx_setup_cr0_shadow %d", error);
 
-	error = vmx_setup_cr4_shadow(vmcs, 0);
+	/*
+	 * Nested-VMX (T14): if this VM is a nested-enabled L1, seed
+	 * the CR4 read shadow with CR4_VMXE set.  The shadow is what
+	 * the guest reads back on `mov %cr4, %rxx`, so seeding it
+	 * with VMXE means an L1 that reads CR4 before writing it
+	 * already sees VMX available — exactly the preconditions
+	 * for an L1 hypervisor to proceed with VMXON.  L1 writes that
+	 * try to clear VMXE are caught in vmx_emulate_cr4_access().
+	 */
+	if (vmx->vm->nested_enabled)
+		error = vmx_setup_cr4_shadow(vmcs, CR4_VMXE);
+	else
+		error = vmx_setup_cr4_shadow(vmcs, 0);
 	if (error != 0)
 		panic("vmx_setup_cr4_shadow %d", error);
 
@@ -1889,8 +2023,8 @@ vmx_emulate_cr0_access(struct vmx_vcpu *vcpu, uint64_t exitqual)
 
 	vmcs_write(VMCS_CR0_SHADOW, regval);
 
-	crval = regval | cr0_ones_mask;
-	crval &= ~cr0_zeros_mask;
+	crval = regval | vmx_cr0_ones_mask;
+	crval &= ~vmx_cr0_zeros_mask;
 	vmcs_write(VMCS_GUEST_CR0, crval);
 
 	if (regval & CR0_PG) {
@@ -1925,10 +2059,30 @@ vmx_emulate_cr4_access(struct vmx_vcpu *vcpu, uint64_t exitqual)
 
 	regval = vmx_get_guest_reg(vcpu, (exitqual >> 8) & 0xf);
 
+	/*
+	 * Nested-VMX (T14): when L1 is a nested hypervisor, L1 must
+	 * never be allowed to clear CR4.VMXE in its own (visible)
+	 * CR4 — that would prevent it from executing VMPTRLD/VMXON
+	 * for L2.  Clearing VMXE in the *real* (host) CR4 would
+	 * also be catastrophic: it would disable VMX on the L0 host
+	 * and require a CPU reset to recover.  OR VMXE into both the
+	 * L1-visible shadow and the effective CR4 so that L1's
+	 * attempt to clear the bit is silently masked (RFLAGS shows
+	 * success, but the bit remains set on the next read).
+	 *
+	 * For non-nested VMs we must NOT add VMXE: a non-nested
+	 * guest that legitimately wants CR4.VMXE=0 (e.g. Linux KVM
+	 * clients that probe but don't use VMX) should still get
+	 * the architectural CR4 it wrote.
+	 */
+	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
+	    vcpu->vmx->vm->nested_enabled)
+		regval |= CR4_VMXE;
+
 	vmcs_write(VMCS_CR4_SHADOW, regval);
 
-	crval = regval | cr4_ones_mask;
-	crval &= ~cr4_zeros_mask;
+	crval = regval | vmx_cr4_ones_mask;
+	crval &= ~vmx_cr4_zeros_mask;
 	vmcs_write(VMCS_GUEST_CR4, crval);
 
 	return (HANDLED);
@@ -1963,7 +2117,7 @@ vmx_emulate_cr8_access(struct vmx *vmx, struct vmx_vcpu *vcpu,
 /*
  * From section "Guest Register State" in the Intel SDM: CPL = SS.DPL
  */
-static int
+int
 vmx_cpl(void)
 {
 	uint32_t ssar;
@@ -1972,7 +2126,7 @@ vmx_cpl(void)
 	return ((ssar >> 5) & 0x3);
 }
 
-static enum vm_cpu_mode
+enum vm_cpu_mode
 vmx_cpu_mode(void)
 {
 	uint32_t csar;
@@ -2071,7 +2225,7 @@ inout_str_seginfo(struct vmx_vcpu *vcpu, uint32_t inst_info, int in,
 	KASSERT(error == 0, ("%s: vmx_getdesc error %d", __func__, error));
 }
 
-static void
+void
 vmx_paging_info(struct vm_guest_paging *paging)
 {
 	paging->cr3 = vmcs_guest_cr3();
@@ -2825,6 +2979,8 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 		vmexit->inst_length = 0;
 		handled = HANDLED;
 		break;
+	case EXIT_REASON_VMXON:
+	case EXIT_REASON_VMXOFF:
 	case EXIT_REASON_VMCALL:
 	case EXIT_REASON_VMCLEAR:
 	case EXIT_REASON_VMLAUNCH:
@@ -2833,10 +2989,56 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 	case EXIT_REASON_VMREAD:
 	case EXIT_REASON_VMRESUME:
 	case EXIT_REASON_VMWRITE:
-	case EXIT_REASON_VMXOFF:
-	case EXIT_REASON_VMXON:
+		/*
+		 * Wave 4 (T18-T23b): when nested-virt is active, dispatch
+		 * the VM* instruction to the in-kernel handlers.  Each
+		 * handler returns 0 if it consumed the exit (caller
+		 * advances L1 RIP past the instruction), or -1 if it
+		 * declined (in which case we fall through to the
+		 * VM_EXITCODE_VMINSN userland path for backwards compat).
+		 */
+		/*
+		 * Nested-enabled VM: the instruction is emulated for L1 by
+		 * vmx_nested_op() from vm_run(), outside the critical
+		 * section, because the emulation reads and writes L1
+		 * memory. info1 records the instruction length so the
+		 * handler can advance RIP; the VMCS is reloaded there.
+		 */
+		if (vmx_nested_active(vmx)) {
+			vmexit->exitcode = VM_EXITCODE_NESTED;
+			vmexit->u.nested.op = VM_NESTED_OP_VMXINSN;
+			vmexit->u.nested.code = reason;
+			vmexit->u.nested.info1 = vmexit->inst_length;
+			vmexit->u.nested.info2 = 0;
+			vmexit->inst_length = 0;
+			break;
+		}
 		SDT_PROBE3(vmm, vmx, exit, vminsn, vmx, vcpuid, vmexit);
 		vmexit->exitcode = VM_EXITCODE_VMINSN;
+		break;
+	case EXIT_REASON_INVEPT:
+	case EXIT_REASON_INVVPID:
+		/*
+		 * Wave 4 (T23b): when nested-virt is active, dispatch
+		 * the TLB-management instruction to the in-kernel
+		 * handler.  The handler forwards the L1-stated EPTP /
+		 * VPID to the L0 hardware INVEPT/INVVPID so the L0 MMU
+		 * caches are invalidated correctly.  For non-nested
+		 * VMs these exits still fall through to the default
+		 * BOGUS / unknown path.
+		 */
+		if (vmx_nested_active(vmx)) {
+			vmexit->exitcode = VM_EXITCODE_NESTED;
+			vmexit->u.nested.op = VM_NESTED_OP_VMXINSN;
+			vmexit->u.nested.code = reason;
+			vmexit->u.nested.info1 = vmexit->inst_length;
+			vmexit->u.nested.info2 = 0;
+			vmexit->inst_length = 0;
+			break;
+		}
+		SDT_PROBE4(vmm, vmx, exit, unknown,
+		    vmx, vcpuid, vmexit, reason);
+		vmm_stat_incr(vcpu->vcpu, VMEXIT_UNKNOWN, 1);
 		break;
 	case EXIT_REASON_INVD:
 	case EXIT_REASON_WBINVD:
@@ -3044,9 +3246,13 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 	struct vmcs *vmcs;
 	struct vm_exit *vmexit;
 	struct vlapic *vlapic;
+	struct vmx_nested_state *ns;
 	uint32_t exit_reason;
 	struct region_descriptor gdtr, idtr;
 	uint16_t ldt_sel;
+	bool in_l2;
+	bool l1_relaunch = false;	/* vmcs01 was VMCLEARed by a reflect;
+					 * its next entry must VMLAUNCH */
 
 	vcpu = vcpui;
 	vmx = vcpu->vmx;
@@ -3055,29 +3261,48 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 	vlapic = vm_lapic(vcpu->vcpu);
 	vmexit = vm_exitinfo(vcpu->vcpu);
 	launched = 0;
+	ns = vcpu->nested_state;
+	in_l2 = (ns != NULL && ns->in_l2);
 
 	KASSERT(vmxctx->pmap == pmap,
 	    ("pmap %p different than ctx pmap %p", pmap, vmxctx->pmap));
 
 	vmx_msr_guest_enter(vcpu);
 
-	VMPTRLD(vmcs);
-
 	/*
-	 * XXX
-	 * We do this every time because we may setup the virtual machine
-	 * from a different process than the one that actually runs it.
-	 *
-	 * If the life of a virtual machine was spent entirely in the context
-	 * of a single process we could do this once in vmx_init().
+	 * Load the VMCS to run: vmcs02 (L2) when a nested guest is active,
+	 * else the vcpu's own VMCS (L1). HOST_CR3 is refreshed for whichever
+	 * is loaded because the running process may differ from the one that
+	 * set the VM up.
 	 */
+	if (in_l2) {
+		VMPTRLD(ns->vmcs02);
+		launched = ns->vmcs02_launched;
+	} else {
+		VMPTRLD(vmcs);
+	}
 	vmcs_write(VMCS_HOST_CR3, rcr3());
-
-	vmcs_write(VMCS_GUEST_RIP, rip);
-	vmx_set_pcpu_defaults(vmx, vcpu, pmap);
+	if (in_l2) {
+		rip = vmcs_guest_rip();
+		/*
+		 * The vcpu thread may have migrated CPUs since vmcs02 was
+		 * built. HOST_TR_BASE/GDTR_BASE/GS_BASE are per-CPU (GS_BASE is
+		 * the PCPU pointer); refresh them on the running CPU so that an
+		 * L2 VM-exit restores THIS CPU's host state. Skipping this let
+		 * L2 exits load a stale GS base and corrupt the host scheduler.
+		 */
+		vmcs_write(VMCS_HOST_TR_BASE, vmm_get_host_trbase());
+		vmcs_write(VMCS_HOST_GDTR_BASE, vmm_get_host_gdtrbase());
+		vmcs_write(VMCS_HOST_GS_BASE, vmm_get_host_gsbase());
+	} else {
+		vmcs_write(VMCS_GUEST_RIP, rip);
+		vmx_set_pcpu_defaults(vmx, vcpu, pmap);
+	}
 	do {
-		KASSERT(vmcs_guest_rip() == rip, ("%s: vmcs guest rip mismatch "
-		    "%#lx/%#lx", __func__, vmcs_guest_rip(), rip));
+		if (!in_l2)
+			KASSERT(vmcs_guest_rip() == rip, ("%s: vmcs guest rip "
+			    "mismatch %#lx/%#lx", __func__, vmcs_guest_rip(),
+			    rip));
 
 		handled = UNHANDLED;
 		/*
@@ -3099,7 +3324,8 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 		 * pmap_invalidate_ept().
 		 */
 		disable_intr();
-		vmx_inject_interrupts(vcpu, vlapic, rip);
+		if (!in_l2)
+			vmx_inject_interrupts(vcpu, vlapic, rip);
 
 		/*
 		 * Check for vcpu suspension after injecting events because
@@ -3212,12 +3438,42 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 		if (rc == VMX_GUEST_VMEXIT) {
 			vmx_exit_handle_nmi(vcpu, vmexit);
 			enable_intr();
-			handled = vmx_exit_process(vmx, vcpu, vmexit);
+			if (in_l2) {
+				int nr;
+
+				nr = vmx_nested_l2_exit(vcpu, exit_reason,
+				    vmexit);
+				if (nr == 1) {
+					handled = HANDLED;	/* resume L2 */
+				} else if (nr == 2) {
+					/* defer EPT fill to vm_run() */
+					handled = UNHANDLED;
+				} else {
+					/*
+					 * Reflected to L1: vmx_nested_l2_exit()
+					 * already made vmcs01 current (VMCLEAR
+					 * vmcs02 + VMPTRLD vmcs01), so do not
+					 * VMPTRLD again here.
+					 */
+					in_l2 = false;
+					l1_relaunch = true;
+					rip = vmcs_guest_rip();
+					vmexit->rip = rip;
+					vcpu->state.nextrip = rip;
+					handled = HANDLED;
+				}
+			} else {
+				handled = vmx_exit_process(vmx, vcpu, vmexit);
+			}
 		} else {
 			enable_intr();
 			vmx_exit_inst_error(vmxctx, rc, vmexit);
 		}
-		launched = 1;
+		if (l1_relaunch) {
+			launched = 0;		/* freshly VMCLEARed vmcs01 */
+			l1_relaunch = false;
+		} else
+			launched = 1;
 		vmx_exit_trace(vcpu, rip, exit_reason, handled);
 		rip = vmexit->rip;
 	} while (handled);
@@ -3235,7 +3491,10 @@ vmx_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 	VMX_CTR1(vcpu, "returning from vmx_run: exitcode %d",
 	    vmexit->exitcode);
 
-	VMCLEAR(vmcs);
+	if (in_l2) {
+		VMCLEAR(ns->vmcs02);
+	} else
+		VMCLEAR(vmcs);
 	vmx_msr_guest_exit(vcpu);
 
 	return (0);
@@ -3247,6 +3506,17 @@ vmx_vcpu_cleanup(void *vcpui)
 	struct vmx_vcpu *vcpu = vcpui;
 
 	vpid_free(vcpu->state.vpid);
+	/*
+	 * Nested-VMX (T15): free the VMCS12 shadow if vmx_vcpu_init
+	 * allocated it.  The field is left NULL for non-nested VMs,
+	 * so the free() on NULL is a safe no-op.
+	 */
+	if (vcpu->nvmcs12 != NULL)
+		free(vcpu->nvmcs12, M_VMX);
+	if (vcpu->nested_state != NULL) {
+		vmx_nested_ept02_cleanup(vcpu);
+		free(vcpu->nested_state, M_VMX);
+	}
 	free(vcpu->pir_desc, M_VMX);
 	free(vcpu->apic_page, M_VMX);
 	free(vcpu->vmcs, M_VMX);
@@ -4304,4 +4574,5 @@ const struct vmm_ops vmm_ops_intel = {
 	.vcpu_snapshot	= vmx_vcpu_snapshot,
 	.restore_tsc	= vmx_restore_tsc,
 #endif
+	.nested		= vmx_nested_op,
 };

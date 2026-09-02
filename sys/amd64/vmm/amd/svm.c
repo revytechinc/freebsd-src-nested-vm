@@ -69,12 +69,126 @@
 #include "svm.h"
 #include "svm_softc.h"
 #include "svm_msr.h"
+#include "svm_nested.h"
+#include "svm_nested_stubs.h"
+#include "svm_nested_exit.h"
+#include "svm_nested_intr.h"
 #include "npt.h"
 #include "io/ppt.h"
+
+/*
+ * Nested SVM: instruction emulation and the L2 exit path live in
+ * svm_nested_stubs.c / svm_nested_exit.c / svm_nested_npt.c. Work that
+ * needs guest memory is completed from vm_run() through
+ * VM_EXITCODE_NESTED (vmm_ops.nested = svm_nested_op).
+ */
+extern int vmm_nested_enable;	/* declared in sys/amd64/vmm/vmm.c */
+int	 svm_nested_status;
+
+static int svm_nested_l0_warned;
+
+/*
+ * While L2 runs, an interrupt or NMI pending for L1 must not be injected
+ * into L2: if L1 intercepts INTR/NMI, hardware would deliver a #VMEXIT
+ * to L1 instead. Returns the exit code to reflect, or 0 when nothing is
+ * pending that L1 intercepts.
+ */
+static uint64_t
+svm_nested_l1_pending_exit(struct svm_vcpu *vcpu, struct vlapic *vlapic)
+{
+	struct svm_nested *ns;
+	uint32_t intcpt;
+
+	ns = svm_nested_lookup(vcpu);
+	if (ns == NULL || !ns->nested_in_l2 || ns->vmcb12 == NULL)
+		return (0);
+	intcpt = ns->vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT];
+	if ((intcpt & VMCB_INTCPT_NMI) != 0 && vm_nmi_pending(vcpu->vcpu)) {
+		return (VMCB_EXIT_NMI);
+	}
+	if ((intcpt & VMCB_INTCPT_INTR) != 0) {
+		int vector = -1;
+
+		if (vm_extint_pending(vcpu->vcpu)) {
+			return (VMCB_EXIT_INTR);
+		}
+		if (vlapic_pending_intr(vlapic, &vector)) {
+			return (VMCB_EXIT_INTR);
+		}
+	}
+	return (0);
+}
+
+static inline bool
+svm_nested_active(struct svm_softc *svm_sc)
+{
+
+	/*
+	 * The global vmm_nested_enable sysctl and per-VM nested_enabled
+	 * flag must both be on, and the hardware/L0 preflight status must
+	 * be nonzero.  Returning false here short-circuits the nested
+	 * dispatcher and falls through to the legacy handler (which
+	 * injects #UD for VMRUN-family and consumes INTR/NMI/NPF).
+	 */
+	if (vmm_nested_enable == 0)
+		return (false);
+	if (svm_nested_status == 0)
+		return (false);
+	if (svm_sc->vm == NULL || svm_sc->vm->nested_enabled == false)
+		return (false);
+	if (vm_guest != VM_GUEST_NO) {
+		const char *vm_guest_str;
+
+		switch (vm_guest) {
+		case VM_GUEST_VM:
+			vm_guest_str = "generic";
+			break;
+		case VM_GUEST_XEN:
+			vm_guest_str = "xen";
+			break;
+		case VM_GUEST_HV:
+			vm_guest_str = "hv";
+			break;
+		case VM_GUEST_VMWARE:
+			vm_guest_str = "vmware";
+			break;
+		case VM_GUEST_KVM:
+			vm_guest_str = "kvm";
+			break;
+		case VM_GUEST_BHYVE:
+			vm_guest_str = "bhyve";
+			break;
+		case VM_GUEST_VBOX:
+			vm_guest_str = "vbox";
+			break;
+		case VM_GUEST_PARALLELS:
+			vm_guest_str = "parallels";
+			break;
+		case VM_GUEST_NVMM:
+			vm_guest_str = "nvmm";
+			break;
+		default:
+			vm_guest_str = "unknown";
+			break;
+		}
+		if (atomic_cmpset_int(&svm_nested_l0_warned, 0, 1))
+			printf("SVM: refusing nested-virt - L0 hypervisor already present (%s)\n",
+			    vm_guest_str);
+		return (false);
+	}
+	return (true);
+}
 
 SYSCTL_DECL(_hw_vmm);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, svm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     NULL);
+
+SYSCTL_DECL(_hw_vmm_nested);
+SYSCTL_NODE(_hw_vmm, OID_AUTO, nested, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
+    "Nested virtualization preflight status");
+SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm, CTLFLAG_RD,
+    &svm_nested_status, 0,
+    "SVM nested virtualization preflight status (0=unsupported, 1=L0 conflict, 2=ready)");
 
 /*
  * SVM CPUID function 0x8000_000A, edx bit decoding.
@@ -249,12 +363,15 @@ svm_modinit(int ipinum)
 {
 	int error, cpu;
 
+	svm_nested_status = 0;
 	if (!svm_available())
 		return (ENXIO);
 
 	error = check_svm_features();
 	if (error)
 		return (error);
+
+	svm_nested_status = vm_guest == VM_GUEST_NO ? 2 : 1;
 
 	vmcb_clean &= VMCB_CACHE_DEFAULT;
 
@@ -655,6 +772,7 @@ svm_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 	vcpu->vmcb = malloc_aligned(sizeof(struct vmcb), PAGE_SIZE, M_SVM,
 	    M_WAITOK | M_ZERO);
 	vcpu->nextrip = ~0;
+	vcpu->nested.gif = true;
 	vcpu->lastcpu = NOCPU;
 	vcpu->vmcb_pa = vtophys(vcpu->vmcb);
 	vmcb_init(sc, vcpu, vtophys(sc->iopm_bitmap), vtophys(sc->msr_bitmap),
@@ -1224,10 +1342,14 @@ svm_write_efer(struct svm_softc *sc, struct svm_vcpu *vcpu, uint64_t newval,
 			goto gpf;
 	}
 
+	if (svm_nested_active(sc))
+		svm_nested_trace(vcpu, "wrmsr-efer", newval, oldval);
 	error = svm_setreg(vcpu, VM_REG_GUEST_EFER, newval);
 	KASSERT(error == 0, ("%s: error %d updating efer", __func__, error));
 	return (0);
 gpf:
+	if (svm_nested_active(sc))
+		svm_nested_trace(vcpu, "efer-gp", newval, oldval);
 	vm_inject_gp(vcpu->vcpu);
 	return (0);
 }
@@ -1373,6 +1495,27 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 	vmexit->inst_length = nrip_valid(code) ? ctrl->nrip - state->rip : 0;
 
 	vmm_stat_incr(vcpu->vcpu, VMEXIT_COUNT, 1);
+
+	/*
+	 * Exit taken while running L2 that L1 intercepts, or a nested
+	 * page fault against the shadow NPT: both need guest pages, which
+	 * cannot be held here (vm_run() holds a critical section around
+	 * us), so hand the exit to vm_run() via VM_EXITCODE_NESTED.
+	 */
+	if (svm_nested_in_l2(vcpu) && code == 0x40 + IDT_PF) {
+		svm_nested_trace(vcpu, "l2-pf", state->rip, info2);
+		svm_nested_trace(vcpu, "l2-pf-err/cr3", info1, state->cr3);
+	}
+	if (svm_nested_active(svm_sc) &&
+	    svm_nested_l2_exit_needed(vcpu, code, info1)) {
+		vmexit->exitcode = VM_EXITCODE_NESTED;
+		vmexit->u.nested.op = VM_NESTED_OP_L2EXIT;
+		vmexit->u.nested.code = code;
+		vmexit->u.nested.info1 = info1;
+		vmexit->u.nested.info2 = info2;
+		vmexit->inst_length = 0;
+		return (0);
+	}
 
 	/*
 	 * #VMEXIT(INVALID) needs to be handled early because the VMCB is
@@ -1563,6 +1706,9 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 			val = (uint64_t)edx << 32 | eax;
 			SVM_CTR2(vcpu, "wrmsr %#x val %#lx", ecx, val);
 			if (emulate_wrmsr(svm_sc, vcpu, ecx, val, &retu)) {
+				if (svm_nested_active(svm_sc))
+					svm_nested_trace(vcpu, "wrmsr-unhandled",
+					    ecx, val);
 				vmexit->exitcode = VM_EXITCODE_WRMSR;
 				vmexit->u.msr.code = ecx;
 				vmexit->u.msr.wval = val;
@@ -1576,6 +1722,9 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 			SVM_CTR1(vcpu, "rdmsr %#x", ecx);
 			vmm_stat_incr(vcpu->vcpu, VMEXIT_RDMSR, 1);
 			if (emulate_rdmsr(vcpu, ecx, &retu)) {
+				if (svm_nested_active(svm_sc))
+					svm_nested_trace(vcpu, "rdmsr-unhandled",
+					    ecx, 0);
 				vmexit->exitcode = VM_EXITCODE_RDMSR;
 				vmexit->u.msr.code = ecx;
 			} else if (!retu) {
@@ -1670,14 +1819,57 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 		}
 		break;
 	}
-	case VMCB_EXIT_SHUTDOWN:
 	case VMCB_EXIT_VMRUN:
-	case VMCB_EXIT_VMMCALL:
 	case VMCB_EXIT_VMLOAD:
 	case VMCB_EXIT_VMSAVE:
+		/*
+		 * Emulated for an L1 hypervisor. The emulation reads L1
+		 * memory, so it is completed by svm_nested_op() from
+		 * vm_run(); info1 carries where L1 continues on success.
+		 */
+		if (svm_nested_active(svm_sc)) {
+			vmexit->exitcode = VM_EXITCODE_NESTED;
+			vmexit->u.nested.op = code == VMCB_EXIT_VMRUN ?
+			    VM_NESTED_OP_VMRUN : code == VMCB_EXIT_VMLOAD ?
+			    VM_NESTED_OP_VMLOAD : VM_NESTED_OP_VMSAVE;
+			vmexit->u.nested.code = code;
+			vmexit->u.nested.info1 = nrip_valid(code) ? ctrl->nrip :
+			    state->rip + 3;
+			vmexit->u.nested.info2 = 0;
+			vmexit->inst_length = 0;
+			break;
+		}
+		vm_inject_ud(vcpu->vcpu);
+		handled = 1;
+		break;
 	case VMCB_EXIT_STGI:
+		if (svm_nested_active(svm_sc) &&
+		    svm_nested_stgi(vcpu) == 0) {
+			handled = 1;
+			break;
+		}
+		vm_inject_ud(vcpu->vcpu);
+		handled = 1;
+		break;
 	case VMCB_EXIT_CLGI:
+		if (svm_nested_active(svm_sc) &&
+		    svm_nested_clgi(vcpu) == 0) {
+			handled = 1;
+			break;
+		}
+		vm_inject_ud(vcpu->vcpu);
+		handled = 1;
+		break;
 	case VMCB_EXIT_SKINIT:
+		/*
+		 * SKINIT is never emulated. From L2 it is reflected to L1
+		 * above if L1 intercepts it; otherwise (and from L1) #UD.
+		 */
+		vm_inject_ud(vcpu->vcpu);
+		handled = 1;
+		break;
+	case VMCB_EXIT_SHUTDOWN:
+	case VMCB_EXIT_VMMCALL:
 	case VMCB_EXIT_ICEBP:
 	case VMCB_EXIT_INVLPGA:
 		vm_inject_ud(vcpu->vcpu);
@@ -1776,6 +1968,20 @@ svm_inj_interrupts(struct svm_softc *sc, struct svm_vcpu *vcpu,
 	 * by the hypervisor (e.g. #PF during instruction emulation).
 	 */
 	svm_inj_intinfo(sc, vcpu);
+
+	/*
+	 * With GIF clear (CLGI, or between #VMEXIT and STGI in an L1
+	 * hypervisor) neither NMIs nor interrupts are taken; they stay
+	 * pending until STGI, which re-enters this function.
+	 */
+	if (!svm_nested_gif(vcpu)) {
+		SVM_CTR0(vcpu, "Cannot inject NMI/interrupt: GIF clear");
+		goto done;
+	}
+	if (svm_nested_l1_pending_exit(vcpu, vlapic) != 0) {
+		/* Belongs to L1; svm_run() exits to L1 before entering L2. */
+		goto done;
+	}
 
 	/* NMI event has priority over interrupts. */
 	if (vm_nmi_pending(vcpu->vcpu)) {
@@ -2131,7 +2337,7 @@ svm_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 	struct vmcb_ctrl *ctrl;
 	struct vm_exit *vmexit;
 	struct vlapic *vlapic;
-	uint64_t vmcb_pa;
+	uint64_t vmcb_pa, code;
 	int handled;
 	uint16_t ldt_sel;
 
@@ -2210,6 +2416,23 @@ svm_run(void *vcpui, register_t rip, pmap_t pmap, struct vm_eventinfo *evinfo)
 			break;
 		}
 
+		/*
+		 * L1 interrupt pending while L2 is loaded: deliver it as a
+		 * #VMEXIT to L1 (from vm_run(), where VMCB12 can be written)
+		 * rather than injecting it into L2.
+		 */
+		if ((code = svm_nested_l1_pending_exit(vcpu, vlapic)) != 0) {
+			enable_gintr();
+			vmexit->exitcode = VM_EXITCODE_NESTED;
+			vmexit->u.nested.op = VM_NESTED_OP_L2EXIT;
+			vmexit->u.nested.code = code;
+			vmexit->u.nested.info1 = 0;
+			vmexit->u.nested.info2 = 0;
+			vmexit->rip = state->rip;
+			vmexit->inst_length = 0;
+			break;
+		}
+
 		if (vcpu_debugged(vcpu->vcpu)) {
 			enable_gintr();
 			vm_exit_debug(vcpu->vcpu, state->rip);
@@ -2275,6 +2498,8 @@ svm_vcpu_cleanup(void *vcpui)
 {
 	struct svm_vcpu *vcpu = vcpui;
 
+	svm_nested_release_l1_maps(vcpu);
+	svm_nested_npt_cleanup(vcpu);
 	free(vcpu->vmcb, M_SVM);
 	free(vcpu, M_SVM);
 }
@@ -2851,4 +3076,5 @@ const struct vmm_ops vmm_ops_amd = {
 	.vcpu_snapshot	= svm_vcpu_snapshot,
 	.restore_tsc	= svm_restore_tsc,
 #endif
+	.nested		= svm_nested_op,
 };
