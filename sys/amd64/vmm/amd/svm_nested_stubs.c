@@ -169,6 +169,8 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	struct vmcb_ctrl *ctrl;
 	uint64_t gpa;
 	void *cookie;
+	uint64_t iopm_pa, msrpm_pa;
+	uint32_t intcpt1;
 	int i;
 
 	if (vcpu == NULL)
@@ -194,11 +196,22 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 		return (2);
 	}
 
+	/*
+	 * Snapshot the L1-controlled IOPM/MSRPM bases and the intercept word
+	 * ONCE. VMCB12 stays mapped writable for the whole L2 run, so a second
+	 * L1 vCPU can mutate these between the checks below and the holds that
+	 * follow. Validating one fetch and then holding another let L1 slip a
+	 * misaligned base past the alignment check into vm_gpa_hold(), whose
+	 * page-crossing guard panic()s -- a race-reachable whole-host DoS from
+	 * any multi-vCPU nested L1. Use only these locals hereafter.
+	 */
+	intcpt1 = vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT];
+	iopm_pa = vmcb12->ctrl.iopm_base_pa;
+	msrpm_pa = vmcb12->ctrl.msrpm_base_pa;
+
 	if (!svm_nested_vmcb12_consistent(vmcb12) ||
-	    ((vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_IO) != 0 &&
-	    (vmcb12->ctrl.iopm_base_pa & PAGE_MASK) != 0) ||
-	    ((vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_MSR) != 0 &&
-	    (vmcb12->ctrl.msrpm_base_pa & PAGE_MASK) != 0)) {
+	    ((intcpt1 & VMCB_INTCPT_IO) != 0 && (iopm_pa & PAGE_MASK) != 0) ||
+	    ((intcpt1 & VMCB_INTCPT_MSR) != 0 && (msrpm_pa & PAGE_MASK) != 0)) {
 		SVM_CTR1(vcpu, "nested VMRUN: inconsistent VMCB12 %#lx",
 		    (unsigned long)gpa);
 		svm_nested_vmrun_invalid(vmcb12);
@@ -217,16 +230,16 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	 * critical section and cannot take them then. Only the maps for
 	 * the intercepts L1 enabled are required.
 	 */
-	if ((vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_IO) != 0) {
+	if ((intcpt1 & VMCB_INTCPT_IO) != 0) {
 		for (i = 0; i < 3; i++)
 			ns->l1_iopm[i] = vm_gpa_hold(vcpu->vcpu,
-			    vmcb12->ctrl.iopm_base_pa + i * PAGE_SIZE, PAGE_SIZE,
+			    iopm_pa + i * PAGE_SIZE, PAGE_SIZE,
 			    VM_PROT_READ, &ns->l1_iopm_cookie[i]);
 	}
-	if ((vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_MSR) != 0) {
+	if ((intcpt1 & VMCB_INTCPT_MSR) != 0) {
 		for (i = 0; i < 2; i++)
 			ns->l1_msrpm[i] = vm_gpa_hold(vcpu->vcpu,
-			    vmcb12->ctrl.msrpm_base_pa + i * PAGE_SIZE, PAGE_SIZE,
+			    msrpm_pa + i * PAGE_SIZE, PAGE_SIZE,
 			    VM_PROT_READ, &ns->l1_msrpm_cookie[i]);
 	}
 
