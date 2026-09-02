@@ -138,6 +138,7 @@ SRCS+=	vmcb.c		\
 	svm_nested_exit.c	\
 	svm_nested_npt.c	\
 	svm_nested_intr.c	\
+	svm_nested_timer.c	\
 	svm_support.S	\
 	npt.c		\
 	ivrs_drv.c	\
