@@ -285,6 +285,17 @@ svm_nested_reflect_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
 	memcpy(vmcb12->ctrl.inst_bytes, ctrl->inst_bytes,
 	    sizeof(vmcb12->ctrl.inst_bytes));
 	memcpy(&vmcb12->ctrl.v_tpr, &ctrl->v_tpr, sizeof(ns->l0_vintr));
+	/*
+	 * L1 keeps V_IRQ and the VINTR intercept in lockstep (its
+	 * enable/disable_intr_window_exiting set and clear both together and
+	 * assert on a mismatch). Hardware may have cleared V_IRQ while L2 ran;
+	 * mirror that into L1's VINTR intercept in VMCB12 so the invariant L1
+	 * re-checks on the reflected exit still holds.
+	 */
+	if (vmcb12->ctrl.v_irq)
+		vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] |= VMCB_INTCPT_VINTR;
+	else
+		vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] &= ~VMCB_INTCPT_VINTR;
 	vmcb12->ctrl.intr_shadow = ctrl->intr_shadow;
 	vmcb12->ctrl.eventinj = 0;
 	ctrl->exitintinfo = 0;
