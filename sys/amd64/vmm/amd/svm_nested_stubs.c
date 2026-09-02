@@ -32,6 +32,7 @@
 
 #include <machine/vmm.h>
 #include <machine/specialreg.h>
+#include <x86/psl.h>
 
 #include <dev/vmm/vmm_mem.h>
 #include <dev/vmm/vmm_ktr.h>
@@ -285,6 +286,19 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	ctrl->intr_shadow = vmcb12->ctrl.intr_shadow;
 	ctrl->tsc_offset = ns->l0_tsc_offset + vmcb12->ctrl.tsc_offset;
 	ctrl->eventinj = vmcb12->ctrl.eventinj;
+	if ((vmcb12->ctrl.eventinj & VMCB_EVENTINJ_VALID) != 0) {
+		extern uint64_t svm_l2_inj_total, svm_l2_inj_vec[256];
+		svm_l2_inj_total++;
+		svm_l2_inj_vec[vmcb12->ctrl.eventinj & 0xff]++;
+	}
+	{
+		extern uint64_t svm_l2_vmruns, svm_l2_vintr_want, svm_l2_notintr;
+		svm_l2_vmruns++;
+		if ((vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_VINTR) != 0)
+			svm_l2_vintr_want++;
+		if ((vmcb12->state.rflags & PSL_I) == 0)
+			svm_l2_notintr++;
+	}
 
 	/*
 	 * Nested paging: L0's NPT is always on. With L1 nested paging on,
@@ -303,6 +317,7 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	}
 
 	ns->nested_in_l2 = true;
+	vcpu_set_nested_host(vcpu->vcpu);
 	ns->gif = true;			/* VMRUN sets GIF */
 
 	svm_set_dirty(vcpu, 0xffffffff);

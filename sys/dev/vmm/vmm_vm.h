@@ -38,6 +38,7 @@ struct vcpu {
 	int		vcpuid;		/* (o) */
 	int		hostcpu;	/* (o) vcpu's host cpu */
 	int		reqidle;	/* (i) request vcpu to idle */
+	bool		nested_host;	/* (i) vcpu has hosted a nested (L2) guest */
 	struct vm	*vm;		/* (o) */
 	void		*cookie;	/* (i) cpu-specific data */
 	void		*stats;		/* (a,i) statistics */

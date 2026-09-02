@@ -792,6 +792,12 @@ vcpu_require_state_locked(struct vcpu *vcpu, enum vcpu_state newstate)
 /*
  * Emulate a guest 'hlt' by sleeping until the vcpu is ready to run.
  */
+void
+vcpu_set_nested_host(struct vcpu *vcpu)
+{
+	vcpu->nested_host = true;
+}
+
 static int
 vm_handle_hlt(struct vcpu *vcpu, bool intr_disabled, bool *retu)
 {
@@ -863,10 +869,22 @@ vm_handle_hlt(struct vcpu *vcpu, bool intr_disabled, bool *retu)
 		/*
 		 * XXX msleep_spin() cannot be interrupted by signals so
 		 * wake up periodically to check pending signals.
+		 *
+		 * A vcpu that hosts a nested (L2) guest must not be left
+		 * asleep indefinitely: while it sleeps L1's own kernel does
+		 * not run, so L1 never re-arms its timer, runs its device
+		 * back ends, or injects the L2's pending interrupts -- an
+		 * idle deadlock in which the L2's disk completion never
+		 * lands. Wake such a vcpu frequently and resume L1 so its
+		 * kernel makes progress; if L1 is truly idle it simply
+		 * halts again.
 		 */
-		msleep_spin(vcpu, &vcpu->mtx, wmesg, hz);
+		msleep_spin(vcpu, &vcpu->mtx, wmesg,
+		    vcpu->nested_host ? hz / 100 : hz);
 		vcpu_require_state_locked(vcpu, VCPU_FROZEN);
 		vmm_stat_incr(vcpu, VCPU_IDLE_TICKS, ticks - t);
+		if (vcpu->nested_host && !intr_disabled)
+			break;
 		if (td_ast_pending(td, TDA_SUSPEND)) {
 			vcpu_unlock(vcpu);
 			error = thread_check_susp(td, false);
