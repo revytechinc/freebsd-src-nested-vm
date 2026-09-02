@@ -1506,6 +1506,18 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 		svm_nested_trace(vcpu, "l2-pf", state->rip, info2);
 		svm_nested_trace(vcpu, "l2-pf-err/cr3", info1, state->cr3);
 	}
+	/*
+	 * Fast-path L2's timer port reads (i8254 DELAY loop, ACPI PM timer)
+	 * directly from the host TSC instead of reflecting each read to L1.
+	 * This is the difference between an L2 booting in seconds and taking
+	 * tens of minutes (FreeBSD's slow LAPIC calibration DELAYs a full
+	 * simulated second through the i8254).
+	 */
+	if (svm_nested_active(svm_sc) && svm_nested_in_l2(vcpu) &&
+	    code == VMCB_EXIT_IO &&
+	    svm_nested_timer_fastpath(vcpu, info1, info2))
+		return (1);		/* handled inline; resume L2 */
+
 	if (svm_nested_active(svm_sc) &&
 	    svm_nested_l2_exit_needed(vcpu, code, info1)) {
 		vmexit->exitcode = VM_EXITCODE_NESTED;
