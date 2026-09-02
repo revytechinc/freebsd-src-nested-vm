@@ -272,7 +272,7 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	struct vmcs12 *v12;
 	uint64_t hostv[nitems(vmcs02_host_fields)];
 	uint64_t ctrlv[nitems(vmcs02_ctrl_fields)];
-	uint64_t val, cr0, cr4, tsc01;
+	uint64_t val, cr0, cr4, tsc01, v12ctls;
 	unsigned i;
 
 	ns = vmx_nested_state(vcpu);
@@ -428,6 +428,24 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	val = vmcs_read(VMCS_PRI_PROC_BASED_CTLS);
 	val &= ~(uint64_t)PROCBASED_USE_TPR_SHADOW;
 	val |= PROCBASED_SECONDARY_CONTROLS;
+	/*
+	 * Propagate L1's interrupt/NMI-window-exiting request from VMCS12.
+	 * L1 sets these when it has an event pending for L2 but L2 is not
+	 * currently interruptible; without the bit the window exit never
+	 * fires, vmx_nested_l2_exit() never reflects it to L1, and L1 never
+	 * gets the chance to inject -- so L2 hangs waiting for a timer or
+	 * device interrupt that is never delivered.
+	 */
+	if (vmcs12_read_field(v12, VMCS_PRI_PROC_BASED_CTLS, &v12ctls) == 0)
+		val |= v12ctls & (PROCBASED_INT_WINDOW_EXITING |
+		    PROCBASED_NMI_WINDOW_EXITING);
+	/*
+	 * Do not make L2 exit on PAUSE. vmcs01 enables PAUSE-exiting for L1,
+	 * but reflecting every L2 PAUSE up to L1 turns an ordinary guest
+	 * spin-wait into a storm of L1 userspace round-trips. L2's spin loops
+	 * belong in L2; they end when the awaited interrupt is injected.
+	 */
+	val &= ~(uint64_t)PROCBASED_PAUSE_EXITING;
 	vmwrite(VMCS_PRI_PROC_BASED_CTLS, val);
 
 	val = vmcs_read(VMCS_SEC_PROC_BASED_CTLS);
@@ -654,8 +672,17 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 	}
 	case EXIT_REASON_NMI_WINDOW:
 	case EXIT_REASON_INTR_WINDOW:
-		/* Nothing to do at L0; resume L2. */
-		return (1);
+		/*
+		 * L2 became interruptible and vmcs02 carried the window-exiting
+		 * control L1 requested (propagated from VMCS12 in
+		 * vmx_nested_build_vmcs02()). Reflect the window exit to L1 so
+		 * its hypervisor clears the control and injects the pending
+		 * event through VMCS12 ENTRY_INTR_INFO on the next entry.
+		 * Handling it at L0 (return 1) would swallow the one signal L1
+		 * uses to inject, which is why L2 received no interrupts.
+		 */
+		vmx_nested_reflect_l2_exit(vcpu, reason, qual, 0);
+		return (0);
 	default:
 		/* Everything else goes up to L1's hypervisor. */
 		vmx_nested_reflect_l2_exit(vcpu, reason, qual, 0);
