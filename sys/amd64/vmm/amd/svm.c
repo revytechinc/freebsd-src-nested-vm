@@ -1958,6 +1958,21 @@ svm_inj_interrupts(struct svm_softc *sc, struct svm_vcpu *vcpu,
 		return;
 	}
 
+	/*
+	 * While running L2, everything injected into it is owned by L1: the
+	 * event L1 queued is composed into VMCB02's eventinj at VMRUN, and any
+	 * event an L2 exit interrupted is saved into VMCB12 and re-injected by
+	 * L1. L0 must NOT inject its own vcpu-level pending events here --
+	 * exceptions, NMIs, vlapic interrupts, or the nesting-unaware shared
+	 * entry-intinfo (svm_inj_intinfo). Doing so cross-contaminated L2 with
+	 * an L1-context event, observed as a spurious #SX (vector 30) panic in
+	 * L2 at a rdtsc DELAY loop. L1's pending L2 interrupts are delivered by
+	 * reflecting to L1 (svm_nested_l1_pending_exit), which svm_run() has
+	 * already checked before reaching this call.
+	 */
+	if (svm_nested_in_l2(vcpu))
+		return;
+
 	state = svm_get_vmcb_state(vcpu);
 	ctrl  = svm_get_vmcb_ctrl(vcpu);
 
