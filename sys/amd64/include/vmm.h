@@ -265,6 +265,7 @@ int vm_inject_extint(struct vcpu *vcpu);
 int vm_extint_pending(struct vcpu *vcpu);
 void vm_extint_clear(struct vcpu *vcpu);
 struct vlapic *vm_lapic(struct vcpu *vcpu);
+void	vcpu_set_nested_host(struct vcpu *vcpu);
 struct vioapic *vm_ioapic(struct vm *vm);
 struct vhpet *vm_hpet(struct vm *vm);
 int vm_get_capability(struct vcpu *vcpu, int type, int *val);
