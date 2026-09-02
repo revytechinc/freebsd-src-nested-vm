@@ -99,6 +99,7 @@ bhyve_usage(int code)
 	    "       -M: monitor mode\n"
 	    "       -m: memory size\n"
 	    "       -n: NUMA domain specification\n"
+	    "       -N: allow this VM to host nested (L2) guest VMs\n"
 	    "       -o: set config 'var' to 'value'\n"
 	    "       -P: vmexit from the guest on pause\n"
 	    "       -p: pin 'vcpu' to 'hostcpu'\n"
@@ -125,9 +126,9 @@ bhyve_optparse(int argc, char **argv)
 	int c;
 
 #ifdef BHYVE_SNAPSHOT
-	optstr = "aehuwxACDHIMPSWYk:f:o:p:G:c:s:m:n:l:K:U:r:";
+	optstr = "aehuwxACDHIMNPSWYk:f:o:p:G:c:s:m:n:l:K:U:r:";
 #else
-	optstr = "aehuwxACDHIMPSWYk:f:o:p:G:c:s:m:n:l:K:U:";
+	optstr = "aehuwxACDHIMNPSWYk:f:o:p:G:c:s:m:n:l:K:U:";
 #endif
 	while ((c = getopt(argc, argv, optstr)) != -1) {
 		switch (c) {
@@ -214,6 +215,9 @@ bhyve_optparse(int argc, char **argv)
 			if (!get_config_bool("acpi_tables"))
 				errx(EX_USAGE, "NUMA emulation requires ACPI");
 			break;
+		case 'N':
+			nesting_enabled = true;
+			break;
 		case 'o':
 			if (!bhyve_parse_config_option(optarg)) {
 				errx(EX_USAGE,
@@ -249,7 +253,7 @@ bhyve_optparse(int argc, char **argv)
 			set_config_bool("x86.strictmsr", false);
 			break;
 		case 'W':
-			set_config_bool("virtio.msix", false);
+			set_config_bool("virtio_msix", false);
 			break;
 		case 'x':
 			set_config_bool("x86.x2apic", true);
@@ -265,9 +269,16 @@ bhyve_optparse(int argc, char **argv)
 	}
 
 	/* Handle backwards compatibility aliases in config options. */
-	bhyve_cfg_warn("lpc.bootrom", "bootrom");
-	bhyve_cfg_warn("lpc.bootvars", "bootvars");
-	bhyve_cfg_warn("virtio_msix", "virtio.msix");
+	if (get_config_value("lpc.bootrom") != NULL &&
+	    get_config_value("bootrom") == NULL) {
+		warnx("lpc.bootrom is deprecated, use '-o bootrom' instead");
+		set_config_value("bootrom", get_config_value("lpc.bootrom"));
+	}
+	if (get_config_value("lpc.bootvars") != NULL &&
+	    get_config_value("bootvars") == NULL) {
+		warnx("lpc.bootvars is deprecated, use '-o bootvars' instead");
+		set_config_value("bootvars", get_config_value("lpc.bootvars"));
+	}
 }
 
 void

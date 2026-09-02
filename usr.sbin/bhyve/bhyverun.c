@@ -103,6 +103,8 @@
 int guest_ncpus;
 uint16_t cpu_cores, cpu_sockets, cpu_threads;
 
+bool nesting_enabled = false;
+
 int raw_stdio = 0;
 
 #ifdef BHYVE_SNAPSHOT
@@ -262,16 +264,6 @@ bhyve_numa_parse(const char *opt)
 out:
 	free(tofree);
 	return (-1);
-}
-
-void
-bhyve_cfg_warn(const char *old, const char *new)
-{
-	if (get_config_value(old) != NULL &&
-	    get_config_value(new) == NULL) {
-		warnx("'%s' is deprecated, use '%s' instead", old, new);
-		set_config_value(new, get_config_value(old));
-	}
 }
 
 static void
@@ -584,7 +576,7 @@ int
 fbsdrun_virtio_msix(void)
 {
 
-	return (get_config_bool_default("virtio.msix", true));
+	return (get_config_bool_default("virtio_msix", true));
 }
 
 struct vcpu *
@@ -759,7 +751,10 @@ do_open(const char *vmname)
 	 * If we don't have a boot ROM, the guest context must have been
 	 * initialized by bhyveload(8) or equivalent.
 	 */
-	ctx = vm_openf(vmname, romboot ? VMMAPI_OPEN_REINIT : 0);
+	flags = romboot ? VMMAPI_OPEN_REINIT : 0;
+	if (nesting_enabled)
+		flags |= VMMAPI_OPEN_CREATE_NESTED;
+	ctx = vm_openf(vmname, flags);
 	if (ctx == NULL) {
 		if (errno != ENOENT)
 			err(4, "vm_openf");
@@ -768,6 +763,8 @@ do_open(const char *vmname)
 		flags = VMMAPI_OPEN_CREATE;
 		if (monitor)
 			flags |= VMMAPI_OPEN_CREATE_DESTROY_ON_CLOSE;
+		if (nesting_enabled)
+			flags |= VMMAPI_OPEN_CREATE_NESTED;
 		ctx = vm_openf(vmname, flags);
 		if (ctx == NULL)
 			err(4, "vm_openf");

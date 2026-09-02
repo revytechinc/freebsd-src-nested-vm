@@ -5,6 +5,8 @@ SRCS=	vmmapi.c
 INCS=	vmmapi.h
 
 CFLAGS+= -I${.CURDIR}
+# Pick up in-tree VMMCTL_CREATE_NESTED from sys/dev/vmm/vmm_dev.h
+CFLAGS+= -I${SRCTOP}/sys
 
 .PATH:	${.CURDIR}/${MACHINE_CPUARCH}
 
