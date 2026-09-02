@@ -42,6 +42,33 @@ int vmx_wrmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t val, bool *retu);
 
 uint32_t vmx_revision(void);
 
+/*
+ * Nested-VMX MSR virtualization (Wave 3 / T12-T16).
+ *
+ * When a VM is created with VMMAPI_OPEN_CREATE_NESTED, the L1 guest
+ * must be able to read the same VMX capability MSR layout as L0
+ * would expose to L1 in a native-VMX run.  The capability MSR range
+ * (0x480-0x48F) is intercepted via the MSR bitmap, and reads are
+ * answered by vmx_nested_cap_msr_read() which returns the L0 host
+ * values AND-OR'd with a nested-safe mask so L1 cannot discover L0
+ * microarchitecture details that cannot actually be nested.
+ *
+ * Design reference: Intel SDM Vol 3 §25.1; the AND/OR mask pattern is
+ * inspired by KVM's nested_vmx_*_msr derivations (no KVM code is
+ * copied).  The masks are computed once at module-init time and
+ * stored in static storage.
+ */
+int vmx_nested_cap_msr_read(struct vmx_vcpu *vcpu, u_int msr, uint64_t *val);
+
+/*
+ * Install the L1-targeted bitmap interceptions for the VMX
+ * capability MSR range (0x480-0x48F).  Must be called from
+ * vmx_msr_guest_init() on vcpuid 0, before VMPTRLD so the MSR
+ * bitmap is in place when the VMCS becomes active.  No-op if
+ * nested_enabled is false for this VM.
+ */
+void vmx_nested_msr_intercept_init(struct vmx *vmx, struct vmx_vcpu *vcpu);
+
 int vmx_set_ctlreg(int ctl_reg, int true_ctl_reg, uint32_t ones_mask,
 		   uint32_t zeros_mask, uint32_t *retval);
 
