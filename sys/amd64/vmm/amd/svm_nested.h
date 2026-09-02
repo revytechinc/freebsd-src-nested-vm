@@ -67,6 +67,26 @@ struct svm_nested {
 	void		*l1_iopm_cookie[3];
 	uint8_t		*l1_msrpm[2];
 	void		*l1_msrpm_cookie[2];
+
+	/*
+	 * L0 timer fast-path (svm_nested_timer.c). L2's DELAY() reads the
+	 * i8254 (and, once the timecounter is up, the ACPI PM timer) in a
+	 * tight loop; reflecting every read to L1's vatpit made boot ~1000x
+	 * slow. L0 snoops the i8254 programming (still reflected to L1) and
+	 * answers the latch+read directly from the host TSC.
+	 */
+	struct svm_nested_pit {
+		uint64_t tsc_base;	/* host TSC when this counter (re)loaded */
+		uint16_t max_count;	/* programmed initial count (0 => 65536) */
+		uint16_t latch;		/* value captured by a latch command */
+		uint8_t	 access;	/* 1=lo, 2=hi, 3=lo/hi */
+		uint8_t	 wr_phase;	/* lo/hi phase while programming count */
+		uint8_t	 rd_phase;	/* lo/hi phase while reading a latch */
+		bool	 latched;	/* a latch command is pending */
+		bool	 known;		/* counter has been programmed */
+	} pit[3];
+	uint64_t	acpi_tsc_base;	/* host TSC at first ACPI-PM-timer read */
+	bool		acpi_known;
 };
 
 /*
@@ -115,6 +135,8 @@ void	 svm_nested_build_msrpm(struct svm_softc *sc, struct svm_vcpu *vcpu);
 struct svm_nested *svm_nested_lookup(struct svm_vcpu *vcpu);
 void	 svm_nested_release_vmcb12(struct svm_vcpu *vcpu);
 bool	 svm_nested_in_l2(struct svm_vcpu *vcpu);
+bool	 svm_nested_timer_fastpath(struct svm_vcpu *vcpu, uint64_t exitinfo1,
+	    uint64_t exitinfo2);
 
 /*
  * Force a TLB flush before the next VMRUN (L1 and L2 share L0's ASID).
