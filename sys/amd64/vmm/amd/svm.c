@@ -31,6 +31,7 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/sbuf.h>
 #include <sys/smp.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
@@ -186,6 +187,35 @@ SYSCTL_NODE(_hw_vmm, OID_AUTO, svm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
 SYSCTL_DECL(_hw_vmm_nested);
 SYSCTL_NODE(_hw_vmm, OID_AUTO, nested, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     "Nested virtualization preflight status");
+uint64_t svm_l2_inj_total;
+uint64_t svm_l2_inj_vec[256];
+uint64_t svm_l2_vmruns, svm_l2_vintr_want, svm_l2_notintr;
+static int
+svm_l2_inj_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct sbuf sb;
+	int i, error;
+	sbuf_new_for_sysctl(&sb, NULL, 256, req);
+	sbuf_printf(&sb, "total=%lu vmruns=%lu vintr_want=%lu notintr=%lu\n",
+	    (unsigned long)svm_l2_inj_total, (unsigned long)svm_l2_vmruns,
+	    (unsigned long)svm_l2_vintr_want, (unsigned long)svm_l2_notintr);
+	for (i = 0; i < 256; i++)
+		if (svm_l2_inj_vec[i])
+			sbuf_printf(&sb, "vec 0x%02x = %lu\n", i,
+			    (unsigned long)svm_l2_inj_vec[i]);
+	error = sbuf_finish(&sb);
+	sbuf_delete(&sb);
+	return (error);
+}
+SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, svm_l2inj,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
+    svm_l2_inj_sysctl, "A", "nested SVM L2 injected-vector histogram");
+
+int svm_nested_timer_fastpath_enable = 1;
+SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm_timer_fastpath, CTLFLAG_RWTUN,
+    &svm_nested_timer_fastpath_enable, 0,
+    "L0 fast-path for L2 i8254/ACPI timer port reads (1=on)");
+
 SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm, CTLFLAG_RD,
     &svm_nested_status, 0,
     "SVM nested virtualization preflight status (0=unsupported, 1=L0 conflict, 2=ready)");
@@ -1513,7 +1543,8 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 	 * tens of minutes (FreeBSD's slow LAPIC calibration DELAYs a full
 	 * simulated second through the i8254).
 	 */
-	if (svm_nested_active(svm_sc) && svm_nested_in_l2(vcpu) &&
+	if (svm_nested_timer_fastpath_enable &&
+	    svm_nested_active(svm_sc) && svm_nested_in_l2(vcpu) &&
 	    code == VMCB_EXIT_IO &&
 	    svm_nested_timer_fastpath(vcpu, info1, info2))
 		return (1);		/* handled inline; resume L2 */
