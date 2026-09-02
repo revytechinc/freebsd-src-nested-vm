@@ -279,6 +279,15 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	ctrl->intercept[VMCB_CTRL2_INTCPT] |= VMCB_INTCPT_VMRUN |
 	    VMCB_INTCPT_VMLOAD | VMCB_INTCPT_VMSAVE | VMCB_INTCPT_STGI |
 	    VMCB_INTCPT_CLGI | VMCB_INTCPT_SKINIT;
+	/*
+	 * Do not reflect L2's PAUSE spins up to L1. Both VMCB01 and L1's
+	 * VMCB12 enable PAUSE-exiting, but reflecting every PAUSE an L2 idle
+	 * loop (sched_ule_idletd) executes -- observed ~740k during a single
+	 * mount-root wait -- storms L1 and starves the window in which L1
+	 * would inject L2's LAPIC timer, wedging the boot. Mirror the Intel
+	 * PROCBASED_PAUSE_EXITING clear in vmx_nested_entry.c.
+	 */
+	ctrl->intercept[VMCB_CTRL1_INTCPT] &= ~VMCB_INTCPT_PAUSE;
 	/* Bring-up aid: see L2's page faults (re-injected by L0). */
 	if (svm_nested_debug)
 		ctrl->intercept[VMCB_EXC_INTCPT] |= 1u << IDT_PF;
