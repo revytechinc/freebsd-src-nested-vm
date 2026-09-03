@@ -582,8 +582,16 @@ vmx_nested_exit_vmxon(struct vmx_vcpu *vcpu)
 		vm_inject_ud(vcpu->vcpu);
 		return (0);
 	}
-	cr4 = vmx_nested_vmcs_read(vcpu, VMCS_CR4_SHADOW);
-	cr0 = vmx_nested_vmcs_read(vcpu, VMCS_CR0_SHADOW);
+	/*
+	 * Check VMXON legality against the guest's ACTUAL CR0/CR4, not the
+	 * read shadow. For a nested (L2) guest, build_vmcs02() seeds vmcs02's
+	 * GUEST_CR4 from vmcs12.GUEST_CR4 (which holds CR4.VMXE that L2 set),
+	 * but the CR4/CR0 read-shadow fields are not updated by L2's masked
+	 * CR4.VMXE write -- so reading the shadow saw no VMXE and injected a
+	 * spurious #UD, blocking an L2 guest from itself hosting an L3 guest.
+	 */
+	cr4 = vmx_nested_vmcs_read(vcpu, VMCS_GUEST_CR4);
+	cr0 = vmx_nested_vmcs_read(vcpu, VMCS_GUEST_CR0);
 	if ((cr4 & CR4_VMXE) == 0) {
 		vm_inject_ud(vcpu->vcpu);
 		return (0);
