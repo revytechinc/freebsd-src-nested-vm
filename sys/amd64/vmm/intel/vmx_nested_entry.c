@@ -25,7 +25,7 @@
  *     host). A fault L1's EPT cannot resolve is reflected to L1 as an
  *     EPT violation of its guest.
  *
- * This whole path is gated behind hw.vmm.nested.vmx_l2 (default off);
+ * This whole path is gated behind hw.vmm.nested.vmx_l2 (default on; a kill-switch);
  * with the gate off VMLAUNCH/VMRESUME report an architectural VM-entry
  * failure to L1 (see vmx_nested_vmlaunch.c) and none of this runs.
  *
@@ -68,10 +68,12 @@
 static MALLOC_DEFINE(M_VMX_NESTED, "vmx_nested", "nested VMX L2 state");
 
 SYSCTL_DECL(_hw_vmm_nested);
-int vmx_nested_l2_enable;
+int vmx_nested_l2_enable = 1;
 SYSCTL_INT(_hw_vmm_nested, OID_AUTO, vmx_l2, CTLFLAG_RWTUN,
-    &vmx_nested_l2_enable, 0,
-    "Enable experimental nested VMX L2 execution (Intel; development only)");
+    &vmx_nested_l2_enable, 1,
+    "Run nested VMX L2 guests for real on Intel (default on; set 0 to fall back "
+    "to the synthetic entry-failure path). Still gated by hw.vmm.nested.enable "
+    "and per-VM -N.");
 
 /* --- diagnostic counters for the L2 interrupt-delivery investigation --- */
 uint64_t vmx_l2_exit_hist[128];
