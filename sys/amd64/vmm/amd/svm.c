@@ -137,46 +137,15 @@ svm_nested_active(struct svm_softc *svm_sc)
 		return (false);
 	if (svm_sc->vm == NULL || svm_sc->vm->nested_enabled == false)
 		return (false);
-	if (vm_guest != VM_GUEST_NO) {
-		const char *vm_guest_str;
-
-		switch (vm_guest) {
-		case VM_GUEST_VM:
-			vm_guest_str = "generic";
-			break;
-		case VM_GUEST_XEN:
-			vm_guest_str = "xen";
-			break;
-		case VM_GUEST_HV:
-			vm_guest_str = "hv";
-			break;
-		case VM_GUEST_VMWARE:
-			vm_guest_str = "vmware";
-			break;
-		case VM_GUEST_KVM:
-			vm_guest_str = "kvm";
-			break;
-		case VM_GUEST_BHYVE:
-			vm_guest_str = "bhyve";
-			break;
-		case VM_GUEST_VBOX:
-			vm_guest_str = "vbox";
-			break;
-		case VM_GUEST_PARALLELS:
-			vm_guest_str = "parallels";
-			break;
-		case VM_GUEST_NVMM:
-			vm_guest_str = "nvmm";
-			break;
-		default:
-			vm_guest_str = "unknown";
-			break;
-		}
-		if (atomic_cmpset_int(&svm_nested_l0_warned, 0, 1))
-			printf("SVM: refusing nested-virt - L0 hypervisor already present (%s)\n",
-			    vm_guest_str);
-		return (false);
-	}
+	/*
+	 * Running inside another hypervisor is fine: recursive/deep nesting
+	 * (this VM is itself a nested guest that hosts a deeper guest) is
+	 * supported as long as the CPU features are exposed. Note it once.
+	 */
+	if (vm_guest != VM_GUEST_NO &&
+	    atomic_cmpset_int(&svm_nested_l0_warned, 0, 1))
+		printf("SVM: nested-virt active inside a guest "
+		    "(recursive/deep nesting)\n");
 	return (true);
 }
 
@@ -401,7 +370,13 @@ svm_modinit(int ipinum)
 	if (error)
 		return (error);
 
-	svm_nested_status = vm_guest == VM_GUEST_NO ? 2 : 1;
+	/*
+	 * Nested-SVM is available whenever the CPU exposes SVM + the required
+	 * features (checked above). Do NOT cap it to bare metal: recursive/deep
+	 * nesting (L2 hosting L3, ...) requires a guest with SVM exposed to it to
+	 * report full capability so it can in turn enable nested-virt.
+	 */
+	svm_nested_status = 2;
 
 	vmcb_clean &= VMCB_CACHE_DEFAULT;
 
