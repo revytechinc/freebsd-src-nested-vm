@@ -97,6 +97,7 @@ SUBDIR+= gdb
 
 CFLAGS+=-I${.CURDIR}		\
 	-I${.CURDIR}/../../contrib/lib9p \
+	-I${SRCTOP}/lib/libvmmapi \
 	-I${SRCTOP}/sys
 
 LIBADD+= vmmapi md nv uvmem pthread z util sbuf cam 9p

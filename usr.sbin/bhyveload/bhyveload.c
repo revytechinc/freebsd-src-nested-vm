@@ -736,7 +736,7 @@ usage(void)
 {
 
 	fprintf(stderr,
-	    "usage: %s [-S][-c <console-device>] [-d <disk-path>] [-e <name=value>]\n"
+	    "usage: %s [-NS][-c <console-device>] [-d <disk-path>] [-e <name=value>]\n"
 	    "       %*s [-h <host-path>] [-m memsize[K|k|M|m|G|g|T|t]] <vmname>\n",
 	    progname,
 	    (int)strlen(progname), "");
@@ -790,7 +790,7 @@ main(int argc, char** argv)
 {
 	void (*func)(struct loader_callbacks *, void *, int, int);
 	uint64_t mem_size;
-	int bootfd, opt, error, memflags, need_reinit;
+	int bootfd, opt, error, memflags, need_reinit, openflags;
 
 	bootfd = -1;
 	progname = basename(argv[0]);
@@ -801,7 +801,8 @@ main(int argc, char** argv)
 	consin_fd = STDIN_FILENO;
 	consout_fd = STDOUT_FILENO;
 
-	while ((opt = getopt(argc, argv, "CSc:d:e:h:l:m:")) != -1) {
+	openflags = VMMAPI_OPEN_CREATE;
+	while ((opt = getopt(argc, argv, "CNSc:d:e:h:l:m:")) != -1) {
 		switch (opt) {
 		case 'c':
 			error = altcons_open(optarg);
@@ -845,6 +846,15 @@ main(int argc, char** argv)
 		case 'S':
 			memflags |= VM_MEM_F_WIRED;
 			break;
+		case 'N':
+			/*
+			 * Create the VM with nested virtualization enabled.
+			 * The flag can only be given at creation time, and
+			 * bhyveload is what creates the VM, so bhyve -N alone
+			 * is not enough for a bhyveload-booted guest.
+			 */
+			openflags |= VMMAPI_OPEN_CREATE_NESTED;
+			break;
 		case '?':
 			usage();
 		}
@@ -858,17 +868,24 @@ main(int argc, char** argv)
 
 	vmname = argv[0];
 
+	/*
+	 * Reuse an existing VM (it will be reinitialized below), otherwise
+	 * create it with the requested creation flags.
+	 */
 	need_reinit = 0;
-	error = vm_create(vmname);
-	if (error) {
-		if (errno != EEXIST)
-			err(1, "vm_create");
-		need_reinit = 1;
-	}
-
 	ctx = vm_open(vmname);
-	if (ctx == NULL)
-		err(1, "vm_open");
+	if (ctx != NULL) {
+		need_reinit = 1;
+		if ((openflags & VMMAPI_OPEN_CREATE_NESTED) != 0)
+			warnx("%s already exists; -N only applies when the VM "
+			    "is created", vmname);
+	} else {
+		if (errno != ENOENT)
+			err(1, "vm_open");
+		ctx = vm_openf(vmname, openflags);
+		if (ctx == NULL)
+			err(1, "vm_create");
+	}
 
 	/*
 	 * If we weren't given an explicit loader to use, we need to support the

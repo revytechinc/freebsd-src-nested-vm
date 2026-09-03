@@ -38,6 +38,7 @@ struct vcpu {
 	int		vcpuid;		/* (o) */
 	int		hostcpu;	/* (o) vcpu's host cpu */
 	int		reqidle;	/* (i) request vcpu to idle */
+	bool		nested_host;	/* (i) vcpu has hosted a nested (L2) guest */
 	struct vm	*vm;		/* (o) */
 	void		*cookie;	/* (i) cpu-specific data */
 	void		*stats;		/* (a,i) statistics */
@@ -135,6 +136,7 @@ struct vm {
 
 	bool		dying;			/* (o) is dying */
 	int		suspend;		/* (i) stop VM execution */
+	bool		nested_enabled;		/* (o) nested-virt enabled for this VM */
 
 	volatile cpuset_t active_cpus;		/* (i) active vcpus */
 	volatile cpuset_t debug_cpus;		/* (i) vcpus stopped for debug */

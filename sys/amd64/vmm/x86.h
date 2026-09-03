@@ -51,6 +51,11 @@
 #define CPUID_8000_0006	(0x80000006)
 #define CPUID_8000_0007	(0x80000007)
 #define CPUID_8000_0008	(0x80000008)
+#define CPUID_8000_000A	(0x8000000A)
+
+/* CPUID_8000_000A EDX: SVM feature bits emulated for nested guests. */
+#define	CPUID_SVM_FEAT_NP	(1 << 0)
+#define	CPUID_SVM_FEAT_NRIPS	(1 << 3)
 #define CPUID_8000_001D	(0x8000001D)
 #define CPUID_8000_001E	(0x8000001E)
 
