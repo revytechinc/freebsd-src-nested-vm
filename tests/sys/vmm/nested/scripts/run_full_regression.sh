@@ -85,5 +85,19 @@ else
 	status=1
 fi
 
+echo "=== nested-off (opt-in) negative ==="
+# Nesting must be strictly opt-in: a guest booted without -N must get no
+# virtualization. This boots a real L1 (needs L1_IMAGE) and asserts it.
+neg_off="$(dirname "$0")/../negative/nested_off.sh"
+if [ -n "${L1_IMAGE:-}" ] && [ -r "${L1_IMAGE:-}" ] && [ -r "$neg_off" ]; then
+	if sh "$neg_off"; then
+		echo "PASS: nested is off in an un-opted-in guest"
+	else
+		echo "FAIL: nested-off negative test"; status=1
+	fi
+else
+	echo "SKIP: nested_off (set L1_IMAGE to run the guest-level opt-in check)"
+fi
+
 echo "=== SUMMARY exit=$status ==="
 exit "$status"
