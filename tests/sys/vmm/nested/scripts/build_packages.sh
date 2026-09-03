@@ -87,10 +87,25 @@ make -C "${SRCTOP}/lib/libvmmapi" install DESTDIR="$STAGE/bhyve"
 make -C "${SRCTOP}/usr.sbin/bhyve" install DESTDIR="$STAGE/bhyve"
 make -C "${SRCTOP}/usr.sbin/bhyvectl" install DESTDIR="$STAGE/bhyve"
 
+# bhyve links libprivate9p.so.1 (lib9p), which is newer than any published stock
+# base snapshot -- bundle it so the package installs standalone on a stock
+# FreeBSD 16. libuvmem.so.1 IS in stock base (FreeBSD-runtime), so leave that one.
+make -C "${SRCTOP}/lib/lib9p" -j"$JOBS" all
+# Copy just the runtime shared object (not headers/man, which would need
+# staging dirs and aren't part of a base package) into the bhyve stage.
+_l9p_obj=$(make -C "${SRCTOP}/lib/lib9p" -V .OBJDIR)
+mkdir -p "$STAGE/bhyve/usr/lib"
+cp -a "${_l9p_obj}/libprivate9p.so.1" "$STAGE/bhyve/usr/lib/libprivate9p.so.1"
+# Drop bhyve-slirp-helper: on a stock system it is owned by the un-removable
+# FreeBSD-utilities base package, so bundling it makes `pkg add` conflict.
+rm -f "$STAGE/bhyve/usr/libexec/bhyve-slirp-helper" \
+      "$STAGE/bhyve/usr/lib/debug/usr/libexec/bhyve-slirp-helper.debug"
+
 write_manifest() {
 	_pkg=$1
 	_comment=$2
 	_m=$3
+	_shlibs=${4:-}
 	_name="${PKG_NAME_PREFIX}-${_pkg}"
 	cat > "$_m" <<MAN
 name: ${_name}
@@ -106,6 +121,9 @@ prefix: /
 licenselogic: single
 licenses: [BSD2CLAUSE]
 MAN
+	if [ -n "$_shlibs" ]; then
+		printf 'shlibs_provided: [%s]\n' "$_shlibs" >> "$_m"
+	fi
 }
 
 # Base packages only. Maps to FreeBSD-kernel-generic / FreeBSD-bhyve.
@@ -114,10 +132,11 @@ pkg_from_stage() {
 	_pkg=$1
 	_comment=$2
 	_root=$3
+	_shlibs=${4:-}
 	_name="${PKG_NAME_PREFIX}-${_pkg}"
 	_man=$(mktemp /tmp/cbsd-manifest.XXXXXX)
 	_plist=$(mktemp /tmp/cbsd-plist.XXXXXX)
-	write_manifest "$_pkg" "$_comment" "$_man"
+	write_manifest "$_pkg" "$_comment" "$_man" "$_shlibs"
 	(cd "$_root" && find . \( -type f -o -type l \) | sed 's|^\./||' | sort) > "$_plist"
 	[ -s "$_plist" ] || die "empty plist for $_name under $_root"
 	pkg create -M "$_man" -p "$_plist" -r "$_root" -o "$OUTDIR"
@@ -131,10 +150,18 @@ pkg_from_stage kernel-generic \
 
 pkg_from_stage bhyve \
 	"CloudBSD bhyve/libvmmapi (nested create -N)" \
-	"$STAGE/bhyve"
+	"$STAGE/bhyve" \
+	"libprivate9p.so.1"
 
 # pkgbase: ${REPODIR}/${ABI}/latest -> version directory (Makefile.inc1).
 ln -sfn "$VERSION" "${PKGDIR}/${ABI}/${CHANNEL}"
+
+# Stable, version-independent package filenames so published install URLs do not
+# change every build (e.g. .../latest/CloudBSD-bhyve.pkg).
+for _p in "${PKG_NAME_PREFIX}-kernel-generic" "${PKG_NAME_PREFIX}-bhyve"; do
+	_f=$(cd "$OUTDIR" && ls "${_p}"-*.pkg 2>/dev/null | head -1)
+	[ -n "$_f" ] && ln -sfn "$_f" "${OUTDIR}/${_p}.pkg"
+done
 
 log "packages:"
 ls -lh "$OUTDIR"/"${PKG_NAME_PREFIX}"-*.pkg
