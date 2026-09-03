@@ -798,6 +798,15 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 		 * VM_EXITCODE_NESTED (see vmx_nested_op_l2_ept()).
 		 */
 		vmexit->exitcode = VM_EXITCODE_NESTED;
+		/*
+		 * An EPT violation is re-executed after the fault is fixed, not
+		 * skipped, so the faulting instruction must not be advanced.
+		 * vmx_run()'s exit-collection already stamped inst_length with
+		 * the faulting instruction's length; clear it, because
+		 * vm_handle_nested() KASSERTs inst_length == 0 -- otherwise any
+		 * L2 taking an EPT fault panics L0 (an L2->L0 DoS).
+		 */
+		vmexit->inst_length = 0;
 		vmexit->u.nested.op = VM_NESTED_OP_L2_EPT;
 		vmexit->u.nested.info1 = vmcs_read(VMCS_GUEST_PHYSICAL_ADDRESS);
 		vmexit->u.nested.info2 = qual;
