@@ -1,0 +1,51 @@
+# Post-patch performance baseline (AMD analog of freedev003 baseline)
+# Captured: 2026-08-12 00:41:58 UTC on vm16-00
+# Host:    AMD Ryzen AI 9 HX 370 (Zen 5, Family 0x1A Model 0x24)
+# Kernel:  FreeBSD 16.0-CURRENT 6caa0949fcc5 GENERIC amd64 (nested-src build)
+# Tool:    sysbench 1.0.20 --cpu-max-prime=20000
+# Note:    This is the post-patch analog of the freedev003 (Intel Tiger
+#          Lake i9-11950H) baseline.  The wave-3 / wave-5 patches should
+#          not affect non-nested paths, so this baseline represents the
+#          post-patch expected floor for non-nested guests on the AMD
+#          Zen 5 host.  The freedev003 baseline measures execution time
+#          (smaller is better, ~2.1s); this baseline measures throughput
+#          (events/s, larger is better).  Both encode the same physical
+#          work (--cpu-max-prime=20000) so the inverse relationship
+#          (CPU work / events-per-second) holds across hosts.
+#
+# Metric note: "events_per_second" is sysbench's primary throughput
+# metric; "total events" is the integral over the --time=10s run.  The
+# default --time=10 is constant across runs so the wall-clock line is
+# always ~10.000s and carries no signal.
+
+## Single-threaded (--threads=1)
+run 1: 7775043.68 events/s
+run 2: 8001843.95 events/s
+run 3: 7746902.21 events/s
+mean:  7841263.28 events/s  stdev: 139776.96 events/s
+
+## Multi-threaded (--threads=8)
+run 1: 39363688.45 events/s
+run 2: 40166560.46 events/s
+run 3: 39670691.10 events/s
+mean:  39733646.67 events/s  stdev: 405121.49 events/s
+
+## Environment
+CPU:      AMD Ryzen AI 9 HX 370 (Zen 5, Family 0x1A, Model 0x24)
+ncores:   16 logical
+sysbench: 1.0.20
+
+## Cross-host comparison note
+# The freedev003 baseline (tests/sys/vmm/nested/perf/baseline.txt) was
+# captured on an Intel Tiger Lake i9-11950H with mean=2.1133s (single-
+# thread) and mean=16.0251s (8-thread) of CPU work.  Converting this
+# baseline's throughput into equivalent CPU-work seconds via
+# 1/events_per_second * (--time=10s * --threads) yields:
+#   single-thread:  ~10 / (7841263.28 / 1)         ~ 1.275e-6 s/event
+#                   (not directly comparable to freedev003's CPU-work
+#                    metric because freedev003 measures the time the
+#                    CPU spends actively computing the prime, while
+#                    this metric measures how many prime-completions
+#                    land per second on the wall clock).
+# Use the two baselines as qualitative cross-vendor sanity checks,
+# not a strict numeric regression gate.

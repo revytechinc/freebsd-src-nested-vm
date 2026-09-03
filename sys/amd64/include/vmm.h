@@ -198,6 +198,16 @@ DECLARE_VMMOPS_FUNC(int, vcpu_snapshot, (void *vcpui,
     struct vm_snapshot_meta *meta));
 DECLARE_VMMOPS_FUNC(int, restore_tsc, (void *vcpui, uint64_t now));
 
+/* vm_exit.u.nested.op */
+#define	VM_NESTED_OP_VMRUN	1	/* AMD: enter L2, info1 = L1 next RIP */
+#define	VM_NESTED_OP_VMLOAD	2	/* AMD: info1 = L1 next RIP */
+#define	VM_NESTED_OP_VMSAVE	3	/* AMD: info1 = L1 next RIP */
+#define	VM_NESTED_OP_L2EXIT	4	/* AMD: exit taken in L2 (code/info1/info2) */
+#define	VM_NESTED_OP_VMXINSN	5	/* Intel: VMX instruction, code = reason */
+#define	VM_NESTED_OP_L2_EPT	6	/* Intel: fill shadow EPT02 (info1=gpa, info2=qual) */
+
+typedef int	(*vmmops_nested_t)(void *vcpui, struct vm_exit *vme);
+
 struct vmm_ops {
 	vmmops_modinit_t	modinit;	/* module wide initialization */
 	vmmops_modcleanup_t	modcleanup;
@@ -223,6 +233,14 @@ struct vmm_ops {
 	/* checkpoint operations */
 	vmmops_vcpu_snapshot_t	vcpu_snapshot;
 	vmmops_restore_tsc_t	restore_tsc;
+
+	/*
+	 * Nested virtualization: complete a VM_EXITCODE_NESTED exit. Runs
+	 * in vm_run() context (no critical section), so it may hold guest
+	 * pages and take sleep locks. On success it sets vme->rip to the
+	 * address the vcpu resumes at.
+	 */
+	vmmops_nested_t		nested;
 };
 
 extern const struct vmm_ops vmm_ops_intel;
@@ -248,6 +266,7 @@ int vm_inject_extint(struct vcpu *vcpu);
 int vm_extint_pending(struct vcpu *vcpu);
 void vm_extint_clear(struct vcpu *vcpu);
 struct vlapic *vm_lapic(struct vcpu *vcpu);
+void	vcpu_set_nested_host(struct vcpu *vcpu);
 struct vioapic *vm_ioapic(struct vm *vm);
 struct vhpet *vm_hpet(struct vm *vm);
 int vm_get_capability(struct vcpu *vcpu, int type, int *val);
@@ -533,6 +552,7 @@ enum vm_exitcode {
 	VM_EXITCODE_BPT,
 	VM_EXITCODE_IPI,
 	VM_EXITCODE_DB,
+	VM_EXITCODE_NESTED,	/* nested-virt work deferred to vm_run() */
 	VM_EXITCODE_MAX
 };
 
@@ -613,6 +633,17 @@ struct vm_exit {
 			int		inst_type;
 			int		inst_error;
 		} vmx;
+		/*
+		 * Nested virtualization: work that cannot be done in the
+		 * vendor exit handler (inside a critical section) and is
+		 * completed by vmm_ops.nested from vm_run().
+		 */
+		struct {
+			int		op;
+			uint64_t	code;
+			uint64_t	info1;
+			uint64_t	info2;
+		} nested;
 		/*
 		 * SVM specific payload.
 		 */

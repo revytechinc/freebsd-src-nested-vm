@@ -1,0 +1,44 @@
+# P6 pre-patch performance baseline
+# Captured: 2026-08-06 20:12:53 UTC on freedev003.cloudbsd.org
+# Host:    11th Gen Intel(R) Core(TM) i9-11950H @ 2.60GHz (16 cores, 128GB)
+# Kernel:  FreeBSD 16.0-CURRENT main-n287957-4ebcdb8dd9a7 GENERIC amd64
+# Tool:    sysbench 1.0.20 --cpu-max-prime=20000
+# Note:    baseline is host-level (no L1 bhyve layer); the wave-3 patches
+#          should not affect non-nested paths, so this baseline also
+#          represents the post-patch expected floor for non-nested guests.
+#
+# Metric note: "total time" below is the TOTAL CPU WORK time (sum of the
+# per-thread "execution time" reported in sysbench's "Threads fairness"
+# section), NOT the wall-clock "total time" line.  sysbench's CPU test
+# defaults to --time=10, so the wall-clock line is always ~10.000s and
+# carries no signal.  For single-thread, per-thread exec time IS the
+# total CPU work.  For multi-thread, total CPU work = threads * per-thread
+# exec time, which equals the "sum" row in the Latency (ms) section.
+
+## Single-threaded (--threads=1)
+run 1: 2.1158s
+run 2: 2.1124s
+run 3: 2.1118s
+mean:  2.1133s  stdev: 0.0018s
+
+## Multi-threaded (--threads=8)
+run 1: 16.0136s
+run 2: 15.9536s
+run 3: 16.1080s
+mean:  16.0251s  stdev: 0.0636s
+
+## Environment
+CPU:      11th Gen Intel(R) Core(TM) i9-11950H @ 2.60GHz
+ncores:   16
+memory:   128GB  (hw.realmem=137434759168 bytes; the task header said 32GB, but the host ships 128GB)
+sysbench: 1.0.20
+
+## Raw sysbench logs
+#   /tmp/p6-st-1.log    /tmp/p6-st-2.log    /tmp/p6-st-3.log
+#   /tmp/p6-mt-1.log    /tmp/p6-mt-2.log    /tmp/p6-mt-3.log
+
+## Reference (wall-clock "total time" line, for completeness)
+# All six runs landed at ~10.000s wall-clock because sysbench CPU defaults
+# to --time=10.  This is constant across runs and across --threads values,
+# so it carries no performance signal.  The CPU-work metric above is the
+# meaningful baseline.

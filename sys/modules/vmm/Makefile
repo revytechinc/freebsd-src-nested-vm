@@ -18,6 +18,7 @@ SRCS+=	vmm.c			\
 	vmm_dev_machdep.c	\
 	vmm_instruction_emul.c	\
 	vmm_mem.c		\
+	vmm_nested.c		\
 	vmm_stat.c		\
 	vmm_vm.c
 
@@ -110,6 +111,17 @@ SRCS+=	iommu.c		\
 SRCS+=	ept.c		\
 	vmcs.c		\
 	vmx_msr.c	\
+	vmx_nested.c		\
+	vmx_nested_vmptrld.c	\
+	vmx_nested_vmread.c	\
+	vmx_nested_layout.c	\
+	vmx_nested_vmclear.c	\
+	vmx_nested_vmlaunch.c	\
+	vmx_nested_vmcall.c	\
+	vmx_nested_insn.c	\
+	vmx_nested_entry.c	\
+	vmx_nested_ept12.c	\
+	vmx_nested_invept.c	\
 	vmx_support.S	\
 	vmx.c		\
 	vtd.c
@@ -121,6 +133,12 @@ SRCS+=	vmcb.c		\
 	ivhd_if.c	\
 	ivhd_if.h	\
 	svm.c		\
+	svm_nested.c	\
+	svm_nested_stubs.c	\
+	svm_nested_exit.c	\
+	svm_nested_npt.c	\
+	svm_nested_intr.c	\
+	svm_nested_timer.c	\
 	svm_support.S	\
 	npt.c		\
 	ivrs_drv.c	\
