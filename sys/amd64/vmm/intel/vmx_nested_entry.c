@@ -80,6 +80,7 @@ uint64_t vmx_l2_injects;	/* entries that carried a valid ENTRY_INTR_INFO */
 uint64_t vmx_l2_injvec[256];	/* histogram of injected vectors */
 uint64_t vmx_l2_swallow;	/* undelivered injections requeued via IDT-vectoring */
 uint64_t vmx_l2_swallow_vec[256]; /* histogram of requeued (swallowed) vectors */
+uint64_t vmx_l2_idtv_reinject;	/* in-flight L2 events recovered on L2 resume */
 static int
 vmx_l2_stats_sysctl(SYSCTL_HANDLER_ARGS)
 {
@@ -87,9 +88,9 @@ vmx_l2_stats_sysctl(SYSCTL_HANDLER_ARGS)
 	int i, error;
 
 	sbuf_new_for_sysctl(&sb, NULL, 512, req);
-	sbuf_printf(&sb, "entries=%lu injects=%lu swallow=%lu\n",
+	sbuf_printf(&sb, "entries=%lu injects=%lu swallow=%lu idtv_reinject=%lu\n",
 	    (unsigned long)vmx_l2_entries, (unsigned long)vmx_l2_injects,
-	    (unsigned long)vmx_l2_swallow);
+	    (unsigned long)vmx_l2_swallow, (unsigned long)vmx_l2_idtv_reinject);
 	for (i = 0; i < 128; i++)
 		if (vmx_l2_exit_hist[i] != 0)
 			sbuf_printf(&sb, "reason %d = %lu\n", i,
@@ -709,6 +710,43 @@ vmx_nested_reflect_copy(struct vmx_vcpu *vcpu, uint32_t reason, uint64_t qual,
 }
 
 /*
+ * An L2 VM-exit that L0 handles and then RESUMES (rather than reflecting to L1)
+ * may have interrupted an in-progress event delivery. In that case hardware
+ * records the event in VMCS_IDT_VECTORING_INFO and has already cleared
+ * VMCS_ENTRY_INTR_INFO. If we resume L2 without action the event is silently
+ * dropped -- and for a maskable interrupt that is fatal: L1's vlapic moved the
+ * vector IRR->ISR when it queued it (raising PPR), but L2 never ran the handler
+ * and so never issues the EOI. The vector stays in-service forever, PPR stays
+ * raised, and every later same-or-lower-priority interrupt (notably the LAPIC
+ * timer, vector 0xef) is blocked: L2 wedges in a HLT idle-wait that never wakes.
+ *
+ * Re-inject the interrupted event through VMCS_ENTRY_INTR_INFO so delivery
+ * completes on the next VM entry -- exactly what vmx_exit_process() does for a
+ * non-nested guest via vm_exit_intinfo()/vm_entry_intinfo(). vmcs02 must be the
+ * current VMCS. Intel nested-only; no effect on the non-nested or AMD paths.
+ */
+static void
+vmx_nested_carry_idtv(struct vmx_vcpu *vcpu)
+{
+	uint32_t idtv, entry;
+
+	idtv = (uint32_t)vmcs_read(VMCS_IDT_VECTORING_INFO);
+	if ((idtv & VMCS_IDT_VEC_VALID) == 0)
+		return;
+	entry = (uint32_t)vmcs_read(VMCS_ENTRY_INTR_INFO);
+	if ((entry & VMCS_INTR_VALID) != 0)
+		return;			/* an event is already queued for entry */
+	idtv &= ~(1U << 12);		/* clear the reserved/undefined bit */
+	vmwrite(VMCS_ENTRY_INTR_INFO, idtv);
+	if (idtv & VMCS_IDT_VEC_ERRCODE_VALID)
+		vmwrite(VMCS_ENTRY_EXCEPTION_ERROR,
+		    vmcs_read(VMCS_IDT_VECTORING_ERROR));
+	if ((idtv & VMCS_INTR_T_MASK) == VMCS_INTR_T_SWINTR)
+		vmwrite(VMCS_ENTRY_INST_LENGTH, vmexit_instruction_length());
+	vmx_l2_idtv_reinject++;
+}
+
+/*
  * Decide what to do with an L2 exit taken on vmcs02 (current VMCS).
  * Returns 1 to resume L2, 0 to reflect to L1 (done here) and resume L1.
  */
@@ -782,6 +820,7 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 		if ((intr_info & VMCS_INTR_VALID) != 0 &&
 		    (intr_info & VMCS_INTR_T_MASK) == VMCS_INTR_T_HWINTR)
 			vmx_trigger_hostintr(intr_info & 0xff);
+		vmx_nested_carry_idtv(vcpu);	/* preserve in-flight L2 event */
 		return (1);
 	}
 	case EXIT_REASON_NMI_WINDOW:
@@ -846,6 +885,18 @@ vmx_nested_op_l2_ept(struct vmx_vcpu *vcpu, uint64_t gpa, uint64_t qual)
 			    qual);
 			vmcs12_write_field(vcpu->nvmcs12,
 			    VMCS_GUEST_PHYSICAL_ADDRESS, gpa);
+		} else {
+			/*
+			 * Fault fixed: resume L2. If the faulting access happened
+			 * while L2 was delivering an event, hardware left it in
+			 * VMCS_IDT_VECTORING_INFO and cleared ENTRY_INTR_INFO;
+			 * re-inject it so delivery completes (see
+			 * vmx_nested_carry_idtv), else the vector's in-service bit
+			 * in L1's vlapic never clears and L2 wedges.
+			 */
+			VMPTRLD(ns->vmcs02);
+			vmx_nested_carry_idtv(vcpu);
+			VMCLEAR(ns->vmcs02);
 		}
 	}
 	return (0);
