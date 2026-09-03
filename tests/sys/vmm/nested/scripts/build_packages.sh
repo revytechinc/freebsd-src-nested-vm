@@ -83,9 +83,13 @@ log "libvmmapi + bhyve"
 make -C "${SRCTOP}/lib/libvmmapi" -j"$JOBS" all
 make -C "${SRCTOP}/usr.sbin/bhyve" -j"$JOBS" all
 make -C "${SRCTOP}/usr.sbin/bhyvectl" -j"$JOBS" all
+make -C "${SRCTOP}/usr.sbin/bhyveload" -j"$JOBS" all
 make -C "${SRCTOP}/lib/libvmmapi" install DESTDIR="$STAGE/bhyve"
 make -C "${SRCTOP}/usr.sbin/bhyve" install DESTDIR="$STAGE/bhyve"
 make -C "${SRCTOP}/usr.sbin/bhyvectl" install DESTDIR="$STAGE/bhyve"
+# bhyveload -N is required to CREATE/load a nested guest (stock bhyveload has no
+# -N); ship it in the package so an installed system can actually run nested VMs.
+make -C "${SRCTOP}/usr.sbin/bhyveload" install DESTDIR="$STAGE/bhyve"
 
 # bhyve links libprivate9p.so.1 (lib9p), which is newer than any published stock
 # base snapshot -- bundle it so the package installs standalone on a stock
@@ -149,7 +153,7 @@ pkg_from_stage kernel-generic \
 	"$STAGE/kernel"
 
 pkg_from_stage bhyve \
-	"CloudBSD bhyve/libvmmapi (nested create -N)" \
+	"CloudBSD bhyve + bhyveload + bhyvectl + libvmmapi (nested -N)" \
 	"$STAGE/bhyve" \
 	"libprivate9p.so.1"
 
