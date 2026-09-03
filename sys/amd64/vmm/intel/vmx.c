@@ -765,9 +765,17 @@ vmx_modinit(int ipinum)
 		    "secondary processor-based controls\n");
 		return (error);
 	}
+	/*
+	 * Nested VMX here is entirely trap-based: a software vmcs12 copy, a
+	 * software shadow-EPT (ept02), and VMREAD/VMWRITE VM-exits.  Hardware
+	 * VMCS shadowing (PROCBASED2_VMCS_SHADOWING) is never programmed into
+	 * any VMCS, so it must NOT be required to advertise nested support.
+	 * Requiring it wrongly refused nesting on pre-Haswell parts (e.g. Ivy
+	 * Bridge) that have EPT + unrestricted-guest but no VMCS shadowing.
+	 */
 	nested_hw = vmx_set_ctlreg(MSR_VMX_PROCBASED_CTLS2,
 	    MSR_VMX_PROCBASED_CTLS2,
-	    PROCBASED2_UNRESTRICTED_GUEST | PROCBASED2_VMCS_SHADOWING,
+	    PROCBASED2_UNRESTRICTED_GUEST,
 	    0, &tmp) == 0;
 
 	/* Check support for VPID */
