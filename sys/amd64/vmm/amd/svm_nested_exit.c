@@ -280,6 +280,23 @@ svm_nested_reflect_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
 	vmcb12->ctrl.exitinfo1 = exitinfo1;
 	vmcb12->ctrl.exitinfo2 = exitinfo2;
 	vmcb12->ctrl.exitintinfo = ctrl->exitintinfo;
+	/*
+	 * Swallowed-injection recovery. If VMCB02's event-injection field is
+	 * still valid at reflect time, L0 composed the event from VMCB12 but a
+	 * physical VMRUN never delivered it (hardware clears EVENTINJ.valid on
+	 * delivery), because L0 returned to L1 via a synthesized exit first. L1's
+	 * vlapic already moved that vector IRR->ISR when it queued it, so silently
+	 * dropping the event strands the vector in L1's in-service state forever,
+	 * raising PPR and blocking every same-or-lower-priority interrupt (the
+	 * guest wedges at mount-root). Present it to L1 as an exit-during-delivery
+	 * event (EXITINTINFO shares EVENTINJ's layout) so L1's stock requeue path
+	 * re-injects it without a second IRR->ISR. Prefer a real hardware
+	 * EXITINTINFO when one is already present.
+	 */
+	if (!VMCB_EXITINTINFO_VALID(vmcb12->ctrl.exitintinfo) &&
+	    (ctrl->eventinj & VMCB_EVENTINJ_VALID) != 0) {
+		vmcb12->ctrl.exitintinfo = ctrl->eventinj;
+	}
 	vmcb12->ctrl.nrip = ctrl->nrip;
 	vmcb12->ctrl.inst_len = ctrl->inst_len;
 	memcpy(vmcb12->ctrl.inst_bytes, ctrl->inst_bytes,
