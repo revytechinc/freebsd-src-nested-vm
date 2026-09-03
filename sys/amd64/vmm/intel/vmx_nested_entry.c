@@ -537,6 +537,14 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 
 	vmx_l2_entries++;
 	ns->in_l2 = true;
+	/*
+	 * Mark this (L1) vcpu a nested host so vm_handle_hlt() bounds its idle
+	 * sleep to hz/100 instead of hz. Without it, when L2 HLTs the L1 vcpu
+	 * could sleep up to a full second before re-checking L2's pending
+	 * interrupts, stalling an idle L2 under load (e.g. it freezes on a large
+	 * cold disk read). Mirrors the AMD path (svm_nested_vmrun).
+	 */
+	vcpu_set_nested_host(vcpu->vcpu);
 	VMCLEAR(ns->vmcs02);		/* flush to memory; vmx_run() reloads it */
 	ns->vmcs02_launched = false;
 	return (0);
