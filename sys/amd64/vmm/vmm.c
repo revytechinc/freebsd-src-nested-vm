@@ -192,9 +192,15 @@ bool
 vmm_nested_supported(void)
 {
 
-	return (vm_guest == VM_GUEST_NO &&
-	    ((vmm_is_intel() && vmx_nested_status == 2) ||
-	    (vmm_is_svm() && svm_nested_status == 2)));
+	/*
+	 * Nested-virt is supported wherever the hardware capability is present
+	 * (status == 2), including inside a guest that has VMX/SVM exposed to it.
+	 * This is what lets nesting recurse past one level (L2 -> L3 -> ...).
+	 * It stays strictly opt-in: hw.vmm.nested.enable still defaults to 0 and
+	 * each nested child must be created with -N (VMMCTL_CREATE_NESTED).
+	 */
+	return ((vmm_is_intel() && vmx_nested_status == 2) ||
+	    (vmm_is_svm() && svm_nested_status == 2));
 }
 
 static int

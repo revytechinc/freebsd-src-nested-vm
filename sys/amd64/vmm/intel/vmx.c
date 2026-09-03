@@ -155,51 +155,21 @@ static int vmx_nested_l0_warned;
 static inline bool
 vmx_nested_active(struct vmx *vmx)
 {
-	const char *vm_guest_str;
 
 	if (vmm_nested_enable == 0 || vmx_nested_status == 0)
 		return (false);
 	if (vmx == NULL || vmx->vm == NULL || !vmx->vm->nested_enabled)
 		return (false);
-	if (vm_guest == VM_GUEST_NO)
-		return (true);
-
-	switch (vm_guest) {
-	case VM_GUEST_VM:
-		vm_guest_str = "generic";
-		break;
-	case VM_GUEST_XEN:
-		vm_guest_str = "xen";
-		break;
-	case VM_GUEST_HV:
-		vm_guest_str = "hv";
-		break;
-	case VM_GUEST_VMWARE:
-		vm_guest_str = "vmware";
-		break;
-	case VM_GUEST_KVM:
-		vm_guest_str = "kvm";
-		break;
-	case VM_GUEST_BHYVE:
-		vm_guest_str = "bhyve";
-		break;
-	case VM_GUEST_VBOX:
-		vm_guest_str = "vbox";
-		break;
-	case VM_GUEST_PARALLELS:
-		vm_guest_str = "parallels";
-		break;
-	case VM_GUEST_NVMM:
-		vm_guest_str = "nvmm";
-		break;
-	default:
-		vm_guest_str = "unknown";
-		break;
-	}
-	if (atomic_cmpset_int(&vmx_nested_l0_warned, 0, 1))
-		printf("VMX: refusing nested-virt - L0 hypervisor already present (%s)\n",
-		    vm_guest_str);
-	return (false);
+	/*
+	 * Recursive/deep nesting: this VM may itself be a nested guest that
+	 * hosts a deeper guest. Allow it (CPU features already gate it above);
+	 * note it once.
+	 */
+	if (vm_guest != VM_GUEST_NO &&
+	    atomic_cmpset_int(&vmx_nested_l0_warned, 0, 1))
+		printf("VMX: nested-virt active inside a guest "
+		    "(recursive/deep nesting)\n");
+	return (true);
 }
 
 static uint32_t pinbased_ctls, procbased_ctls, procbased_ctls2;
@@ -1064,7 +1034,9 @@ vmx_modinit(int ipinum)
 	smp_rendezvous(NULL, vmx_enable, NULL, NULL);
 
 	vmx_initialized = 1;
-	vmx_nested_status = nested_hw ? (vm_guest == VM_GUEST_NO ? 2 : 1) : 0;
+	/* Key off the VMX nested hardware features, not bare-metal, so a guest
+	 * with VMX exposed can itself host a nested (L3) guest. */
+	vmx_nested_status = nested_hw ? 2 : 0;
 
 	/*
 	 * Nested-VMX (T15, T18): we deliberately do NOT OR the
