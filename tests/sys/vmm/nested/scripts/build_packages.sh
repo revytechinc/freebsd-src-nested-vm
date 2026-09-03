@@ -157,6 +157,17 @@ pkg_from_stage bhyve \
 	"$STAGE/bhyve" \
 	"libprivate9p.so.1"
 
+# Generate the pkg(8) repository catalog (meta.conf + packagesite + data) in the
+# version directory so clients can `pkg update` / `pkg install` from this repo.
+# Without it the repo has only raw .pkg files and the pkg-install path
+# (install.sh) fails. Run it BEFORE the stable-alias symlinks below so the
+# packages are not double-indexed under two filenames.
+if pkg repo "$OUTDIR" >/dev/null 2>&1; then
+	log "pkg repo: catalog generated in $OUTDIR"
+else
+	log "WARNING: 'pkg repo $OUTDIR' failed -- no catalog; pkg update/install will not work"
+fi
+
 # pkgbase: ${REPODIR}/${ABI}/latest -> version directory (Makefile.inc1).
 ln -sfn "$VERSION" "${PKGDIR}/${ABI}/${CHANNEL}"
 
