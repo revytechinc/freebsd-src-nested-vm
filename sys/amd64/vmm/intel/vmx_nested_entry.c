@@ -40,6 +40,7 @@
 #include <sys/sysctl.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/sbuf.h>
 
 #include <vm/vm.h>
 #include <vm/vm_param.h>
@@ -71,6 +72,43 @@ int vmx_nested_l2_enable;
 SYSCTL_INT(_hw_vmm_nested, OID_AUTO, vmx_l2, CTLFLAG_RWTUN,
     &vmx_nested_l2_enable, 0,
     "Enable experimental nested VMX L2 execution (Intel; development only)");
+
+/* --- diagnostic counters for the L2 interrupt-delivery investigation --- */
+uint64_t vmx_l2_exit_hist[128];
+uint64_t vmx_l2_entries;	/* build_vmcs02 calls (L2 (re-)entries) */
+uint64_t vmx_l2_injects;	/* entries that carried a valid ENTRY_INTR_INFO */
+uint64_t vmx_l2_injvec[256];	/* histogram of injected vectors */
+uint64_t vmx_l2_swallow;	/* undelivered injections requeued via IDT-vectoring */
+uint64_t vmx_l2_swallow_vec[256]; /* histogram of requeued (swallowed) vectors */
+static int
+vmx_l2_stats_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct sbuf sb;
+	int i, error;
+
+	sbuf_new_for_sysctl(&sb, NULL, 512, req);
+	sbuf_printf(&sb, "entries=%lu injects=%lu swallow=%lu\n",
+	    (unsigned long)vmx_l2_entries, (unsigned long)vmx_l2_injects,
+	    (unsigned long)vmx_l2_swallow);
+	for (i = 0; i < 128; i++)
+		if (vmx_l2_exit_hist[i] != 0)
+			sbuf_printf(&sb, "reason %d = %lu\n", i,
+			    (unsigned long)vmx_l2_exit_hist[i]);
+	for (i = 0; i < 256; i++)
+		if (vmx_l2_injvec[i] != 0)
+			sbuf_printf(&sb, "vec 0x%02x = %lu\n", i,
+			    (unsigned long)vmx_l2_injvec[i]);
+	for (i = 0; i < 256; i++)
+		if (vmx_l2_swallow_vec[i] != 0)
+			sbuf_printf(&sb, "swallow vec 0x%02x = %lu\n", i,
+			    (unsigned long)vmx_l2_swallow_vec[i]);
+	error = sbuf_finish(&sb);
+	sbuf_delete(&sb);
+	return (error);
+}
+SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, l2stats,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
+    vmx_l2_stats_sysctl, "A", "L2 exit-reason histogram and inject counters");
 
 
 /* Host-state fields copied verbatim vmcs01 -> vmcs02. */
@@ -432,18 +470,18 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	 * Propagate L1's interrupt/NMI-window-exiting request from VMCS12.
 	 * L1 sets these when it has an event pending for L2 but L2 is not
 	 * currently interruptible; without the bit the window exit never
-	 * fires, vmx_nested_l2_exit() never reflects it to L1, and L1 never
-	 * gets the chance to inject -- so L2 hangs waiting for a timer or
-	 * device interrupt that is never delivered.
+	 * fires, l2_exit never reflects it to L1, and L1 never gets the
+	 * chance to inject -- so L2 spins forever (on PAUSE) waiting for a
+	 * timer/device interrupt that is never delivered.
 	 */
 	if (vmcs12_read_field(v12, VMCS_PRI_PROC_BASED_CTLS, &v12ctls) == 0)
 		val |= v12ctls & (PROCBASED_INT_WINDOW_EXITING |
 		    PROCBASED_NMI_WINDOW_EXITING);
 	/*
-	 * Do not make L2 exit on PAUSE. vmcs01 enables PAUSE-exiting for L1,
-	 * but reflecting every L2 PAUSE up to L1 turns an ordinary guest
-	 * spin-wait into a storm of L1 userspace round-trips. L2's spin loops
-	 * belong in L2; they end when the awaited interrupt is injected.
+	 * Do NOT make L2 exit on PAUSE. vmcs01 enables PAUSE-exiting for L1,
+	 * but reflecting every L2 PAUSE to L1 turned a normal guest spin-wait
+	 * into ~15k userspace round-trips/sec in L1. L2's spin loops belong
+	 * in L2; they end when the interrupt they await is injected.
 	 */
 	val &= ~(uint64_t)PROCBASED_PAUSE_EXITING;
 	vmwrite(VMCS_PRI_PROC_BASED_CTLS, val);
@@ -485,6 +523,8 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	/* Event L1 queued for injection into L2, if any. */
 	if (vmcs12_read_field(v12, VMCS_ENTRY_INTR_INFO, &val) == 0 &&
 	    (val & VMCS_INTR_VALID) != 0) {
+		vmx_l2_injects++;
+		vmx_l2_injvec[val & 0xff]++;
 		vmwrite(VMCS_ENTRY_INTR_INFO, val);
 		if (vmcs12_read_field(v12, VMCS_ENTRY_EXCEPTION_ERROR,
 		    &val) == 0)
@@ -495,6 +535,7 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 		vmwrite(VMCS_ENTRY_INTR_INFO, 0);
 	}
 
+	vmx_l2_entries++;
 	ns->in_l2 = true;
 	VMCLEAR(ns->vmcs02);		/* flush to memory; vmx_run() reloads it */
 	ns->vmcs02_launched = false;
@@ -597,8 +638,52 @@ vmx_nested_reflect_copy(struct vmx_vcpu *vcpu, uint32_t reason, uint64_t qual,
 	 * interrupts (RFLAGS.IF=0), re-injecting an external interrupt makes the
 	 * next VM entry fail with "invalid guest state".
 	 */
-	vmcs12_write_field(v12, VMCS_ENTRY_INTR_INFO,
-	    vmcs_read(VMCS_ENTRY_INTR_INFO));
+	/*
+ 	 * Reflect any in-flight event through vmcs12's IDT-vectoring-information
+ 	 * field -- the field stock L1 (vmx_exit_process) reads to requeue an
+ 	 * event that was mid-delivery at the exit, via vm_exit_intinfo(), which
+ 	 * re-injects WITHOUT re-running its vlapic IRR->ISR arbitration.
+ 	 *
+ 	 * Case 1 (genuine): a real vmcs02 exit occurred during delivery and
+ 	 * hardware set VMCS_IDT_VECTORING_INFO; propagate it verbatim.
+ 	 *
+ 	 * Case 2 (swallowed injection -- the Intel analog of the AMD eventinj
+ 	 * drop): L1 queued an event into vmcs12 ENTRY_INTR_INFO, build_vmcs02()
+ 	 * composed it into vmcs02 ENTRY_INTR_INFO, but this exit was synthesized
+ 	 * by L0 (HLT/preempt/interrupt-window reflect) so the CPU never ran a
+ 	 * VMRESUME to deliver it: the entry-info VALID bit is STILL set and the
+ 	 * hardware IDT-vectoring info is NOT valid. Hardware clears entry-info on
+ 	 * delivery, so a still-valid field at reflect time means the vector was
+ 	 * dropped -- and L1's vlapic already moved it IRR->ISR at queue time, so
+ 	 * silently losing it wedges the vector in-service forever (PPR raised,
+ 	 * every later same/lower-priority interrupt blocked: the guest hangs at
+ 	 * mount-root). The entry-interruption and IDT-vectoring formats share a
+ 	 * bit layout, so copy the undelivered entry-info into vmcs12
+ 	 * IDT_VECTORING_INFO and mark vmcs12 ENTRY_INTR_INFO consumed (0). L1
+ 	 * then requeues the vector through its stock exit-during-delivery path
+ 	 * (single injection, no second IRR->ISR). Leaving BOTH fields valid
+ 	 * would trip L1's "cannot inject while another is being delivered"
+ 	 * assertion.
+ 	 */
+	{
+		uint32_t idtv = (uint32_t)vmcs_read(VMCS_IDT_VECTORING_INFO);
+		uint32_t einfo = (uint32_t)vmcs_read(VMCS_ENTRY_INTR_INFO);
+
+		if ((idtv & VMCS_IDT_VEC_VALID) == 0 &&
+		    (einfo & VMCS_INTR_VALID) != 0) {
+			vmx_l2_swallow++;
+			vmx_l2_swallow_vec[einfo & 0xff]++;
+			vmcs12_write_field(v12, VMCS_IDT_VECTORING_INFO, einfo);
+			vmcs12_write_field(v12, VMCS_IDT_VECTORING_ERROR,
+			    vmcs_read(VMCS_ENTRY_EXCEPTION_ERROR));
+			vmcs12_write_field(v12, VMCS_ENTRY_INTR_INFO, 0);
+		} else {
+			vmcs12_write_field(v12, VMCS_IDT_VECTORING_INFO, idtv);
+			vmcs12_write_field(v12, VMCS_IDT_VECTORING_ERROR,
+			    vmcs_read(VMCS_IDT_VECTORING_ERROR));
+			vmcs12_write_field(v12, VMCS_ENTRY_INTR_INFO, einfo);
+		}
+	}
 
 	vmcs12_write_field(v12, VMCS_EXIT_REASON, reason);
 	vmcs12_write_field(v12, VMCS_EXIT_QUALIFICATION, qual);
@@ -626,8 +711,29 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 	uint64_t qual;
 
 	qual = vmcs_read(VMCS_EXIT_QUALIFICATION);
+	vmx_l2_exit_hist[reason & 0x7f]++;
 
 	switch (reason) {
+	case EXIT_REASON_HLT:
+		/*
+		 * L2 halted with interrupts enabled, waiting for its next
+		 * interrupt (timer tick or virtio completion). Reflect a REAL
+		 * HLT to L1 so L1's stock vm_handle_hlt() sleeps its vcpu
+		 * thread. That releases L1's physical CPU to the inner bhyve's
+		 * device-backend / mevent threads, which is what actually
+		 * completes the awaited I/O and posts the completion to L2's
+		 * vlapic; that post calls vcpu_notify_event(), waking L1's vcpu
+		 * to VMRESUME L2 with the injection.
+		 *
+		 * The earlier spurious-EXT_INTR reflect kept L1's vcpu thread
+		 * spinning in vm_run() (~20k reflects/s), starving those I/O
+		 * threads on a 1-CPU L1 so device completions never posted and
+		 * L2 wedged waiting (mount-root / shell input). reflect_copy
+		 * carries GUEST_RIP (the HLT) and inst_length so L1 advances
+		 * past HLT normally.
+		 */
+		vmx_nested_reflect_l2_exit(vcpu, EXIT_REASON_HLT, qual, 0);
+		return (0);
 	case EXIT_REASON_VMX_PREEMPT:
 		/*
 		 * L0's periodic yield fired. Give L1 a turn: reflect a spurious
@@ -675,11 +781,11 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 		/*
 		 * L2 became interruptible and vmcs02 carried the window-exiting
 		 * control L1 requested (propagated from VMCS12 in
-		 * vmx_nested_build_vmcs02()). Reflect the window exit to L1 so
-		 * its hypervisor clears the control and injects the pending
-		 * event through VMCS12 ENTRY_INTR_INFO on the next entry.
-		 * Handling it at L0 (return 1) would swallow the one signal L1
-		 * uses to inject, which is why L2 received no interrupts.
+		 * build_vmcs02). Reflect the window exit to L1 so its
+		 * hypervisor clears the control and injects the pending event
+		 * through VMCS12 ENTRY_INTR_INFO on the next entry. Handling it
+		 * at L0 (return 1) would swallow the one signal L1 uses to
+		 * inject, which is why L2 never received interrupts.
 		 */
 		vmx_nested_reflect_l2_exit(vcpu, reason, qual, 0);
 		return (0);
