@@ -108,6 +108,8 @@ vm_ctl_create(const char *name, int flags, int ctlfd)
 	memset(&vmc, 0, sizeof(vmc));
 	if ((flags & VMMAPI_OPEN_CREATE_DESTROY_ON_CLOSE) != 0)
 		vmc.flags |= VMMCTL_CREATE_DESTROY_ON_CLOSE;
+	if ((flags & VMMAPI_OPEN_CREATE_NESTED) != 0)
+		vmc.flags |= VMMCTL_CREATE_NESTED;
 	if (strlcpy(vmc.name, name, sizeof(vmc.name)) >= sizeof(vmc.name)) {
 		errno = ENAMETOOLONG;
 		return (-1);

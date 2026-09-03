@@ -103,6 +103,8 @@
 int guest_ncpus;
 uint16_t cpu_cores, cpu_sockets, cpu_threads;
 
+bool nesting_enabled = false;
+
 int raw_stdio = 0;
 
 #ifdef BHYVE_SNAPSHOT
@@ -759,7 +761,10 @@ do_open(const char *vmname)
 	 * If we don't have a boot ROM, the guest context must have been
 	 * initialized by bhyveload(8) or equivalent.
 	 */
-	ctx = vm_openf(vmname, romboot ? VMMAPI_OPEN_REINIT : 0);
+	flags = romboot ? VMMAPI_OPEN_REINIT : 0;
+	if (nesting_enabled)
+		flags |= VMMAPI_OPEN_CREATE_NESTED;
+	ctx = vm_openf(vmname, flags);
 	if (ctx == NULL) {
 		if (errno != ENOENT)
 			err(4, "vm_openf");
@@ -768,6 +773,8 @@ do_open(const char *vmname)
 		flags = VMMAPI_OPEN_CREATE;
 		if (monitor)
 			flags |= VMMAPI_OPEN_CREATE_DESTROY_ON_CLOSE;
+		if (nesting_enabled)
+			flags |= VMMAPI_OPEN_CREATE_NESTED;
 		ctx = vm_openf(vmname, flags);
 		if (ctx == NULL)
 			err(4, "vm_openf");

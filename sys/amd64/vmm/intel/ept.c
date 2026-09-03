@@ -175,6 +175,14 @@ ept_pinit(pmap_t pmap)
 	return (pmap_pinit_type(pmap, PT_EPT, ept_pmap_flags));
 }
 
+/* For the nested-VMX shadow EPT (vmx_nested_entry.c). */
+int
+ept_pinit_nested(pmap_t pmap)
+{
+
+	return (ept_pinit(pmap));
+}
+
 struct vmspace *
 ept_vmspace_alloc(vm_offset_t min, vm_offset_t max)
 {

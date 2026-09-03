@@ -727,6 +727,7 @@
 #define	MSR_VMX_CR0_FIXED1	0x487
 #define	MSR_VMX_CR4_FIXED0	0x488
 #define	MSR_VMX_CR4_FIXED1	0x489
+#define	MSR_VMX_VMCS_ENUM	0x48a
 #define	MSR_VMX_PROCBASED_CTLS2	0x48b
 #define	MSR_VMX_EPT_VPID_CAP	0x48c
 #define	MSR_VMX_TRUE_PINBASED_CTLS	0x48d
@@ -1275,6 +1276,12 @@
 #define	MSR_AMD_RAPL_POWER_UNIT 0xc0010299 /* RAPL unit shifts */
 #define	MSR_AMD_CORE_ENERGY_STATUS 0xc001029a /* RAPL per-core energy */
 #define	MSR_AMD_PKG_ENERGY_STATUS 0xc001029b /* RAPL package energy */
+#define	MSR_AMD_LBR_CTL	0xc0010200	/* AMD LBR virtualization control */
+#define	MSR_AMD_LBR_SELECT 0xc0010201	/* AMD LBR virtualization select */
+#define	MSR_AMD_LBR_DATA	0xc0010202	/* AMD LBR virtualization data lo */
+#define	MSR_AMD_LBR_DATA_HI 0xc0010203	/* AMD LBR virtualization data hi */
+#define	MSR_AMD_LBR_INFO	0xc0010204	/* AMD LBR info lo */
+#define	MSR_AMD_LBR_INFO_HI 0xc0010205	/* AMD LBR info hi */
 #define	MSR_AMD_CPUID07	0xc0011002	/* CPUID 07 %ebx override */
 #define	MSR_AMD_CPUID01	0xc0011004	/* CPUID 01 %ecx override */
 #define	MSR_EXTFEATURES	0xc0011005	/* Extended CPUID Features override */
