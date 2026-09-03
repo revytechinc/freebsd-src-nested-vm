@@ -254,8 +254,20 @@ vmx_nested_decode_mem_operand(struct vmx_vcpu *vcpu, size_t size, int prot,
 	vmx_nested_paging_info(vcpu, &paging);
 	vmx_nested_seg_desc(vcpu, seg, &desc);
 
+	/*
+	 * vie_calculate_gla() only accepts operand sizes of 1/2/4/8 bytes, but
+	 * the INVEPT/INVVPID descriptor operand is 16 bytes -- passing 16 here
+	 * trips its KASSERT and panics L0, so ANY L1 hypervisor executing INVEPT
+	 * (normal nested-EPT invalidation) could crash the host (an L1->L0 DoS).
+	 * These instructions are only valid in 64-bit mode, where segment limits
+	 * are not enforced and the effective-address computation does not depend
+	 * on the operand size, so cap the size used for the check at 8. The full
+	 * `size` bytes are still read via vm_gla2gpa()/read_guest below, which
+	 * fault correctly if unmapped.
+	 */
 	if (vie_calculate_gla(paging.cpu_mode, insn_seg_regs[seg], &desc,
-	    base + index * scale + disp, size, addrsize, prot, &gla) != 0) {
+	    base + index * scale + disp, size > 8 ? 8 : size, addrsize, prot,
+	    &gla) != 0) {
 		vm_inject_gp(vcpu->vcpu);
 		return (-1);
 	}
