@@ -1,0 +1,174 @@
+# KVM Parity Conformance — VMCB12 Test Vectors
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 The FreeBSD Project Contributors.
+# All rights reserved.
+#
+# Format (one vector per line):
+#   ID|FIELD_NAME|OFFSET|BITS|EXPECTED_VALUE|MASK|CATEGORY
+#
+#   ID              - stable identifier
+#   FIELD_NAME      - architectural VMCB12 field name (AMD APM Vol. 2,
+#                     section 15.5 "VMCB Layout")
+#   OFFSET          - hex offset within the 4-KiB VMCB page
+#                     (per AMD APM Table 15-7)
+#   BITS            - decimal number of significant bits in field
+#   EXPECTED_VALUE  - expected L2-viewable value (with MASK applied)
+#   MASK            - bitmask applied before comparison
+#   CATEGORY        - MUST_PASS | KNOWN_DIFF
+#
+# CATEGORY semantics:
+#   MUST_PASS   - VMCB12 field must round-trip L1<->L2 unchanged
+#   KNOWN_DIFF  - documented diff vs KVM in PARITY.md
+#
+# Source: AMD APM Vol. 2, section 15.5 (VMCB Layout)
+# No values copied from KVM source.
+#
+# VMCB12 is the L1 hypervisor's view of the L2 VMCB during nSVM
+# nested virtualization. Layout is 4 KiB; offsets below are taken
+# from the AMD APM Table 15-7.
+#
+# === MUST_PASS: control-area VMCB12 fields (offsets 0x000-0x3FF) ===
+
+# Intercept reads of CR0..CR15 (offset 0x000 - 0x01C, 2 bytes each)
+N001|intercept_read_cr0|00000000|16|0000|FFFFFFFFFFFF|MUST_PASS
+N002|intercept_read_cr1|00000002|16|0000|FFFFFFFFFFFF|MUST_PASS
+N003|intercept_read_cr2|00000004|16|0000|FFFFFFFFFFFF|MUST_PASS
+N004|intercept_read_cr3|00000006|16|0000|FFFFFFFFFFFF|MUST_PASS
+N005|intercept_read_cr4|00000008|16|0000|FFFFFFFFFFFF|MUST_PASS
+N006|intercept_read_cr5|0000000A|16|0000|FFFFFFFFFFFF|MUST_PASS
+N007|intercept_read_cr6|0000000C|16|0000|FFFFFFFFFFFF|MUST_PASS
+N008|intercept_read_cr7|0000000E|16|0000|FFFFFFFFFFFF|MUST_PASS
+N009|intercept_read_cr8|00000010|16|0000|FFFFFFFFFFFF|MUST_PASS
+N010|intercept_read_cr9|00000012|16|0000|FFFFFFFFFFFF|MUST_PASS
+N011|intercept_read_cr10|00000014|16|0000|FFFFFFFFFFFF|MUST_PASS
+N012|intercept_read_cr11|00000016|16|0000|FFFFFFFFFFFF|MUST_PASS
+N013|intercept_read_cr12|00000018|16|0000|FFFFFFFFFFFF|MUST_PASS
+N014|intercept_read_cr13|0000001A|16|0000|FFFFFFFFFFFF|MUST_PASS
+N015|intercept_read_cr14|0000001C|16|0000|FFFFFFFFFFFF|MUST_PASS
+N016|intercept_read_cr15|0000001E|16|0000|FFFFFFFFFFFF|MUST_PASS
+
+# Intercept writes of CR0..CR15 (offset 0x020 - 0x03C)
+N020|intercept_write_cr0|00000020|16|0000|FFFFFFFFFFFF|MUST_PASS
+N021|intercept_write_cr1|00000022|16|0000|FFFFFFFFFFFF|MUST_PASS
+N022|intercept_write_cr2|00000024|16|0000|FFFFFFFFFFFF|MUST_PASS
+N023|intercept_write_cr3|00000026|16|0000|FFFFFFFFFFFF|MUST_PASS
+N024|intercept_write_cr4|00000028|16|0000|FFFFFFFFFFFF|MUST_PASS
+N025|intercept_write_cr5|0000002A|16|0000|FFFFFFFFFFFF|MUST_PASS
+N026|intercept_write_cr6|0000002C|16|0000|FFFFFFFFFFFF|MUST_PASS
+N027|intercept_write_cr7|0000002E|16|0000|FFFFFFFFFFFF|MUST_PASS
+N028|intercept_write_cr8|00000030|16|0000|FFFFFFFFFFFF|MUST_PASS
+N029|intercept_write_cr9|00000032|16|0000|FFFFFFFFFFFF|MUST_PASS
+N030|intercept_write_cr10|00000034|16|0000|FFFFFFFFFFFF|MUST_PASS
+N031|intercept_write_cr11|00000036|16|0000|FFFFFFFFFFFF|MUST_PASS
+N032|intercept_write_cr12|00000038|16|0000|FFFFFFFFFFFF|MUST_PASS
+N033|intercept_write_cr13|0000003A|16|0000|FFFFFFFFFFFF|MUST_PASS
+N034|intercept_write_cr14|0000003C|16|0000|FFFFFFFFFFFF|MUST_PASS
+N035|intercept_write_cr15|0000003E|16|0000|FFFFFFFFFFFF|MUST_PASS
+
+# DR intercepts (offset 0x040 - 0x05C)
+N040|intercept_read_dr0|00000040|16|0000|FFFFFFFFFFFF|MUST_PASS
+N041|intercept_write_dr0|00000050|16|0000|FFFFFFFFFFFF|MUST_PASS
+
+# Exception intercepts (offset 0x060 - 0x07F)
+N050|intercept_exception_ucr|00000060|32|00000000|FFFFFFFF|MUST_PASS
+
+# General intercepts 1 (offset 0x080)
+N051|general1_intercepts|00000080|32|00000000|FFFFFFFF|MUST_PASS
+# General intercepts 2 (offset 0x084)
+N052|general2_intercepts|00000084|32|00000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: VMCB12 control fields ===
+
+# IOPM_BASE_PA (offset 0x090, 8 bytes)
+N060|iopm_base_pa|00000090|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# MSRPM_BASE_PA (offset 0x098, 8 bytes)
+N061|msrpm_base_pa|00000098|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# TSC_OFFSET (offset 0x0A0, 8 bytes)
+N062|tsc_offset|000000A0|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# TLB_CTRL (offset 0x0A8, 4 bytes)
+N063|tlb_ctrl|000000A8|32|00000000|FFFFFFFF|MUST_PASS
+# V_INTR_MASKING (offset 0x0AC, 4 bytes - actually 1 byte + reserved)
+N064|v_intr_masking|000000AC|8|00|FF|MUST_PASS
+# Interrupt_shadow (offset 0x0AD, 1 byte)
+N065|interrupt_shadow|000000AD|1|00|FF|MUST_PASS
+# Interrupt_info (offset 0x0B0)
+N070|interrupt_info|000000B0|32|00000000|FFFFFFFF|MUST_PASS
+# EXITCODE (offset 0x0B8)
+N071|exitcode|000000B8|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# EXITINFO1 (offset 0x0C0)
+N072|exitinfo1|000000C0|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# EXITINFO2 (offset 0x0C8)
+N073|exitinfo2|000000C8|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# EXITINTINFO (offset 0x0D0)
+N074|exitintinfo|000000D0|32|00000000|FFFFFFFF|MUST_PASS
+# NP_ENABLE (offset 0x0D8, 1 byte)
+N075|np_enable|000000D8|8|00|FF|MUST_PASS
+# SEV_ENABLE, AVIC_ENABLE, etc. (offset 0x0D8 + 1)
+N076|enable_bits|000000D8|32|00000000|FFFFFFFF|MUST_PASS
+
+# === MUST_PASS: nested-page-table-related fields (offsets 0x090-0x0F0) ===
+
+# N_CR3 (offset 0x0E0, 8 bytes)
+N080|n_cr3|000000E0|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# LBR_VIRTUALIZATION_ENABLE (offset 0x0E8, 4 bytes)
+N081|lbr_virtualization_enable|000000E8|32|00000000|FFFFFFFF|MUST_PASS
+# VIRT_SAVE_SPEC_REGS (offset 0x0EC)
+N082|save_spec_regs|000000EC|8|00|FF|MUST_PASS
+
+# === MUST_PASS: VMCB12 state-save area offsets (selected) ===
+
+# ES/SS/DS/FS/GS/ selectors (offset 0x400-0x40B)
+N100|es_selector|00000400|16|0000|FFFFFFFFFFFF|MUST_PASS
+N101|ss_selector|00000402|16|0000|FFFFFFFFFFFF|MUST_PASS
+N102|ds_selector|00000404|16|0000|FFFFFFFFFFFF|MUST_PASS
+N103|fs_selector|00000406|16|0000|FFFFFFFFFFFF|MUST_PASS
+N104|gs_selector|00000408|16|0000|FFFFFFFFFFFF|MUST_PASS
+N105|cs_selector|0000040A|16|0000|FFFFFFFFFFFF|MUST_PASS
+
+# GDT/IDT/TR/LDTR selectors (offset 0x40C-0x411)
+N110|gdtr_selector|0000040C|16|0000|FFFFFFFFFFFF|MUST_PASS
+N111|idtr_selector|0000040E|16|0000|FFFFFFFFFFFF|MUST_PASS
+N112|ldtr_selector|00000410|16|0000|FFFFFFFFFFFF|MUST_PASS
+N113|tr_selector|00000412|16|0000|FFFFFFFFFFFF|MUST_PASS
+
+# CPL (offset 0x44B, 1 byte)
+N120|cpl|0000044B|8|00|FF|MUST_PASS
+# EFER (offset 0x44D, 8 bytes)
+N121|efer|0000044D|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# CR4 (offset 0x458, 8 bytes)
+N122|cr4|00000458|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# CR3 (offset 0x460, 8 bytes)
+N123|cr3|00000460|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# CR0 (offset 0x468, 8 bytes)
+N124|cr0|00000468|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# DR7 (offset 0x470, 8 bytes)
+N125|dr7|00000470|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# DR6 (offset 0x478, 8 bytes)
+N126|dr6|00000478|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# RFLAGS (offset 0x480, 8 bytes)
+N127|rflags|00000480|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# RIP (offset 0x488, 8 bytes)
+N128|rip|00000488|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+# RSP (offset 0x490, 8 bytes)
+N129|rsp|00000490|64|0000000000000000|FFFFFFFFFFFFFFFF|MUST_PASS
+
+# === KNOWN_DIFF: LBR virtualization state (LBR stack) ===
+# KVM and bhyve differ in LBR stack virtualization granularity.
+# Documented in PARITY.md.
+D001|lbr_stack|00000498|64|0000000000000000|FFFFFFFFFFFFFFFF|KNOWN_DIFF
+
+# === KNOWN_DIFF: SEV/SEV-ES state pages ===
+# KVM exposes SEV-ES state to L1 differently than bhyve's
+# cap-and-mask filter. Documented in PARITY.md.
+D002|sev_state|000004A0|64|0000000000000000|FFFFFFFFFFFFFFFF|KNOWN_DIFF
+
+# === KNOWN_DIFF: AVIC backing page ===
+# KVM and bhyve differ in how AVIC backing-page address is exposed
+# in the VMCB12. Documented in PARITY.md.
+D003|avic_backing_page|000004A8|64|0000000000000000|FFFFFFFFFFFFFFFF|KNOWN_DIFF
+
+# Total MUST_PASS count for this file: 73
+# Total KNOWN_DIFF count for this file: 3
+# Must match PARITY.md allowlist.

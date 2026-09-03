@@ -1,0 +1,21 @@
+-- Auto-generated Kyuafile fragment for tests/sys/vmm/nested.
+--
+-- The bsd.test.mk framework regenerates a full Kyuafile at build time from
+-- the ATF_TESTS_SH/ATF_TESTS_C lists in the sibling Makefile, so this file
+-- is provided for source-tree `kyua test` discovery only.  It must list every
+-- test program declared in the Makefile.
+--
+-- SPDX-License-Identifier: BSD-2-Clause
+
+syntax(2)
+
+atf_test_program{
+	name = "nested_basic",
+	test_programs = { "nested_basic.sh" },
+	required_files = { "nested_utils.subr" },
+}
+
+atf_test_program{
+	name = "vmx_basic",
+	test_programs = { "vmx_basic.sh" },
+}

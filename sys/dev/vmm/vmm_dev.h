@@ -70,8 +70,10 @@ extern u_int vm_maxcpu;
 
 #endif /* _KERNEL */
 
-#define VMMCTL_CREATE_DESTROY_ON_CLOSE 0x1
-#define VMMCTL_FLAGS_MASK	       (VMMCTL_CREATE_DESTROY_ON_CLOSE)
+#define VMMCTL_CREATE_DESTROY_ON_CLOSE	0x1
+#define VMMCTL_CREATE_NESTED		0x2
+#define VMMCTL_FLAGS_MASK		(VMMCTL_CREATE_DESTROY_ON_CLOSE | \
+					 VMMCTL_CREATE_NESTED)
 
 struct vmmctl_vm_create {
 	char name[VM_MAX_NAMELEN + 1];

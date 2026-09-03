@@ -131,6 +131,7 @@ DEFINE_VMMOPS_IFUNC(int, modcleanup, (void))
 DEFINE_VMMOPS_IFUNC(void, modsuspend, (void))
 DEFINE_VMMOPS_IFUNC(void, modresume, (void))
 DEFINE_VMMOPS_IFUNC(void *, init, (struct vm *vm, struct pmap *pmap))
+DEFINE_VMMOPS_IFUNC(int, nested, (void *vcpui, struct vm_exit *vme))
 DEFINE_VMMOPS_IFUNC(int, run, (void *vcpui, register_t rip, struct pmap *pmap,
     struct vm_eventinfo *info))
 DEFINE_VMMOPS_IFUNC(void, cleanup, (void *vmi))
@@ -180,6 +181,50 @@ SYSCTL_INT(_hw_vmm, OID_AUTO, trace_guest_exceptions, CTLFLAG_RDTUN,
 static int trap_wbinvd;
 SYSCTL_INT(_hw_vmm, OID_AUTO, trap_wbinvd, CTLFLAG_RDTUN, &trap_wbinvd, 0,
     "WBINVD triggers a VM-exit");
+
+int vmm_nested_enable;
+static int vmm_nested_enable_sysctl(SYSCTL_HANDLER_ARGS);
+bool vmm_nested_supported(void);
+extern int svm_nested_status;
+extern int vmx_nested_status;
+
+bool
+vmm_nested_supported(void)
+{
+
+	return (vm_guest == VM_GUEST_NO &&
+	    ((vmm_is_intel() && vmx_nested_status == 2) ||
+	    (vmm_is_svm() && svm_nested_status == 2)));
+}
+
+static int
+vmm_nested_enable_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	int error, value;
+
+	value = vmm_nested_enable;
+	error = sysctl_handle_int(oidp, &value, 0, req);
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+	if (value != 0 && !vmm_nested_supported()) {
+		printf("VMM: refusing nested-virt enable - CPU/platform preflight gate failed\n");
+		return (EOPNOTSUPP);
+	}
+	vmm_nested_enable = value;
+	return (0);
+}
+
+/*
+ * hw.vmm.nested.enable: host-wide gate, documented in vmm_nested(9).
+ * The tunable of the same name is fetched by hand in vmm_init() once
+ * the vendor preflight status is known (NOFETCH prevents the sysctl
+ * framework from fetching it too early and refusing it).
+ */
+SYSCTL_DECL(_hw_vmm_nested);
+SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, enable,
+    CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
+    vmm_nested_enable_sysctl, "I",
+    "Enable nested virtualization support (per-VM opt-in via VMMCTL_CREATE_NESTED)");
 
 /* global statistics */
 VMM_STAT(VCPU_MIGRATIONS, "vcpu migration across host cpus");
@@ -281,6 +326,8 @@ vm_exitinfo_cpuset(struct vcpu *vcpu)
 int
 vmm_modinit(void)
 {
+	int error;
+
 	if (!vmm_is_hw_supported())
 		return (ENXIO);
 
@@ -294,7 +341,16 @@ vmm_modinit(void)
 	vmm_suspend_p = vmmops_modsuspend;
 	vmm_resume_p = vmmops_modresume;
 
-	return (vmmops_modinit(vmm_ipinum));
+	error = vmmops_modinit(vmm_ipinum);
+	if (error != 0)
+		return (error);
+
+	TUNABLE_INT_FETCH("hw.vmm.nested.enable", &vmm_nested_enable);
+	if (vmm_nested_enable != 0 && !vmm_nested_supported()) {
+		printf("VMM: refusing nested-virt enable - CPU/platform preflight gate failed\n");
+		vmm_nested_enable = 0;
+	}
+	return (0);
 }
 
 int
@@ -743,6 +799,12 @@ vcpu_require_state_locked(struct vcpu *vcpu, enum vcpu_state newstate)
 /*
  * Emulate a guest 'hlt' by sleeping until the vcpu is ready to run.
  */
+void
+vcpu_set_nested_host(struct vcpu *vcpu)
+{
+	vcpu->nested_host = true;
+}
+
 static int
 vm_handle_hlt(struct vcpu *vcpu, bool intr_disabled, bool *retu)
 {
@@ -814,10 +876,22 @@ vm_handle_hlt(struct vcpu *vcpu, bool intr_disabled, bool *retu)
 		/*
 		 * XXX msleep_spin() cannot be interrupted by signals so
 		 * wake up periodically to check pending signals.
+		 *
+		 * A vcpu that hosts a nested (L2) guest must not be left
+		 * asleep indefinitely: while it sleeps L1's own kernel does
+		 * not run, so L1 never re-arms its timer, runs its device
+		 * back ends, or injects the L2's pending interrupts -- an
+		 * idle deadlock in which the L2's disk completion never
+		 * lands. Wake such a vcpu frequently and resume L1 so its
+		 * kernel makes progress; if L1 is truly idle it simply
+		 * halts again.
 		 */
-		msleep_spin(vcpu, &vcpu->mtx, wmesg, hz);
+		msleep_spin(vcpu, &vcpu->mtx, wmesg,
+		    vcpu->nested_host ? hz / 100 : hz);
 		vcpu_require_state_locked(vcpu, VCPU_FROZEN);
 		vmm_stat_incr(vcpu, VCPU_IDLE_TICKS, ticks - t);
+		if (vcpu->nested_host && !intr_disabled)
+			break;
 		if (td_ast_pending(td, TDA_SUSPEND)) {
 			vcpu_unlock(vcpu);
 			error = thread_check_susp(td, false);
@@ -840,6 +914,31 @@ vm_handle_hlt(struct vcpu *vcpu, bool intr_disabled, bool *retu)
 	if (vm_halted)
 		vm_suspend(vm, VM_SUSPEND_HALT);
 
+	return (0);
+}
+
+/*
+ * Nested virtualization work deferred by the vendor exit handler, which
+ * runs inside a critical section and cannot hold guest pages. The
+ * vendor hook does the work and sets vme->rip to the resume address.
+ */
+static int
+vm_handle_nested(struct vcpu *vcpu, bool *retu)
+{
+	struct vm_exit *vme;
+	int error;
+
+	vme = &vcpu->exitinfo;
+	KASSERT(vme->inst_length == 0, ("%s: invalid inst_length %d",
+	    __func__, vme->inst_length));
+	error = vmmops_nested(vcpu->cookie, vme);
+	if (error == 0) {
+		vcpu->nextrip = vme->rip;
+		*retu = false;
+	} else {
+		/* Surface to userland as an unhandled nested exit. */
+		*retu = true;
+	}
 	return (0);
 }
 
@@ -1196,6 +1295,9 @@ restart:
 			break;
 		case VM_EXITCODE_PAGING:
 			error = vm_handle_paging(vcpu, &retu);
+			break;
+		case VM_EXITCODE_NESTED:
+			error = vm_handle_nested(vcpu, &retu);
 			break;
 		case VM_EXITCODE_INST_EMUL:
 			error = vm_handle_inst_emul(vcpu, &retu);
