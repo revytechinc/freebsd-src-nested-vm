@@ -32,9 +32,18 @@ fail()
 
 [ -r "${INTEL}/vmx_nested_vmread.c" ] || { echo "SKIP: nested sources absent"; exit 0; }
 
-grep -l 'PROCBASED2_VMCS_SHADOWING\|VMCS_LINK_POINTER,' "${INTEL}"/vmx_nested_*.c 2>/dev/null |
+# Hardware VMCS shadowing must never be enabled.
+grep -l 'PROCBASED2_VMCS_SHADOWING' "${INTEL}"/vmx_nested_*.c 2>/dev/null |
 	grep -v vmx_nested_layout.c | grep -q . &&
-	fail "nested code programs VMCS shadowing / link pointer"
+	fail "nested code programs VMCS shadowing (PROCBASED2_VMCS_SHADOWING)"
+
+# The VMCS link pointer may only be set to the "no shadow VMCS" sentinel (~0);
+# writing a *real* link pointer would activate shadowing. Setting it to ~0 on
+# vmcs02 is required (it keeps L2's VMREAD/VMWRITE trapping to L0), so allow it.
+grep -h 'vmwrite(VMCS_LINK_POINTER' "${INTEL}"/vmx_nested_*.c 2>/dev/null |
+	grep -v 'vmx_nested_layout.c' |
+	grep -vE 'VMCS_LINK_POINTER, *~0' | grep -q . &&
+	fail "nested code writes a real VMCS_LINK_POINTER (would enable shadowing)"
 
 grep -q 'VMCS_EXIT_INSTRUCTION_INFO' "${INTEL}/vmx_nested_vmread.c" ||
 	fail "VMREAD/VMWRITE do not decode operands from instruction info"
