@@ -1703,6 +1703,28 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 			    ("invalid inst_length (%d) "
 			     "when reflecting exception %d into guest",
 				vmexit->inst_length, idtvec));
+			if (svm_nested_in_l2(vcpu)) {
+				/*
+				 * The exception belongs to L2. Inject it into
+				 * VMCB02's eventinj so the next VMRUN delivers
+				 * it to L2, instead of queuing it in the shared
+				 * L1-context vcpu exception state -- which
+				 * svm_inj_interrupts() does not drain while in
+				 * L2, so the re-faulting instruction's second
+				 * vm_inject_exception() would return EBUSY and
+				 * the KASSERT below would panic L0 (an L2->L0
+				 * DoS). svm_eventinject's eventinj.V==0
+				 * precondition holds -- hardware cleared it on
+				 * this exit.
+				 */
+				SVM_CTR2(vcpu, "Injecting exception %d/%#x "
+				    "into L2", idtvec, (int)info1);
+				svm_eventinject(vcpu,
+				    VMCB_EVENTINJ_TYPE_EXCEPTION, idtvec,
+				    (uint32_t)info1, errcode_valid ? true : false);
+				handled = 1;
+				break;
+			}
 			/* Reflect the exception back into the guest */
 			SVM_CTR2(vcpu, "Reflecting exception "
 			    "%d/%#x into the guest", idtvec, (int)info1);
