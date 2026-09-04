@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Copyright (c) 2026 The FreeBSD Project Contributors.
+ * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
  * VMCALL from L1 (VMX root operation). Outside SMM there is no
