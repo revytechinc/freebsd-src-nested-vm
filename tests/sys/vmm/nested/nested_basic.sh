@@ -33,7 +33,7 @@
 atf_test_case nested_basic cleanup
 nested_basic_head()
 {
-	atf_set "descr" "Nested-VMM harness: vmm loads and hw.vmm.nested.enable defaults to 0"
+	atf_set "descr" "Nested-VMM harness: vmm loads and hw.vmm.nested.enable defaults to 1 on capable hardware"
 	atf_set "require.user" "root"
 	atf_set "require.kmods" "vmm"
 }
@@ -46,7 +46,16 @@ nested_basic_body()
 	if [ -z "${enable}" ]; then
 		atf_fail "hw.vmm.nested.enable is not exposed by the running kernel"
 	fi
-	atf_check_equal "${enable}" "0"
+	# Nesting is ON by default (the sysctl is the single master switch).
+	# vmm_init() forces it back to 0 only on hardware that cannot nest at
+	# all, i.e. when neither hw.vmm.nested.vmx nor .svm reports 2.
+	vmx=$(nested_sysctl_get vmx)
+	svm=$(nested_sysctl_get svm)
+	if [ "${vmx:-0}" = 2 ] || [ "${svm:-0}" = 2 ]; then
+		atf_check_equal "${enable}" "1"
+	else
+		atf_check_equal "${enable}" "0"
+	fi
 }
 nested_basic_cleanup()
 {
