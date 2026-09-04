@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Copyright (c) 2026 The FreeBSD Project Contributors.
+ * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
  * Nested VMX L2 execution: build a VMCS02, run L2 under a shadow EPT

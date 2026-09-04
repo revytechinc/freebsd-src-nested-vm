@@ -2,7 +2,7 @@
 #-
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Copyright (c) 2026 The FreeBSD Project
+# Copyright (c) 2026 REVYTECH, Inc.
 #
 # enable-fail-watchdog.sh — arm watchdogd so a hang (no panic) still resets.
 #

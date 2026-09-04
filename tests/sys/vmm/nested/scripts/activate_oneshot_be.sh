@@ -2,7 +2,7 @@
 #-
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Copyright (c) 2026 The FreeBSD Project
+# Copyright (c) 2026 REVYTECH, Inc.
 #
 # activate_oneshot_be.sh — bectl activate -t WITHOUT changing zpool bootfs.
 #

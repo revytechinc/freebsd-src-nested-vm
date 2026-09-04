@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Copyright (c) 2026 The FreeBSD Project Contributors.
+# Copyright (c) 2026 REVYTECH, Inc.
 # All rights reserved.
 #
 # This file is the GOLDEN snapshot of the bhyve L0 nested-virt ABI.
