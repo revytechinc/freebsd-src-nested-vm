@@ -109,6 +109,100 @@ svm_nested_pir_highest(struct svm_vcpu *vcpu)
 }
 
 /*
+ * ---------------------------------------------------------------------
+ * Per-vCPU pending-event queue.
+ *
+ * While L2 runs, every event delivered to it is one L1 asked for: L0
+ * composes VMCB02.EVENTINJ from VMCB12.EVENTINJ at VMRUN and hardware
+ * clears the valid bit once the event has been delivered.  If an exit
+ * is taken *during* that delivery, hardware instead clears EVENTINJ and
+ * parks the interrupted event in VMCB02.EXITINTINFO (APMv2, "Intercepts
+ * during IDT interrupt delivery").  When L0 handles such an exit by
+ * itself and resumes L2, that parked event has to go back into
+ * EVENTINJ or it is lost -- and losing it is unrecoverable, because
+ * the vlapic that injected the vector has already moved it IRR->ISR:
+ * no EOI ever arrives, PPR stays raised, and every same-or-lower
+ * priority interrupt is blocked from then on.
+ *
+ * EVENTINJ is a single slot, so it is not always free at that moment:
+ * L0 may have just injected an exception of its own into L2 (a nested
+ * fault raised while the interrupted event was being delivered).  This
+ * queue is where the event waits in that case, so that "EVENTINJ is
+ * busy" can never mean "the event is dropped".  It is the AMD analogue
+ * of the event queue KVM's svm_complete_interrupts() feeds.
+ *
+ * Entries are raw EVENTINJ words: vector, type, error-code-valid and
+ * error code all travel together, and EXITINTINFO shares the layout,
+ * so no re-encoding is needed in either direction.
+ *
+ * The queue is drained FIFO (oldest first) so events keep the order in
+ * which L1 handed them to L2.  Access is from the vCPU thread only,
+ * under the same implicit serialization as the rest of struct
+ * svm_nested, so no lock is needed.
+ * ---------------------------------------------------------------------
+ */
+void
+svm_nested_evtq_push(struct svm_vcpu *vcpu, uint64_t event)
+{
+	struct svm_nested *ns;
+
+	ns = svm_nested_lookup(vcpu);
+	if (ns == NULL)
+		return;
+	if (ns->evtq_count >= SVM_NESTED_EVTQ_SIZE) {
+		/*
+		 * Cannot happen in the steady state (see SVM_NESTED_EVTQ_SIZE):
+		 * at most one event is parked per exit and at least one is
+		 * drained per entry.  If it ever does, keep the older events --
+		 * they have been owed to L2 longest -- and count the loss so
+		 * the sysctl shows it rather than the guest silently wedging.
+		 */
+		svm_l2_evtq_drop++;
+		return;
+	}
+	ns->evtq[(ns->evtq_head + ns->evtq_count) % SVM_NESTED_EVTQ_SIZE] =
+	    event;
+	ns->evtq_count++;
+	if (ns->evtq_count > svm_l2_evtq_max)
+		svm_l2_evtq_max = ns->evtq_count;
+}
+
+bool
+svm_nested_evtq_pop(struct svm_vcpu *vcpu, uint64_t *event)
+{
+	struct svm_nested *ns;
+
+	ns = svm_nested_lookup(vcpu);
+	if (ns == NULL || ns->evtq_count == 0)
+		return (false);
+	*event = ns->evtq[ns->evtq_head];
+	ns->evtq_head = (ns->evtq_head + 1) % SVM_NESTED_EVTQ_SIZE;
+	ns->evtq_count--;
+	return (true);
+}
+
+unsigned
+svm_nested_evtq_count(struct svm_vcpu *vcpu)
+{
+	struct svm_nested *ns;
+
+	ns = svm_nested_lookup(vcpu);
+	return (ns != NULL ? ns->evtq_count : 0);
+}
+
+void
+svm_nested_evtq_flush(struct svm_vcpu *vcpu)
+{
+	struct svm_nested *ns;
+
+	ns = svm_nested_lookup(vcpu);
+	if (ns == NULL)
+		return;
+	ns->evtq_head = 0;
+	ns->evtq_count = 0;
+}
+
+/*
  * Build the EventInjection word per AMD APM Vol 2 §15.20:
  *   bits  7:0  : vector
  *   bits 10:8  : type (0=INTR, 2=NMI, 3=EXCEPTION, 4=INTn)
