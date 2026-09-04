@@ -193,6 +193,21 @@ SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, svm_l2inj,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
     svm_l2_inj_sysctl, "A", "nested SVM L2 injected-vector histogram");
 
+/*
+ * Test knob for the pending-event queue.  The path where an event has to
+ * wait in the queue -- EVENTINJ already occupied by an exception L0 is
+ * injecting into L2 -- depends on a race no workload reproduces on
+ * demand, so with this set a freshly parked event is never injected on
+ * the entry that parked it: it is carried in the queue and injected on
+ * the next one, exactly as a contended entry would carry it.  The event
+ * is still delivered, one VMRUN later, so a guest booting with this on
+ * is evidence the carry-over path delivers correctly.  Off by default.
+ */
+int svm_nested_evtq_defer;
+SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm_evtq_defer, CTLFLAG_RWTUN,
+    &svm_nested_evtq_defer, 0,
+    "Test: carry every requeued L2 event one extra entry in the queue");
+
 int svm_nested_timer_fastpath_enable = 1;
 SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm_timer_fastpath, CTLFLAG_RWTUN,
     &svm_nested_timer_fastpath_enable, 0,
@@ -2100,6 +2115,11 @@ svm_inj_interrupts(struct svm_softc *sc, struct svm_vcpu *vcpu,
 			ctrl->exitintinfo = 0;
 			if (busy || held != 0)
 				svm_l2_evtq_stash++;
+			else if (svm_nested_evtq_defer != 0) {
+				/* Exercise the carry-over path (test knob). */
+				svm_l2_evtq_stash++;
+				busy = true;
+			}
 		}
 		if (!busy && svm_nested_evtq_pop(vcpu, &event)) {
 			ctrl->eventinj = event;
