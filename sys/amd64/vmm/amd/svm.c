@@ -691,6 +691,13 @@ vmcb_init(struct svm_softc *sc, struct svm_vcpu *vcpu, uint64_t iopm_base_pa,
 	/* EFER_SVM must always be set when the guest is executing */
 	state->efer = EFER_SVM;
 
+	/*
+	 * Architectural EFER reset value has SVME clear.  The read-shadow
+	 * reflects guest intent, so reset it to false even though the hardware
+	 * VMCB bit above is forced set.
+	 */
+	vcpu->guest_efer_svme = false;
+
 	/* Set up the PAT to power-on state */
 	state->g_pat = PAT_VALUE(0, PAT_WRITE_BACK)	|
 	    PAT_VALUE(1, PAT_WRITE_THROUGH)	|
@@ -754,9 +761,13 @@ svm_init(struct vm *vm, pmap_t pmap)
 	svm_msr_rd_ok(svm_sc->msr_bitmap, MSR_TSC);
 
 	/*
-	 * Intercept writes to make sure that the EFER_SVM bit is not cleared.
+	 * Intercept both reads and writes of EFER.  Writes are intercepted to
+	 * make sure that the EFER_SVM bit is not cleared (L0 forces it set so
+	 * the guest can be VMRUN).  Reads are intercepted so that svm_rdmsr()
+	 * can serve a read-shadow whose SVME bit reflects what the guest itself
+	 * wrote, rather than the hardware bit L0 forces on.  The MSR permission
+	 * bitmap defaults to intercept-both, so we simply do not clear either.
 	 */
-	svm_msr_rd_ok(svm_sc->msr_bitmap, MSR_EFER);
 
 	/* Intercept access to all I/O ports. */
 	memset(svm_sc->iopm_bitmap, 0xFF, SVM_IO_BITMAP_SIZE);
@@ -1349,6 +1360,12 @@ svm_write_efer(struct svm_softc *sc, struct svm_vcpu *vcpu, uint64_t newval,
 
 	if (svm_nested_active(sc))
 		svm_nested_trace(vcpu, "wrmsr-efer", newval, oldval);
+	/*
+	 * The guest WRMSR is the authoritative expression of guest intent for
+	 * the SVME bit.  Record it for the EFER read-shadow (svm_rdmsr) even
+	 * though the hardware VMCB EFER always keeps EFER_SVM forced set.
+	 */
+	vcpu->guest_efer_svme = (newval & EFER_SVM) != 0;
 	error = svm_setreg(vcpu, VM_REG_GUEST_EFER, newval);
 	KASSERT(error == 0, ("%s: error %d updating efer", __func__, error));
 	return (0);
@@ -2958,6 +2975,8 @@ svm_vcpu_snapshot(void *vcpui, struct vm_snapshot_meta *meta)
 
 	/* EFER */
 	err += svm_snapshot_reg(vcpu, VM_REG_GUEST_EFER, meta);
+	/* Read-shadow of the guest EFER.SVME bit (see svm_rdmsr). */
+	SNAPSHOT_VAR_OR_LEAVE(vcpu->guest_efer_svme, meta, err, done);
 
 	/* IDTR and GDTR */
 	err += vmcb_snapshot_desc(vcpu, VM_REG_GUEST_IDTR, meta);

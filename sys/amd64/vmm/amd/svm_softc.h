@@ -66,6 +66,7 @@ struct svm_vcpu {
 	int		vcpuid;
 	struct dbg	dbg;
 	int		caps;	 /* optional vm capabilities */
+	bool		guest_efer_svme; /* read-shadow of guest EFER.SVME; L0 forces the hw VMCB bit */
 	struct svm_nested nested; /* nSVM per-vCPU state (zeroed at alloc) */
 };
 

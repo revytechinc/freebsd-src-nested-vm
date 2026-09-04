@@ -217,6 +217,27 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 	int error = 0;
 
 	switch (num) {
+	case MSR_EFER: {
+		struct vmcb_state *state = svm_get_vmcb_state(vcpu);
+
+		if (svm_nested_in_l2(vcpu)) {
+			/*
+			 * L2 read: serve L2's actual (VMCB02) EFER; L1's
+			 * shadow is not L2's.
+			 */
+			*result = state->efer;
+		} else {
+			/*
+			 * Present SVME as the guest itself set it; all other
+			 * bits (LME/LMA/NXE/SCE) come live from the VMCB.  Only
+			 * SVME is forged by L0, which always keeps the hardware
+			 * VMCB EFER_SVM bit set so the guest can be VMRUN.
+			 */
+			*result = (state->efer & ~EFER_SVM) |
+			    (vcpu->guest_efer_svme ? EFER_SVM : 0);
+		}
+		break;
+	}
 	case MSR_MCG_CAP:
 	case MSR_MCG_STATUS:
 		*result = 0;
