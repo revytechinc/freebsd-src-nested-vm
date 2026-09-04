@@ -848,10 +848,12 @@ main(int argc, char** argv)
 			break;
 		case 'N':
 			/*
-			 * Create the VM with nested virtualization enabled.
-			 * The flag can only be given at creation time, and
-			 * bhyveload is what creates the VM, so bhyve -N alone
-			 * is not enough for a bhyveload-booted guest.
+			 * Deprecated no-op.  Nested virtualization is on by
+			 * default and is controlled host-wide by the
+			 * hw.vmm.nested.enable sysctl; there is no per-VM
+			 * opt-in any more.  Still accepted (and still passed
+			 * down as VMMCTL_CREATE_NESTED, which the kernel
+			 * ignores) so that existing scripts keep working.
 			 */
 			openflags |= VMMAPI_OPEN_CREATE_NESTED;
 			break;
@@ -876,9 +878,6 @@ main(int argc, char** argv)
 	ctx = vm_open(vmname);
 	if (ctx != NULL) {
 		need_reinit = 1;
-		if ((openflags & VMMAPI_OPEN_CREATE_NESTED) != 0)
-			warnx("%s already exists; -N only applies when the VM "
-			    "is created", vmname);
 	} else {
 		if (errno != ENOENT)
 			err(1, "vm_open");

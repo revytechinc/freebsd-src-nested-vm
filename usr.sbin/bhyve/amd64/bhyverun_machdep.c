@@ -105,7 +105,8 @@ bhyve_usage(int code)
 	    "       -M: monitor mode\n"
 	    "       -m: memory size\n"
 	    "       -n: NUMA domain specification\n"
-	    "       -N: allow this VM to host nested (L2) guest VMs\n"
+	    "       -N: deprecated no-op; nesting is on by default\n"
+	    "           (control it with the hw.vmm.nested.enable sysctl)\n"
 	    "       -o: set config 'var' to 'value'\n"
 	    "       -P: vmexit from the guest on pause\n"
 	    "       -p: pin 'vcpu' to 'hostcpu'\n"
@@ -222,6 +223,13 @@ bhyve_optparse(int argc, char **argv)
 				errx(EX_USAGE, "NUMA emulation requires ACPI");
 			break;
 		case 'N':
+			/*
+			 * Deprecated no-op.  Nested virtualization is on by
+			 * default and is controlled host-wide by the
+			 * hw.vmm.nested.enable sysctl; there is no per-VM
+			 * opt-in any more.  The option is still accepted so
+			 * that existing scripts keep working.
+			 */
 			nesting_enabled = true;
 			break;
 		case 'o':
