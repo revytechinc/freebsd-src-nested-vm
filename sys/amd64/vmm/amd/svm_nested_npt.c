@@ -133,13 +133,14 @@ static int
 svm_nested_npt_walk(struct svm_vcpu *vcpu, uint64_t ncr3, uint64_t g2,
     int access, uint64_t *g1, int *prot, uint64_t *info1)
 {
-	uint64_t table, pte, frame;
+	uint64_t table, pte, frame, rsvd;
 	int level, shift, granted;
-	bool present;
+	bool present, reserved;
 
 	granted = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
 	table = ncr3 & NPT_FRAME;
 	present = false;
+	reserved = false;
 	frame = 0;
 	for (level = 4; level >= 1; level--) {
 		shift = 12 + 9 * (level - 1);
@@ -155,6 +156,27 @@ svm_nested_npt_walk(struct svm_vcpu *vcpu, uint64_t ncr3, uint64_t g2,
 		if ((pte & NPT_PG_NX) != 0)
 			granted &= ~VM_PROT_EXECUTE;
 		if ((level == 3 || level == 2) && (pte & NPT_PG_PS) != 0) {
+			/*
+			 * Reserved-bit validation for large-page leaves
+			 * (AMD APM Vol 2 §15.25, long-mode paging): a 1GB
+			 * PDPE has address bits 29:13 reserved and a 2MB PDE
+			 * has bits 20:13 reserved (bit 12 is PAT). L1 must
+			 * not be able to set them; a non-zero reserved bit is
+			 * a page-table misconfiguration. Reflect it to L1 as
+			 * a reserved-bit #NPF (present, RSV) instead of
+			 * silently masking, matching the parity the Intel
+			 * EPT12 walker enforces (vmx_nested_ept12.c).
+			 */
+			rsvd = (level == 3) ? 0x3fffe000ul : 0x1fe000ul;
+			if ((pte & rsvd) != 0) {
+				present = true;
+				reserved = true;
+				SVM_CTR3(vcpu, "nested NPT walk: misconfigured "
+				    "large PTE level=%d g2=%#lx pte=%#lx",
+				    level, (unsigned long)g2,
+				    (unsigned long)pte);
+				goto fault;
+			}
 			frame = pte & (level == 3 ? NPT_FRAME_1G : NPT_FRAME_2M);
 			frame |= g2 & ((1ul << shift) - 1);
 			break;
@@ -176,6 +198,8 @@ fault:
 	*info1 = VMCB_NPF_INFO1_U | VMCB_NPF_INFO1_GPA;
 	if (present)
 		*info1 |= VMCB_NPF_INFO1_P;
+	if (reserved)
+		*info1 |= VMCB_NPF_INFO1_RSV;
 	if (access & VM_PROT_WRITE)
 		*info1 |= VMCB_NPF_INFO1_W;
 	if (access & VM_PROT_EXECUTE)

@@ -72,6 +72,7 @@
 #define	PROCBASED2_VIRTUAL_INTERRUPT_DELIVERY	(1 << 9)
 #define	PROCBASED2_PAUSE_LOOP_EXITING		(1 << 10)
 #define	PROCBASED2_ENABLE_INVPCID		(1 << 12)
+#define	PROCBASED2_ENABLE_VM_FUNCTIONS		(1 << 13)
 /*
  * VMCS shadowing (Intel SDM Vol 3 §25.4.2).  Enabling this bit
  * requires VMCS_LINK_POINTER to point at a valid shadow VMCS -- we
@@ -80,6 +81,9 @@
  * real shadow VMCS installed.
  */
 #define	PROCBASED2_VMCS_SHADOWING		(1 << 14)
+#define	PROCBASED2_ENABLE_PML			(1 << 17)
+#define	PROCBASED2_ENABLE_XSAVES_XRSTORS	(1 << 20)
+#define	PROCBASED2_USE_TSC_SCALING		(1 << 25)
 
 /* VM Exit Controls */
 #define	VM_EXIT_SAVE_DEBUG_CONTROLS	(1 << 2)
