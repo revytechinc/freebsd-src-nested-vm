@@ -125,9 +125,9 @@ svm_nested_active(struct svm_softc *svm_sc)
 {
 
 	/*
-	 * The global vmm_nested_enable sysctl and per-VM nested_enabled
-	 * flag must both be on, and the hardware/L0 preflight status must
-	 * be nonzero.  Returning false here short-circuits the nested
+	 * The host-wide vmm_nested_enable sysctl (on by default) must be on
+	 * now and must have been on when the VM was created (nested_enabled
+	 * latches it), and the hardware/L0 preflight status must be nonzero.  Returning false here short-circuits the nested
 	 * dispatcher and falls through to the legacy handler (which
 	 * injects #UD for VMRUN-family and consumes INTR/NMI/NPF).
 	 */

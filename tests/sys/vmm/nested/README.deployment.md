@@ -93,7 +93,9 @@ The intended operator sequence for a freshly-patched test host:
    Does the kernel boot? (vmm is not yet loaded.)
 2. **Verify boot OK** via console or IPMI.
 3. `sudo kldload vmm`. Does vmm load OK? (still no nested yet.)
-4. `sudo sysctl hw.vmm.nested.enable=1`. Enables nested-virt code paths.
+4. `sysctl hw.vmm.nested.enable` -- nesting is **on by default** (1) on
+   capable hardware, so nothing to do here. To take nesting *out* of the
+   picture while debugging, `sudo sysctl hw.vmm.nested.enable=0`.
 5. `sudo kldload svm_nested_test` (or `vmx_nested_test` on Intel). Runs
    the nested test module.
 
@@ -110,20 +112,36 @@ sudo sysctl kern.panic_reboot_wait_time # should print 5 (or higher)
 grep vmm_load /boot/loader.conf         # should print vmm_load="NO"
 ```
 
-## KBI safety net
+## The nesting switch
 
-Two layers of opt-in keep nested-virt **off by default**:
+Nested virtualization is **on by default** and is controlled by exactly one
+knob:
 
-1. **`hw.vmm.nested.enable` defaults to 0**. The runtime tunable is the
-   global gate; with `vmm_nested_enable == 0`, no nested-virt code path
-   runs regardless of which VM is created.
-2. **`vm->nested_enabled` defaults to false** on every new VM. Even if
-   the sysctl is on, an L1 must be created with `VMMCTL_CREATE_NESTED`
-   (kernel) or `VMMAPI_OPEN_CREATE_NESTED` (libvmmapi) to enable per-VM
-   nesting.
+* **`hw.vmm.nested.enable`** (sysctl and loader tunable) defaults to **1**.
+  It is the single master switch. Setting it to 0 turns nesting off
+  host-wide: guests see no VMX/SVM CPUID bit and no nested-virt code path
+  runs.
+* There is **no per-VM opt-in any more**. `bhyve -N` and `bhyveload -N` are
+  still accepted for backwards compatibility but are no-ops, as is the
+  `VMMCTL_CREATE_NESTED` / `VMMAPI_OPEN_CREATE_NESTED` flag.
+* `vm->nested_enabled` still exists in `struct vm`, but it is now just a
+  *latch* of the sysctl taken at VM-creation time. That keeps the per-vCPU
+  nested-state allocation consistent for the life of a VM.
 
-Both gates compose. Operators who only want normal bhyve VMs are
-unaffected by the nested code paths entirely.
+Runtime semantics of a change:
+
+* `enable=1 -> 0` takes effect immediately for **new** VMs, and also hides
+  VMX/SVM from **existing** guests (the CPUID paths test the live sysctl).
+* `enable=0 -> 1` affects **new** VMs only. A VM created while nesting was
+  off stays non-nesting until it is destroyed and recreated.
+* On hardware that genuinely cannot nest (`hw.vmm.nested.vmx` /
+  `hw.vmm.nested.svm` not equal to 2), `vmm_init()` forces the sysctl back
+  to 0 and refuses attempts to set it to 1 with `EOPNOTSUPP`.
+
+`negative/nested_off.sh` is the standing safety test for this contract: it
+proves `enable=0` really is off (no CPUID bits, in-guest
+`hw.vmm.nested.{vmx,svm}` read 0, no nested VM can run) and that `enable=1`
+brings the capability back with **no `-N` anywhere**.
 
 ## ATF verification
 
@@ -160,7 +178,7 @@ watchdog is reset too.
 
 `integration/l2_smoke.sh` is the one test that proves an L2 guest ran. On
 an L0 host with this tree's `vmm.ko` loaded and a `bhyve` built from this
-tree (it must accept `-N`), run as root:
+tree, run as root (no `-N` needed -- nesting is on by default):
 
 ```sh
 L1_IMAGE=/path/to/FreeBSD-16.0-CURRENT-amd64-ufs.raw \
@@ -168,7 +186,9 @@ BHYVE=/path/to/obj/usr.sbin/bhyve/bhyve \
     sh tests/sys/vmm/nested/integration/l2_smoke.sh
 ```
 
-It boots the image as L1 with `-N`, logs in on the serial console, loads
+It boots the image as L1 with **no** `-N` (set `NFLAG=-N` to check that the
+deprecated option is still accepted as a no-op), logs in on the serial
+console, loads
 `vmm` inside L1, runs `bhyveload -h /boot` + `bhyve` there, and passes only
 when the L2 kernel's copyright banner appears on the L1 console. Exit 77
 means a prerequisite is missing. On Intel hosts L2 entry is not implemented
