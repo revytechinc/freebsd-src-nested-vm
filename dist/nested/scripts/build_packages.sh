@@ -5,7 +5,9 @@
 # Build CloudBSD *base* packages once (pkgbase grammar).
 #
 # FreeBSD pkgbase already has:
-#   PKG_NAME_PREFIX  (bsd.pkg.pre.mk / Makefile.inc1) default now CloudBSD
+#   PKG_NAME_PREFIX  (bsd.pkg.pre.mk / Makefile.inc1) defaults to FreeBSD
+#                    upstream; this script overrides it to CloudBSD locally
+#                    (see PKG_NAME_PREFIX below) and never edits those files
 #   name = ${PKG_NAME_PREFIX}-${component}
 #   origin = base/${PKG_NAME_PREFIX}-${component}
 #   repo layout ${REPODIR}/${ABI}/${PKG_VERSION}/ plus a `latest` symlink
