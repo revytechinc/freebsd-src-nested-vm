@@ -1,7 +1,7 @@
 #-
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Copyright (c) 2026 The FreeBSD Project Contributors.
+# Copyright (c) 2026 REVYTECH, Inc.
 # All rights reserved.
 #
 # Wave 6 / T36 ATF smoke test for the Hyper-V nested-virt enlightenment

@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Copyright (c) 2026 The FreeBSD Project
+# Copyright (c) 2026 REVYTECH, Inc.
 #
 # nested_off.sh: prove that nested virtualization is genuinely OFF when a
 # user has not opted into it. Nesting must be strictly opt-in: a guest is
