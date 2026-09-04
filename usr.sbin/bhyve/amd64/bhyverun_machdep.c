@@ -69,9 +69,13 @@ bhyve_init_config(void)
 	set_config_bool("x86.strictmsr", true);
 	set_config_bool("x86.verbosemsr", false);
 	set_config_value("lpc.fwcfg", "bhyve");
-#ifdef BHYVE_SNAPSHOT
+	/*
+	 * Not snapshot-specific: bhyverun.c always starts the bhyvectl IPC
+	 * thread with get_config_value("rundir"), so leaving this unset makes
+	 * every VM start die binding "(null)/<vmname>".  aarch64 and riscv set
+	 * it unconditionally; match them.
+	 */
 	set_config_value("rundir", BHYVE_RUN_DIR);
-#endif
 }
 
 void
