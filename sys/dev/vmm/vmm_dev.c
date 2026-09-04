@@ -1033,7 +1033,11 @@ vmmdev_create(const char *name, uint32_t flags, struct ucred *cred)
 		(void)chgvmmcnt(cred->cr_ruidinfo, -1, 0);
 		return (error);
 	}
-	vm->nested_enabled = (flags & VMMCTL_CREATE_NESTED) != 0;
+	/*
+	 * VMMCTL_CREATE_NESTED is accepted for backwards compatibility but
+	 * ignored: nesting is on by default and controlled host-wide by
+	 * hw.vmm.nested.enable, latched into vm->nested_enabled by vm_create().
+	 */
 	sc = vmmdev_alloc(vm, cred);
 	SLIST_INSERT_HEAD(&head, sc, link);
 	sc->flags = flags;
