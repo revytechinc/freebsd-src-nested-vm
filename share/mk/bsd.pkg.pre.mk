@@ -32,9 +32,9 @@
 #
 # Package metadata:
 #
-# PKG_NAME_PREFIX	The prefix to use for package names.  [CloudBSD]
-# PKG_MAINTAINER	The package maintainer.  [mark@cloudbsd.org]
-# PKG_WWW		The package website.  [https://www.cloudbsd.org]
+# PKG_NAME_PREFIX	The prefix to use for package names.  [FreeBSD]
+# PKG_MAINTAINER	The package maintainer.  [re@FreeBSD.org]
+# PKG_WWW		The package website.  [https://www.FreeBSD.org]
 #
 #
 # Only if _PKG_NEED_ABI is defined:
@@ -54,9 +54,9 @@ PKG_ABI_FILE?=	${WSTAGEDIR}/usr/bin/uname
 
 # These are used in the generated packages, and can be overridden for
 # downstream builds.
-PKG_NAME_PREFIX?=	CloudBSD
-PKG_MAINTAINER?=	mark@cloudbsd.org
-PKG_WWW?=		https://www.cloudbsd.org
+PKG_NAME_PREFIX?=	FreeBSD
+PKG_MAINTAINER?=	re@FreeBSD.org
+PKG_WWW?=		https://www.FreeBSD.org
 
 # These can be set per-package.
 PKG_LICENSELOGIC?=	single
