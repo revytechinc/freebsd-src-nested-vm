@@ -12,11 +12,15 @@
 # this test enforces is therefore the sysctl contract:
 #
 #   with hw.vmm.nested.enable=0, a guest created afterwards
-#     * sees no VMX and no SVM CPUID bit,
+#     * has no VMX and no SVM bit in its CPUID -- read straight out of the
+#       guest's own boot banner ("Features2=" / "AMD Features2="), so this
+#       works with a completely stock guest kernel,
 #     * reads hw.vmm.nested.vmx == 0 and hw.vmm.nested.svm == 0 inside itself
-#       (or does not have those sysctls at all), and
+#       if it happens to carry a nested-capable vmm(4) (a stock guest has no
+#       such sysctls; their absence proves nothing either way), and
 #     * cannot create/run a nested VM;
-#   and with hw.vmm.nested.enable=1 the capability comes back.
+#   and with hw.vmm.nested.enable=1 the host's own capability bit (VMX on an
+#   Intel host, SVM on an AMD one) is back in the guest's CPUID.
 #
 # The second half (capability returns) is what keeps this an honest negative
 # test rather than one that would also pass if nesting were simply broken.
@@ -56,6 +60,8 @@ kldstat -q -n vmm || skip "vmm.ko not loaded"
 sysctl -n hw.vmm.nested.enable >/dev/null 2>&1 ||
     skip "hw.vmm.nested.enable not present in this kernel"
 SAVED_ENABLE=$(sysctl -n hw.vmm.nested.enable)
+HOST_VMX=$(sysctl -n hw.vmm.nested.vmx 2>/dev/null || echo 0)
+HOST_SVM=$(sysctl -n hw.vmm.nested.svm 2>/dev/null || echo 0)
 
 WORKDIR=${WORKDIR:-$(mktemp -d /tmp/nestedoff.XXXXXX)}
 mkdir -p "$WORKDIR" || fail "cannot create $WORKDIR"
@@ -135,8 +141,31 @@ stop_l1()
 	VM=
 }
 
-# report_caps: ask the running L1 for its CPUID virt bit and nested sysctls.
-# Echoes "<cpuidvirt> <vmx> <svm>"; empty fields mean "absent".
+# guest_cpuid_virt: what the guest CPU actually advertises, read out of the
+# guest's own boot banner.  This is the decisive signal and it works for a
+# *stock* guest: FreeBSD prints leaf 1 ECX as "Features2=" and leaf
+# 8000_0001 ECX as "AMD Features2=", so the VMX and SVM bits are visible
+# without the guest needing our nested-capable vmm(4) at all.
+# Echoes "<vmx yes|no> <svm yes|no>".
+guest_cpuid_virt()
+{
+	if grep -Eq '^[[:space:]]+Features2=.*[<,]VMX[,>]' "$CONS"; then
+		_v=yes
+	else
+		_v=no
+	fi
+	if grep -Eq 'AMD Features2=.*[<,]SVM[,>]' "$CONS"; then
+		_s=yes
+	else
+		_s=no
+	fi
+	printf '%s %s\n' "$_v" "$_s"
+}
+
+# report_caps: ask the running L1 for the nested sysctls, if it has them.
+# A stock guest kernel has no hw.vmm.nested.* at all, so "absent" here is
+# not evidence either way -- guest_cpuid_virt() is what decides.
+# Echoes "<vmx> <svm>"; empty fields mean "absent".
 report_caps()
 {
 	send 'kldload vmm; echo KLDLOADED'
@@ -152,7 +181,7 @@ report_caps()
 	send 'S=$(sysctl -n hw.vmm.nested.svm 2>/dev/null)'
 	send 'echo NC=${V}x${S}yEND'
 	wait_for 'NC=[0-9]*x[0-9]*yEND' 30 ||
-	    fail "L1 did not report the nested capability sysctls"
+	    fail "L1 did not answer the nested capability probe"
 	_line=$(tail -n +"$((_mark + 1))" "$CONS" | grep -E '^NC=[0-9]*x[0-9]*yEND' | tail -1)
 	_vmx=${_line#NC=}
 	_vmx=${_vmx%%x*}
@@ -172,6 +201,14 @@ sysctl hw.vmm.nested.enable=0 >/dev/null 2>&1 ||
     fail "hw.vmm.nested.enable did not take the value 0"
 
 boot_l1 off
+set -- $(guest_cpuid_virt)
+offcpuvmx=$1; offcpusvm=$2
+log "phase 1 (enable=0): guest CPUID VMX=$offcpuvmx SVM=$offcpusvm (both must be no)"
+[ "$offcpuvmx" = no ] ||
+    fail "VMX is still in the guest's CPUID while hw.vmm.nested.enable=0"
+[ "$offcpusvm" = no ] ||
+    fail "SVM is still in the guest's CPUID while hw.vmm.nested.enable=0"
+
 set -- $(report_caps)
 offvmx=${1:-}; offsvm=${2:-}
 log "phase 1 (enable=0): in-guest hw.vmm.nested.vmx=${offvmx:-absent} hw.vmm.nested.svm=${offsvm:-absent} (absent or 0 = off)"
@@ -201,13 +238,26 @@ if ! sysctl hw.vmm.nested.enable=1 >/dev/null 2>&1; then
 fi
 
 boot_l1 on
+set -- $(guest_cpuid_virt)
+oncpuvmx=$1; oncpusvm=$2
+log "phase 2 (enable=1, no -N): guest CPUID VMX=$oncpuvmx SVM=$oncpusvm"
+# The host vendor decides which bit has to come back.
+if [ "$HOST_VMX" = 2 ]; then
+	[ "$oncpuvmx" = yes ] ||
+	    fail "hw.vmm.nested.enable=1 but the guest still has no VMX in its CPUID -- nesting is not on by default"
+elif [ "$HOST_SVM" = 2 ]; then
+	[ "$oncpusvm" = yes ] ||
+	    fail "hw.vmm.nested.enable=1 but the guest still has no SVM in its CPUID -- nesting is not on by default"
+else
+	skip "host reports neither hw.vmm.nested.vmx=2 nor .svm=2"
+fi
+
+# If the guest also carries a nested-capable vmm(4), its own sysctls must
+# agree.  A stock guest has no such sysctls; that is fine.
 set -- $(report_caps)
 onvmx=${1:-}; onsvm=${2:-}
-log "phase 2 (enable=1, still no -N): in-guest hw.vmm.nested.vmx=${onvmx:-absent} hw.vmm.nested.svm=${onsvm:-absent}"
-if [ "${onvmx:-0}" != 2 ] && [ "${onsvm:-0}" != 2 ]; then
-	fail "with hw.vmm.nested.enable=1 and no -N the guest still sees no nested capability (vmx=${onvmx:-absent} svm=${onsvm:-absent}) -- nesting is not on by default"
-fi
+log "phase 2: in-guest hw.vmm.nested.vmx=${onvmx:-absent} hw.vmm.nested.svm=${onsvm:-absent} (absent = stock guest vmm, not a failure)"
 stop_l1
 
-log "PASS: hw.vmm.nested.enable is the master switch -- 0 hides VMX/SVM and blocks nested VMs, 1 restores the capability with no -N flag anywhere"
+log "PASS: hw.vmm.nested.enable is the master switch -- 0 keeps VMX/SVM out of the guest CPUID and blocks nested VMs, 1 restores the capability with no -N flag anywhere"
 exit 0
