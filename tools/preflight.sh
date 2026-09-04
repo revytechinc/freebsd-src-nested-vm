@@ -386,8 +386,8 @@ decode_intel() {
                verdict_ok=1; verdict_reason='nVMX ready' ;;
             1) printf '  nVMX (nested) guests:  BLOCKED-L0 (hw.vmm.nested.vmx=1: L0 hypervisor present).\n'
                verdict_ok=0; verdict_reason='nVMX blocked by L0' ;;
-            0) printf '  nVMX (nested) guests:  UNSUPPORTED (hw.vmm.nested.vmx=0: silicon lacks VMCS-shadowing / unrestricted-guest).\n'
-               verdict_ok=0; verdict_reason='silicon lacks VMCS shadowing' ;;
+            0) printf '  nVMX (nested) guests:  UNSUPPORTED (hw.vmm.nested.vmx=0: silicon lacks EPT/unrestricted-guest).\n'
+               verdict_ok=0; verdict_reason='silicon lacks unrestricted guest' ;;
             *) printf '  nVMX (nested) guests:  UNKNOWN (hw.vmm.nested.vmx=%s).\n' "${nested_v:-?}"
                verdict_ok=0; verdict_reason='unknown nested.vmx state' ;;
         esac
