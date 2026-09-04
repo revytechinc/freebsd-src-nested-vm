@@ -18,6 +18,7 @@ PKGCONFBRANCH?=	latest
 .endif
 PKGCONF?=	FreeBSD.conf.${PKGCONFBRANCH}
 CONFS=		${PKGCONF}
+CONFS+=		CloudBSD.conf
 CONFSNAME_${PKGCONF}=	${PKGCONF:C/\.conf.+$/.conf/}
 CONFSDIR=	/etc/pkg
 CONFSMODE=	644
