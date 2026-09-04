@@ -159,6 +159,7 @@ SYSCTL_NODE(_hw_vmm, OID_AUTO, nested, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
 uint64_t svm_l2_inj_total;
 uint64_t svm_l2_inj_vec[256];
 uint64_t svm_l2_vmruns, svm_l2_vintr_want, svm_l2_notintr;
+uint64_t svm_l2_exitint_seen, svm_l2_requeue;
 static int
 svm_l2_inj_sysctl(SYSCTL_HANDLER_ARGS)
 {
@@ -168,6 +169,9 @@ svm_l2_inj_sysctl(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "total=%lu vmruns=%lu vintr_want=%lu notintr=%lu\n",
 	    (unsigned long)svm_l2_inj_total, (unsigned long)svm_l2_vmruns,
 	    (unsigned long)svm_l2_vintr_want, (unsigned long)svm_l2_notintr);
+	sbuf_printf(&sb, "exitint_seen=%lu requeue=%lu\n",
+	    (unsigned long)svm_l2_exitint_seen,
+	    (unsigned long)svm_l2_requeue);
 	for (i = 0; i < 256; i++)
 		if (svm_l2_inj_vec[i])
 			sbuf_printf(&sb, "vec 0x%02x = %lu\n", i,
@@ -1570,7 +1574,26 @@ svm_vmexit(struct svm_softc *svm_sc, struct svm_vcpu *vcpu,
 	    vmexit->inst_length, code, info1, info2));
 
 	svm_update_virqinfo(vcpu);
-	svm_save_intinfo(svm_sc, vcpu);
+	/*
+	 * Save the event that was in flight when this #VMEXIT was taken
+	 * (VMCB EXITINTINFO, APMv2 "Intercepts during IDT interrupt
+	 * delivery") -- but only when the exit belongs to L0's own guest.
+	 *
+	 * The vcpu-level intinfo store that svm_save_intinfo() feeds is
+	 * L1-context state: svm_inj_interrupts() drains it into the VMCB
+	 * only when *not* running L2, and svm_nested_vmexit() copies an L2
+	 * exit's EXITINTINFO into VMCB12 for L1 to replay.  Filing an L2
+	 * event there therefore both cross-contaminates L1 with an event
+	 * that belongs to L2 and duplicates the one already handed to L1,
+	 * so leave it in the VMCB where the two nested paths expect it:
+	 * requeued into VMCB02.eventinj by svm_inj_interrupts() when L0
+	 * handled the exit itself and resumes L2, or copied into VMCB12 by
+	 * the reflect path when the exit goes to L1.
+	 */
+	if (!svm_nested_in_l2(vcpu))
+		svm_save_intinfo(svm_sc, vcpu);
+	else if (VMCB_EXITINTINFO_VALID(ctrl->exitintinfo))
+		svm_l2_exitint_seen++;
 
 	switch (code) {
 	case VMCB_EXIT_IRET:
@@ -2015,8 +2038,36 @@ svm_inj_interrupts(struct svm_softc *sc, struct svm_vcpu *vcpu,
 	 * reflecting to L1 (svm_nested_l1_pending_exit), which svm_run() has
 	 * already checked before reaching this call.
 	 */
-	if (svm_nested_in_l2(vcpu))
+	if (svm_nested_in_l2(vcpu)) {
+		/*
+		 * ...with one exception.  An L2 #VMEXIT that L0 handled by
+		 * itself -- a shadow-NPT fault, the timer I/O fast path, any
+		 * exit L1 does not intercept -- can be taken *during* delivery
+		 * of the vector L1 injected.  Hardware then clears
+		 * VMCB02.EVENTINJ and parks the interrupted event in
+		 * VMCB02.EXITINTINFO.  Resuming L2 without putting it back
+		 * drops the vector outright, and because the injecting vlapic
+		 * already moved that vector IRR->ISR the EOI never arrives:
+		 * PPR stays raised and every same-or-lower-priority interrupt
+		 * is blocked from then on, so the guest halts in cpu_idle_hlt
+		 * and is never woken again.  This is what stalls a triple-
+		 * nested (L3) boot, where L0 self-handles far more exits.
+		 *
+		 * Put the event back (the AMD analogue of KVM's
+		 * svm_complete_interrupts(); EXITINTINFO and EVENTINJ share a
+		 * layout).  Only re-entry into L2 reaches here -- a reflected
+		 * exit runs L1 instead, and svm_nested_vmexit() has already
+		 * copied EXITINTINFO into VMCB12 for L1 to replay.
+		 */
+		ctrl = svm_get_vmcb_ctrl(vcpu);
+		if (VMCB_EXITINTINFO_VALID(ctrl->exitintinfo) &&
+		    (ctrl->eventinj & VMCB_EVENTINJ_VALID) == 0) {
+			ctrl->eventinj = ctrl->exitintinfo;
+			ctrl->exitintinfo = 0;
+			svm_l2_requeue++;
+		}
 		return;
+	}
 
 	state = svm_get_vmcb_state(vcpu);
 	ctrl  = svm_get_vmcb_ctrl(vcpu);
