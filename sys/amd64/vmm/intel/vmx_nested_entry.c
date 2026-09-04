@@ -72,8 +72,7 @@ int vmx_nested_l2_enable = 1;
 SYSCTL_INT(_hw_vmm_nested, OID_AUTO, vmx_l2, CTLFLAG_RWTUN,
     &vmx_nested_l2_enable, 1,
     "Run nested VMX L2 guests for real on Intel (default on; set 0 to fall back "
-    "to the synthetic entry-failure path). Still gated by hw.vmm.nested.enable "
-    "and per-VM -N.");
+    "to the synthetic entry-failure path). Still gated by hw.vmm.nested.enable.");
 
 /* --- diagnostic counters for the L2 interrupt-delivery investigation --- */
 uint64_t vmx_l2_exit_hist[128];
