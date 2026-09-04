@@ -36,7 +36,17 @@ KEYSDIR=	pkg
 SUBURL=		base_latest
 .endif
 
+# PKGBASE_REPO_CONF may be set to the path of a ready-made pkg repository
+# configuration file, which is then installed as the network pkgbase
+# repository used by bsdinstall(8) instead of the generated default.  This
+# lets a downstream build point its installation media at its own pkgbase
+# repository without modifying FreeBSD-base.conf.in.
+.if defined(PKGBASE_REPO_CONF) && !empty(PKGBASE_REPO_CONF)
+FreeBSD-base.conf: ${PKGBASE_REPO_CONF}
+	cat ${.ALLSRC} > ${.TARGET}
+.else
 FreeBSD-base.conf: FreeBSD-base.conf.in
 	sed "s|%%SUBURL%%|${SUBURL}|;s|%%KEYSDIR%%|${KEYSDIR}|" < ${.ALLSRC} > ${.TARGET}
+.endif
 
 .include <bsd.prog.mk>
