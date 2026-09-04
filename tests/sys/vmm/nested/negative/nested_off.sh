@@ -143,14 +143,21 @@ report_caps()
 	wait_for 'KLDLOADED' 60 || fail "kldload vmm in L1 did not complete"
 
 	_mark=$(wc -l < "$CONS")
-	# dmesg VMX/SVM identification is unreliable across images; use the
-	# CPU feature string the guest kernel printed plus the sysctls.
-	send 'echo NESTEDCAP_HV=$(grep -c -E "VMX|SVM" /var/run/dmesg.boot 2>/dev/null)_VMX=$(sysctl -n hw.vmm.nested.vmx 2>/dev/null)_SVM=$(sysctl -n hw.vmm.nested.svm 2>/dev/null)_END'
-	wait_for 'NESTEDCAP_HV=.*_END' 30 ||
+	# Keep every line we type well under 80 columns.  The guest console
+	# wraps at 80 and a wrapped command comes back mangled (a stray space
+	# lands inside a word), which silently turns the probe into a broken
+	# command whose output is empty -- i.e. it would look like "no nested
+	# capability" no matter what the kernel actually did.
+	send 'V=$(sysctl -n hw.vmm.nested.vmx 2>/dev/null)'
+	send 'S=$(sysctl -n hw.vmm.nested.svm 2>/dev/null)'
+	send 'echo NC=${V}x${S}yEND'
+	wait_for 'NC=[0-9]*x[0-9]*yEND' 30 ||
 	    fail "L1 did not report the nested capability sysctls"
-	_line=$(tail -n +"$((_mark + 1))" "$CONS" | grep -E 'NESTEDCAP_HV=.*_END' | tail -1)
-	_vmx=$(printf '%s\n' "$_line" | sed -E 's/.*_VMX=([0-9]*)_SVM=([0-9]*)_END.*/\1/')
-	_svm=$(printf '%s\n' "$_line" | sed -E 's/.*_VMX=([0-9]*)_SVM=([0-9]*)_END.*/\2/')
+	_line=$(tail -n +"$((_mark + 1))" "$CONS" | grep -E '^NC=[0-9]*x[0-9]*yEND' | tail -1)
+	_vmx=${_line#NC=}
+	_vmx=${_vmx%%x*}
+	_svm=${_line%yEND*}
+	_svm=${_svm##*x}
 	printf '%s %s\n' "$_vmx" "$_svm"
 }
 
