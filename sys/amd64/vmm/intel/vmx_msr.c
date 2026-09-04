@@ -601,11 +601,33 @@ vmx_nested_cap_msr_read(struct vmx_vcpu *vcpu __unused, u_int msr, uint64_t *val
 	 * vlapic emulation, so it intercepts L2's APIC accesses and L0 can
 	 * reflect them to L1. Likewise drop "process posted interrupts".
 	 */
-	if (msr == MSR_VMX_PROCBASED_CTLS2)
+	if (msr == MSR_VMX_PROCBASED_CTLS2) {
 		*val &= ~((uint64_t)(PROCBASED2_VIRTUALIZE_APIC_ACCESSES |
 		    PROCBASED2_VIRTUALIZE_X2APIC_MODE |
 		    PROCBASED2_APIC_REGISTER_VIRTUALIZATION |
 		    PROCBASED2_VIRTUAL_INTERRUPT_DELIVERY) << 32);
+		/*
+		 * Do not advertise secondary VM-exec controls that L0's
+		 * nested path does not implement. The raw host MSR sets the
+		 * allowed-1 bits for these, but vmcs02 never programs them and
+		 * L0 rejects the companion VMCS fields (PML_ADDRESS,
+		 * VMREAD/VMWRITE_BITMAP, VM_FUNCTION_CONTROL, XSS_EXIT_BITMAP,
+		 * TSC_MULTIPLIER). A stock L1 hypervisor (e.g. KVM) that trusts
+		 * the advertisement enables the control and then VMWRITEs those
+		 * fields, tripping an "unsupported VMCS component" (err=12)
+		 * WARN_ON for a feature L0 cannot honor. Clear the allowed-1
+		 * (high 32) bits so L1 does not enable them:
+		 *   PML(17), VMFUNC(13), VMCS-shadowing(14), XSAVES(20) and
+		 *   "use TSC scaling"/TSC-multiplier(25).
+		 * Keep the controls L0 does back (EPT, VPID, unrestricted
+		 * guest, INVPCID, RDTSCP, ...) advertised untouched.
+		 */
+		*val &= ~((uint64_t)(PROCBASED2_ENABLE_VM_FUNCTIONS |
+		    PROCBASED2_VMCS_SHADOWING |
+		    PROCBASED2_ENABLE_PML |
+		    PROCBASED2_ENABLE_XSAVES_XRSTORS |
+		    PROCBASED2_USE_TSC_SCALING) << 32);
+	}
 	if (msr == MSR_VMX_PINBASED_CTLS || msr == MSR_VMX_TRUE_PINBASED_CTLS)
 		*val &= ~((uint64_t)PINBASED_POSTED_INTERRUPT << 32);
 	return (0);
