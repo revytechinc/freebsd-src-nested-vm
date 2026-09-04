@@ -182,7 +182,13 @@ static int trap_wbinvd;
 SYSCTL_INT(_hw_vmm, OID_AUTO, trap_wbinvd, CTLFLAG_RDTUN, &trap_wbinvd, 0,
     "WBINVD triggers a VM-exit");
 
-int vmm_nested_enable;
+/*
+ * hw.vmm.nested.enable: the single master switch for nested virtualization.
+ * ON by default; set to 0 to turn nesting off host-wide.  There is no per-VM
+ * opt-in -- bhyve(8)/bhyveload(8) -N is accepted but ignored.  vmm_init()
+ * forces this back to 0 where vmm_nested_supported() is false.
+ */
+int vmm_nested_enable = 1;
 static int vmm_nested_enable_sysctl(SYSCTL_HANDLER_ARGS);
 bool vmm_nested_supported(void);
 extern int svm_nested_status;
@@ -224,7 +230,8 @@ SYSCTL_DECL(_hw_vmm_nested);
 SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, enable,
     CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
     vmm_nested_enable_sysctl, "I",
-    "Enable nested virtualization support (per-VM opt-in via VMMCTL_CREATE_NESTED)");
+    "Enable nested virtualization host-wide (default 1; 0 disables it for "
+    "VMs created afterwards)");
 
 /* global statistics */
 VMM_STAT(VCPU_MIGRATIONS, "vcpu migration across host cpus");
@@ -444,6 +451,12 @@ vm_create(const char *name, struct vm **retvm)
 	vm->cores = 1;		/* XXX backwards compatibility */
 	vm->threads = 1;	/* XXX backwards compatibility */
 	vm->maxcpus = vm_maxcpu;
+
+	/*
+	 * Latch the host-wide nested-virt gate at VM creation.  Nesting is on
+	 * by default and hw.vmm.nested.enable is the only control.
+	 */
+	vm->nested_enabled = (vmm_nested_enable != 0);
 
 	vm_init(vm, true);
 
