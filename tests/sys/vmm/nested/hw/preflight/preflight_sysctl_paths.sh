@@ -83,9 +83,14 @@ preflight_sysctl_paths_main()
 	# Exercise the master switch: on capable silicon it succeeds; on
 	# L0-conflict or unsupported hardware it returns EOPNOTSUPP.  Either
 	# path is a pass as long as the kernel responds predictably.
+	_saved_enable=$(sysctl -n hw.vmm.nested.enable 2>/dev/null || echo 1)
 	if sysctl hw.vmm.nested.enable=1 >/dev/null 2>&1; then
 		echo "  hw.vmm.nested.enable=1 accepted"
+		# Prove 0 is also accepted, then put the switch back the way we
+		# found it -- nesting is on by default and leaving it off would
+		# silently disarm every test that runs after this one.
 		sysctl hw.vmm.nested.enable=0 >/dev/null 2>&1 || true
+		sysctl hw.vmm.nested.enable="${_saved_enable}" >/dev/null 2>&1 || true
 	else
 		out=$(sysctl hw.vmm.nested.enable=1 2>&1 || true)
 		if echo "$out" | grep -Eq 'refusing nested-virt|not available|not supported'; then

@@ -127,16 +127,13 @@ dumps core.
 This is intended for debugging an OS loader as it allows inspection of
 the guest memory.
 .It Fl N
-Create the virtual machine with nested virtualization enabled, so the
-guest can run its own hypervisor.
-The flag only takes effect when
-.Nm
-creates the VM; it is ignored, with a warning, for a VM that already
-exists.
-The host must have
+Deprecated; accepted and ignored.
+Nested virtualization is enabled by default and is controlled host-wide
+by the
 .Va hw.vmm.nested.enable
-set; see
-.Xr vmm_nested 9 .
+sysctl, which defaults to 1.
+Set it to 0 to disable nested virtualization for virtual machines created
+afterwards.
 .It Fl S
 Wire guest memory.
 .El

@@ -136,7 +136,9 @@ struct vm {
 
 	bool		dying;			/* (o) is dying */
 	int		suspend;		/* (i) stop VM execution */
-	bool		nested_enabled;		/* (o) nested-virt enabled for this VM */
+	bool		nested_enabled;		/* (o) host-wide nested-virt gate,
+						       latched at VM creation from
+						       hw.vmm.nested.enable */
 
 	volatile cpuset_t active_cpus;		/* (i) active vcpus */
 	volatile cpuset_t debug_cpus;		/* (i) vcpus stopped for debug */

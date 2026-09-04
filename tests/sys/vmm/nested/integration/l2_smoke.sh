@@ -9,7 +9,9 @@
 # Requirements on the L0 host (run as root):
 #   - vmm.ko from this tree loaded, hw.vmm.nested.enable=1 accepted
 #     (see vmm_nested(9));
-#   - a bhyve(8) built from this tree (it must accept -N);
+#   - a bhyve(8) built from this tree.  No -N flag is used: nesting is on by
+#     default and controlled solely by hw.vmm.nested.enable.  Set NFLAG=-N to
+#     exercise the backwards-compatible no-op form of the old option.;
 #   - a FreeBSD VM image with a UFS root, e.g. the official
 #     FreeBSD-*-amd64-ufs.raw snapshot, as L1_IMAGE. The image is copied
 #     first; the original is never modified.
@@ -21,10 +23,11 @@
 #
 # Environment:
 #   L1_IMAGE     path to the raw UFS image (required)
-#   BHYVE        bhyve binary with -N (default: bhyve in PATH)
-#   BHYVELOAD    bhyveload binary with -N (default: bhyveload); bhyveload
-#                creates the VM, so it is the one that must pass the
-#                nested flag
+#   BHYVE        bhyve binary (default: bhyve in PATH)
+#   BHYVELOAD    bhyveload binary (default: bhyveload)
+#   NFLAG        empty by default -- the point of the test is that nesting
+#                needs no per-VM flag.  Set NFLAG=-N to check that the
+#                deprecated option is still accepted as a harmless no-op.
 #   L1_MEM       L1 memory (default 4G); L1_CPUS (default 2)
 #   L1_TIMEOUT   seconds to wait for the L1 login prompt (default 300)
 #   L2_TIMEOUT   seconds to wait for the L2 banner (default 120)
@@ -40,6 +43,7 @@ set -u
 : "${L1_IMAGE:=}"
 : "${BHYVE:=bhyve}"
 : "${BHYVELOAD:=bhyveload}"
+: "${NFLAG:=}"
 : "${L1_MEM:=4G}"
 : "${L1_CPUS:=2}"
 : "${L1_TIMEOUT:=300}"
@@ -67,8 +71,8 @@ fail() { log "FAIL: $*"; exit 1; }
 [ "$(id -u)" -eq 0 ] || skip "must run as root"
 [ -n "$L1_IMAGE" ] && [ -r "$L1_IMAGE" ] || skip "L1_IMAGE not set or unreadable"
 command -v "$BHYVE" >/dev/null 2>&1 || skip "$BHYVE not found"
-"$BHYVE" -h 2>&1 | grep -q -- '-N' || skip "$BHYVE does not support -N (build usr.sbin/bhyve from this tree)"
-"$BHYVELOAD" 2>&1 | grep -q -- '-NS' || skip "$BHYVELOAD does not support -N (build usr.sbin/bhyveload from this tree)"
+"$BHYVE" -h 2>&1 | grep -q -- '-N' || skip "$BHYVE does not accept -N (build usr.sbin/bhyve from this tree)"
+"$BHYVELOAD" 2>&1 | grep -q -- '-NS' || skip "$BHYVELOAD does not accept -N (build usr.sbin/bhyveload from this tree)"
 kldstat -q -n vmm || skip "vmm.ko not loaded"
 if [ "$(sysctl -n hw.vmm.nested.enable 2>/dev/null)" != "1" ]; then
 	sysctl hw.vmm.nested.enable=1 >/dev/null 2>&1 ||
@@ -127,13 +131,15 @@ log "loading L1 kernel from $DISK"
 # The stock images default to the video console; force the kernel onto
 # the serial port we are reading, skip the loader menu delay, and boot
 # single-user so a root shell appears without going through getty.
-"$BHYVELOAD" -N -c stdio -m "$L1_MEM" -d "$DISK" \
+# shellcheck disable=SC2086 -- NFLAG is intentionally word-split (usually empty)
+"$BHYVELOAD" $NFLAG -c stdio -m "$L1_MEM" -d "$DISK" \
     -e console=comconsole -e autoboot_delay=1 -e boot_single=YES "$VM" \
     >"$WORKDIR/bhyveload.log" 2>&1 </dev/null ||
     fail "bhyveload failed: $(tail -3 "$WORKDIR/bhyveload.log")"
 
-log "starting L1 ($L1_CPUS vCPU, $L1_MEM, nested)"
-"$BHYVE" -N -c "$L1_CPUS" -m "$L1_MEM" -A -H -P \
+log "starting L1 ($L1_CPUS vCPU, $L1_MEM, nesting via sysctl, NFLAG='${NFLAG}')"
+# shellcheck disable=SC2086
+"$BHYVE" $NFLAG -c "$L1_CPUS" -m "$L1_MEM" -A -H -P \
     -s 0,hostbridge -s 3,virtio-blk,"$DISK" -s 31,lpc \
     -l com1,stdio "$VM" <"$INFIFO" >>"$CONS" 2>"$WORKDIR/bhyve.log" &
 BHYVE_PID=$!
@@ -170,7 +176,7 @@ send 'bhyvectl --vm=probe --create && echo CREATED; bhyvectl --vm=probe --destro
 wait_for 'CREATED' 60 || fail "vm_create inside L1 failed (see $CONS)"
 progress "L1 vm_create done"
 if grep -q 'vmm: .*not available\|SVM: not available\|VMX .*not available' "$CONS"; then
-	fail "L1 kernel says virtualization is not available: -N did not expose VMX/SVM"
+	fail "L1 kernel says virtualization is not available: hw.vmm.nested.enable=1 did not expose VMX/SVM to the guest"
 fi
 
 mark=$(wc -l < "$CONS")

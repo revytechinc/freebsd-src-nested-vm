@@ -189,14 +189,14 @@ x86_emulate_cpuid(struct vcpu *vcpu, uint64_t *rax, uint64_t *rbx,
 			cpuid_count(func, param, regs);
 
 			/*
-			 * Hide SVM from the guest. Exception: when
-			 * nested-virt is opted-in for this VM AND the
-			 * host-wide gate is on AND the L0 host actually
-			 * has SVM (i.e., an AMD host), expose SVM so an
-			 * L1 hypervisor (L1 bhyve/KVM) can detect it and
-			 * execute VMRUN. SVM stays hidden on Intel hosts
-			 * (L0 can't run SVM either way) and on non-nested
-			 * VMs (existing behavior preserved).
+			 * Expose SVM to the guest when the host-wide
+			 * nested-virt gate (hw.vmm.nested.enable, on by
+			 * default) was on when this VM was created AND is
+			 * still on AND the L0 host actually has SVM (i.e.,
+			 * an AMD host), so an L1 hypervisor (L1 bhyve/KVM)
+			 * can detect it and execute VMRUN. SVM stays hidden
+			 * on Intel hosts (L0 can't run SVM either way) and
+			 * whenever nesting has been turned off.
 			 */
 			if (!(vm->nested_enabled && vmm_nested_enable &&
 			    vmm_is_svm()))
@@ -355,12 +355,12 @@ x86_emulate_cpuid(struct vcpu *vcpu, uint64_t *rax, uint64_t *rbx,
 			 * Don't expose SpeedStep, TME or SMX capability.
 			 * Advertise x2APIC capability and Hypervisor guest.
 			 *
-			 * VMX is exposed only when nested-virt is opted-in
-			 * for this VM AND the host-wide gate is on AND the
-			 * L0 host actually supports VMX (i.e., an Intel
-			 * host). VMX stays hidden on AMD hosts (L0 cannot
-			 * run VMX) and on non-nested VMs (existing behavior
-			 * preserved).
+			 * VMX is exposed when the host-wide nested-virt gate
+			 * (hw.vmm.nested.enable, on by default) was on when
+			 * this VM was created AND is still on AND the L0 host
+			 * actually supports VMX (i.e., an Intel host). VMX
+			 * stays hidden on AMD hosts (L0 cannot run VMX) and
+			 * whenever nesting has been turned off.
 			 */
 			regs[2] &= ~(CPUID2_EST | CPUID2_TM2);
 			regs[2] &= ~(CPUID2_SMX);
