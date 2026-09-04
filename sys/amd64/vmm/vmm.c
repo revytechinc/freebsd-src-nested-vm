@@ -182,7 +182,14 @@ static int trap_wbinvd;
 SYSCTL_INT(_hw_vmm, OID_AUTO, trap_wbinvd, CTLFLAG_RDTUN, &trap_wbinvd, 0,
     "WBINVD triggers a VM-exit");
 
-int vmm_nested_enable;
+/*
+ * hw.vmm.nested.enable: the single master switch for nested virtualization.
+ * It is ON by default; an operator turns nesting off host-wide by setting it
+ * to 0.  There is no longer any per-VM opt-in flag -- bhyve(8)/bhyveload(8)
+ * -N is accepted but ignored.  vmm_init() forces this back to 0 on hardware
+ * that cannot do nesting at all (see vmm_nested_supported()).
+ */
+int vmm_nested_enable = 1;
 static int vmm_nested_enable_sysctl(SYSCTL_HANDLER_ARGS);
 bool vmm_nested_supported(void);
 extern int svm_nested_status;
@@ -196,8 +203,8 @@ vmm_nested_supported(void)
 	 * Nested-virt is supported wherever the hardware capability is present
 	 * (status == 2), including inside a guest that has VMX/SVM exposed to it.
 	 * This is what lets nesting recurse past one level (L2 -> L3 -> ...).
-	 * It stays strictly opt-in: hw.vmm.nested.enable still defaults to 0 and
-	 * each nested child must be created with -N (VMMCTL_CREATE_NESTED).
+	 * Nesting is on by default and is controlled purely by
+	 * hw.vmm.nested.enable; there is no per-VM opt-in.
 	 */
 	return ((vmm_is_intel() && vmx_nested_status == 2) ||
 	    (vmm_is_svm() && svm_nested_status == 2));
@@ -230,7 +237,8 @@ SYSCTL_DECL(_hw_vmm_nested);
 SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, enable,
     CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
     vmm_nested_enable_sysctl, "I",
-    "Enable nested virtualization support (per-VM opt-in via VMMCTL_CREATE_NESTED)");
+    "Enable nested virtualization host-wide (default 1; 0 disables it for "
+    "VMs created afterwards)");
 
 /* global statistics */
 VMM_STAT(VCPU_MIGRATIONS, "vcpu migration across host cpus");
@@ -450,6 +458,17 @@ vm_create(const char *name, struct vm **retvm)
 	vm->cores = 1;		/* XXX backwards compatibility */
 	vm->threads = 1;	/* XXX backwards compatibility */
 	vm->maxcpus = vm_maxcpu;
+
+	/*
+	 * Latch the host-wide nested-virt gate at VM creation.  Nesting is on
+	 * by default; hw.vmm.nested.enable is the only control (there is no
+	 * per-VM opt-in flag any more).  Latching keeps the per-vCPU nested
+	 * state allocation and the fast-path gates consistent for the lifetime
+	 * of the VM: flipping the sysctl afterwards changes what *new* VMs get.
+	 * Turning it off does immediately hide VMX/SVM from existing guests,
+	 * because the CPUID paths also test vmm_nested_enable.
+	 */
+	vm->nested_enabled = (vmm_nested_enable != 0);
 
 	vm_init(vm, true);
 
