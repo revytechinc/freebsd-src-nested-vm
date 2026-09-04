@@ -160,6 +160,8 @@ uint64_t svm_l2_inj_total;
 uint64_t svm_l2_inj_vec[256];
 uint64_t svm_l2_vmruns, svm_l2_vintr_want, svm_l2_notintr;
 uint64_t svm_l2_exitint_seen, svm_l2_requeue;
+uint64_t svm_l2_evtq_stash, svm_l2_evtq_inject, svm_l2_evtq_l1;
+uint64_t svm_l2_evtq_drop, svm_l2_evtq_max;
 static int
 svm_l2_inj_sysctl(SYSCTL_HANDLER_ARGS)
 {
@@ -172,6 +174,13 @@ svm_l2_inj_sysctl(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "exitint_seen=%lu requeue=%lu\n",
 	    (unsigned long)svm_l2_exitint_seen,
 	    (unsigned long)svm_l2_requeue);
+	sbuf_printf(&sb, "evtq stash=%lu inject=%lu tol1=%lu drop=%lu "
+	    "max=%lu\n",
+	    (unsigned long)svm_l2_evtq_stash,
+	    (unsigned long)svm_l2_evtq_inject,
+	    (unsigned long)svm_l2_evtq_l1,
+	    (unsigned long)svm_l2_evtq_drop,
+	    (unsigned long)svm_l2_evtq_max);
 	for (i = 0; i < 256; i++)
 		if (svm_l2_inj_vec[i])
 			sbuf_printf(&sb, "vec 0x%02x = %lu\n", i,
@@ -2018,9 +2027,12 @@ svm_inj_interrupts(struct svm_softc *sc, struct svm_vcpu *vcpu,
 {
 	struct vmcb_ctrl *ctrl;
 	struct vmcb_state *state;
+	uint64_t event;
+	unsigned held;
 	uint8_t v_tpr;
 	int vector, need_intr_window;
 	int extint_pending;
+	bool busy;
 
 	if (vcpu->caps & (1 << VM_CAP_MASK_HWINTR)) {
 		return;
@@ -2058,13 +2070,42 @@ svm_inj_interrupts(struct svm_softc *sc, struct svm_vcpu *vcpu,
 		 * layout).  Only re-entry into L2 reaches here -- a reflected
 		 * exit runs L1 instead, and svm_nested_vmexit() has already
 		 * copied EXITINTINFO into VMCB12 for L1 to replay.
+		 *
+		 * EVENTINJ is a single slot and is not always free here: this
+		 * same exit may have made L0 inject an exception of its own
+		 * into L2 (the reflect-into-L2 path in svm_vmexit()), i.e. a
+		 * nested fault raised while the parked event was being
+		 * delivered.  Testing "EVENTINJ is free" and giving up
+		 * otherwise would drop the parked event in exactly the
+		 * unrecoverable way described above, so instead every parked
+		 * event is moved into the per-vCPU queue and EVENTINJ is
+		 * filled from that queue whenever it is free.  The parked
+		 * event therefore leaves EXITINTINFO on the very entry that
+		 * sees it and cannot be overwritten by the next exit.
+		 *
+		 * Ordering when both contend: the exception L0 just injected
+		 * wins the entry, and the interrupted event waits.  That is
+		 * the architectural order -- the fault was raised *during*
+		 * delivery of the queued event, so it is the more recent,
+		 * higher-priority condition and its handler must run first;
+		 * the interrupted event is re-delivered afterwards, which is
+		 * also what KVM does with its re-queued event.  Among queued
+		 * events the order L1 handed them over is preserved (FIFO).
 		 */
 		ctrl = svm_get_vmcb_ctrl(vcpu);
-		if (VMCB_EXITINTINFO_VALID(ctrl->exitintinfo) &&
-		    (ctrl->eventinj & VMCB_EVENTINJ_VALID) == 0) {
-			ctrl->eventinj = ctrl->exitintinfo;
+		held = svm_nested_evtq_count(vcpu);
+		busy = (ctrl->eventinj & VMCB_EVENTINJ_VALID) != 0;
+		if (VMCB_EXITINTINFO_VALID(ctrl->exitintinfo)) {
+			svm_nested_evtq_push(vcpu, ctrl->exitintinfo);
 			ctrl->exitintinfo = 0;
+			if (busy || held != 0)
+				svm_l2_evtq_stash++;
+		}
+		if (!busy && svm_nested_evtq_pop(vcpu, &event)) {
+			ctrl->eventinj = event;
 			svm_l2_requeue++;
+			if (held != 0)
+				svm_l2_evtq_inject++;
 		}
 		return;
 	}
@@ -2621,6 +2662,7 @@ svm_vcpu_cleanup(void *vcpui)
 {
 	struct svm_vcpu *vcpu = vcpui;
 
+	svm_nested_evtq_flush(vcpu);
 	svm_nested_release_l1_maps(vcpu);
 	svm_nested_npt_cleanup(vcpu);
 	free(vcpu->vmcb, M_SVM);
@@ -3158,9 +3200,31 @@ svm_vcpu_snapshot(void *vcpui, struct vm_snapshot_meta *meta)
 
 	SNAPSHOT_BUF_OR_LEAVE(&vcpu->mtrr, sizeof(vcpu->mtrr), meta, err, done);
 
+	/*
+	 * Events owed to L2 that are waiting for VMCB02.EVENTINJ to free up.
+	 * The rest of the nested state is not snapshotted yet, so this only
+	 * matters for a snapshot taken while L1 is between L2 runs -- but
+	 * dropping a queued event on restore would wedge L2 exactly the way
+	 * dropping it at runtime does, so it travels with the vCPU.
+	 */
+	SNAPSHOT_BUF_OR_LEAVE(vcpu->nested.evtq, sizeof(vcpu->nested.evtq),
+	    meta, err, done);
+	SNAPSHOT_VAR_OR_LEAVE(vcpu->nested.evtq_head, meta, err, done);
+	SNAPSHOT_VAR_OR_LEAVE(vcpu->nested.evtq_count, meta, err, done);
+
 	/* Set all caches dirty */
-	if (meta->op == VM_SNAPSHOT_RESTORE)
+	if (meta->op == VM_SNAPSHOT_RESTORE) {
 		svm_set_dirty(vcpu, 0xffffffff);
+		/*
+		 * The snapshot is user-supplied: never let it steer the
+		 * queue indices out of the array.
+		 */
+		if (vcpu->nested.evtq_head >= SVM_NESTED_EVTQ_SIZE ||
+		    vcpu->nested.evtq_count > SVM_NESTED_EVTQ_SIZE) {
+			vcpu->nested.evtq_head = 0;
+			vcpu->nested.evtq_count = 0;
+		}
+	}
 
 done:
 	return (err);

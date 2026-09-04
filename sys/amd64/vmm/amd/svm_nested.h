@@ -37,6 +37,26 @@ struct svm_softc;
 struct svm_vcpu;
 
 /*
+ * Depth of the per-vCPU pending-event queue (svm_nested_evtq_*).  One
+ * entry is enough for the steady state -- hardware can park at most one
+ * interrupted event per #VMEXIT and every L2 entry drains one -- so the
+ * extra slots only cover a burst of nested faults raised while an older
+ * event is still queued.  Each entry is one 64-bit EVENTINJ word.
+ */
+#define	SVM_NESTED_EVTQ_SIZE	8
+
+/*
+ * nested-SVM L2 injection counters.  Defined in svm.c and published by
+ * the hw.vmm.nested.svm_l2inj sysctl.
+ */
+extern uint64_t	svm_l2_requeue;
+extern uint64_t	svm_l2_evtq_stash;	/* parked while EVENTINJ was busy */
+extern uint64_t	svm_l2_evtq_inject;	/* injected on a later L2 entry */
+extern uint64_t	svm_l2_evtq_l1;		/* handed to L1 via VMCB12 */
+extern uint64_t	svm_l2_evtq_drop;	/* queue overflow (must stay 0) */
+extern uint64_t	svm_l2_evtq_max;	/* high-water queue depth */
+
+/*
  * Per-vCPU nested-virt state. Currently a minimal stub sufficient for
  * the wave-5 vmexit dispatcher to clear 'nested_in_l2' on
  * SHUTDOWN/exit; future waves extend it with the L1-stated VMCB12
@@ -54,6 +74,14 @@ struct svm_nested {
 	uint64_t	l0_tsc_offset;
 	uint64_t	l0_vintr;	/* VMCB ctrl bytes 0x60-0x67 (V_TPR..) */
 	uint64_t	pir[4];		/* pending L2 vectors (svm_nested_intr.c) */
+	/*
+	 * Pending-event queue: events owed to L2 that could not be placed
+	 * in VMCB02.EVENTINJ yet.  See svm_nested_evtq_push() in
+	 * svm_nested_intr.c for the invariant this maintains.
+	 */
+	uint64_t	evtq[SVM_NESTED_EVTQ_SIZE];
+	uint8_t		evtq_head;	/* index of the oldest entry */
+	uint8_t		evtq_count;	/* entries in use */
 	struct pmap	*npt02;		/* shadow NPT: L2 GPA -> host */
 	uint64_t	npt02_pa;
 	uint64_t	l0_ncr3;	/* L0 N_CR3 parked during L2 */

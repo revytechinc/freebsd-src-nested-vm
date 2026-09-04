@@ -35,6 +35,7 @@
 #include "svm_softc.h"
 #include "svm_nested.h"
 #include "svm_nested_exit.h"
+#include "svm_nested_intr.h"
 #include "svm_nested_stubs.h"
 #include "vmm_nested.h"
 #include "vmcb.h"
@@ -254,6 +255,7 @@ svm_nested_reflect_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
 	struct svm_nested *ns;
 	struct vmcb *vmcb, *vmcb12;
 	struct vmcb_ctrl *ctrl;
+	uint64_t queued;
 	int i;
 
 	ns = svm_nested_lookup(vcpu);
@@ -296,6 +298,20 @@ svm_nested_reflect_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
 	if (!VMCB_EXITINTINFO_VALID(vmcb12->ctrl.exitintinfo) &&
 	    (ctrl->eventinj & VMCB_EVENTINJ_VALID) != 0) {
 		vmcb12->ctrl.exitintinfo = ctrl->eventinj;
+	}
+	/*
+	 * Same recovery for the per-vCPU pending-event queue: an event L0
+	 * parked there (svm_nested_evtq_push()) is owed to L2 and would be
+	 * lost if this exit reached L1 with the queue unread.  VMCB12 has
+	 * one exit-interrupt slot, so hand L1 the oldest queued event when
+	 * that slot is still free and leave the rest queued -- they are
+	 * injected on the next entry into L2 (svm_inj_interrupts()), which
+	 * delivers them exactly once whether they travel via L1 or not.
+	 */
+	if (!VMCB_EXITINTINFO_VALID(vmcb12->ctrl.exitintinfo) &&
+	    svm_nested_evtq_pop(vcpu, &queued)) {
+		vmcb12->ctrl.exitintinfo = queued;
+		svm_l2_evtq_l1++;
 	}
 	vmcb12->ctrl.nrip = ctrl->nrip;
 	vmcb12->ctrl.inst_len = ctrl->inst_len;

@@ -15,6 +15,8 @@
 #ifndef _VMM_SVM_NESTED_INTR_H_
 #define _VMM_SVM_NESTED_INTR_H_
 
+#include <sys/types.h>
+
 struct svm_vcpu;
 
 /*
@@ -36,5 +38,16 @@ void	 svm_nested_inject_exception(struct svm_vcpu *vcpu, uint8_t vector,
  * PIR was empty.
  */
 int	 svm_nested_drain_pir(struct svm_vcpu *vcpu);
+
+/*
+ * Per-vCPU pending-event queue.  Holds events owed to L2 that cannot be
+ * written to VMCB02.EVENTINJ right now because that field is already
+ * occupied.  Push takes an EVENTINJ/EXITINTINFO-encoded word (the two
+ * fields share a layout), pop returns the oldest one.
+ */
+void	 svm_nested_evtq_push(struct svm_vcpu *vcpu, uint64_t event);
+bool	 svm_nested_evtq_pop(struct svm_vcpu *vcpu, uint64_t *event);
+unsigned svm_nested_evtq_count(struct svm_vcpu *vcpu);
+void	 svm_nested_evtq_flush(struct svm_vcpu *vcpu);
 
 #endif /* _VMM_SVM_NESTED_INTR_H_ */
