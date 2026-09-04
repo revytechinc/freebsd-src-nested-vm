@@ -40,6 +40,7 @@
 #include "svm_softc.h"
 #include "svm_nested.h"
 #include "svm_nested_exit.h"
+#include "svm_nested_intr.h"
 #include "svm_nested_stubs.h"
 #include "vmcb.h"
 
@@ -253,6 +254,14 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	ns->l0_ncr3 = ctrl->n_cr3;
 	memcpy(&ns->l0_vintr, &ctrl->v_tpr, sizeof(ns->l0_vintr));
 
+	/*
+	 * Queued events belong to the L2 that VMCB12 describes.  If L1 runs
+	 * a different VMCB -- another L2 vCPU, or this one after L1 reset
+	 * it -- the target they were owed to is gone; discard them rather
+	 * than injecting a stale vector into an unrelated guest.
+	 */
+	if (ns->vmcb12_gpa != gpa)
+		svm_nested_evtq_flush(vcpu);
 	ns->vmcb12_gpa = gpa;
 	ns->vmcb12 = vmcb12;
 	ns->vmcb12_cookie = cookie;
