@@ -18,22 +18,45 @@ local function capture(command)
 	return output:match("(.-)\n$") or output
 end
 
+-- Determine the package name prefix used by this repository rather than
+-- assuming "FreeBSD".  A tree built with a custom PKG_NAME_PREFIX (see
+-- share/mk/bsd.pkg.pre.mk) names its base packages "<prefix>-set-base" etc.,
+-- and the release media has to be staged from whatever prefix was used.
+local function find_prefix(names)
+	for _, package in ipairs(names) do
+		local prefix = package:match("^(.+)%-set%-base$")
+		if prefix then
+			return prefix
+		end
+	end
+	error("unable to determine the pkgbase package name prefix")
+end
+
 -- Returns a list of packages to be included in the given media
 local function select_packages(pkg, media, all_libcompats)
+	local names = {}
+	local rquery = capture(pkg .. "rquery -U -r FreeBSD-base %n")
+	for package in rquery:gmatch("[^\n]+") do
+		table.insert(names, package)
+	end
+
+	local prefix = find_prefix(names)
+
 	-- Note: if you update this list, you must also update the list in
 	-- usr.sbin/bsdinstall/scripts/pkgbase.in.
 	local kernel_packages = {
 		-- Most architectures use this
-		["FreeBSD-kernel-generic"] = true,
+		[prefix .. "-kernel-generic"] = true,
 		-- PowerPC uses either of these, depending on platform
-		["FreeBSD-kernel-generic64"] = true,
-		["FreeBSD-kernel-generic64le"] = true,
+		[prefix .. "-kernel-generic64"] = true,
+		[prefix .. "-kernel-generic64le"] = true,
 	}
 
+	local set_pattern = "^" .. prefix:gsub("%W", "%%%0") .. "%-set%-(.*)$"
+
 	local components = {}
-	local rquery = capture(pkg .. "rquery -U -r FreeBSD-base %n")
-	for package in rquery:gmatch("[^\n]+") do
-		local set = package:match("^FreeBSD%-set%-(.*)$")
+	for _, package in ipairs(names) do
+		local set = package:match(set_pattern)
 		if set then
 			components[set] = package
 		elseif kernel_packages[package] then
