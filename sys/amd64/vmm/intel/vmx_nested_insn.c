@@ -709,7 +709,16 @@ vmx_nested_op(void *vcpui, struct vm_exit *vme)
 	default:
 		return (EINVAL);
 	}
-	if (rc == 1)
+	/*
+	 * rc == 1 means the handler delivered a VM exit to L1 and already set
+	 * the RIP in the VMCS. A queued fault means the opposite: the
+	 * instruction did not execute, so L1 must resume *at* it -- the
+	 * handlers that inject #UD or #GP still return 0, and advancing here
+	 * would deliver the exception with L1's RIP already past the
+	 * instruction that caused it, so it would resume after an instruction
+	 * it never ran.
+	 */
+	if (rc == 1 || vm_exception_pending(vcpu->vcpu))
 		vme->rip = vmx_nested_vmcs_read(vcpu, VMCS_GUEST_RIP);
 	else
 		vme->rip = vme->rip + vme->u.nested.info1;

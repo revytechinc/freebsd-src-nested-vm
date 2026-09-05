@@ -274,6 +274,7 @@ int vm_get_x2apic_state(struct vcpu *vcpu, enum x2apic_state *state);
 int vm_set_x2apic_state(struct vcpu *vcpu, enum x2apic_state state);
 int vm_apicid2vcpuid(struct vm *vm, int apicid);
 int vm_restart_instruction(struct vcpu *vcpu);
+bool vm_exception_pending(struct vcpu *vcpu);
 struct vm_exit *vm_exitinfo(struct vcpu *vcpu);
 cpuset_t *vm_exitinfo_cpuset(struct vcpu *vcpu);
 void vm_exit_suspended(struct vcpu *vcpu, uint64_t rip);
