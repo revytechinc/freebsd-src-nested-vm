@@ -217,6 +217,15 @@ guest L1FW 30 'ls /usr/local/share/uefi-firmware/BHYVE_UEFI.fd' ||
 guest L1NMDM 60 'kldload -n nmdm; ls /dev/nmdm0B >/dev/null 2>&1 || echo NONMDM' ||
     fail "L1 could not load nmdm"
 
+# L1 has tasted the partitions on the disk it is about to hand to L2, and GEOM
+# will not then let bhyve write-open the whole-disk provider. bhyve falls back
+# to read-only without saying so, and L2 boots, finds its disk, and fails to
+# import its pool with "vtbd0: hard error cmd=write" against the ZFS labels at
+# the end of the disk. This is our test rig handing L2 a read-only disk, not
+# anything about nesting.
+guest L1GEOMFLAGS 30 'sysctl kern.geom.debugflags=0x10' ||
+    fail "L1 would not allow the write-open"
+
 # A tty in canonical mode drops everything past MAX_CANON (255 bytes) on a
 # line, and the long spawn-and-wait one-liners went over it: the tail of the
 # command was lost, the shell sat waiting for a closing quote, and the next
