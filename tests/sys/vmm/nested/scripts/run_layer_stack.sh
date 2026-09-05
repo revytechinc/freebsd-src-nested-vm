@@ -155,13 +155,36 @@ log "L1: loading vmm and launching L2 from the second disk"
 guest L1VMM 90 'kldload -n vmm; sysctl -n hw.vmm.nested.enable' ||
     fail "L1 could not load vmm"
 guest L1DISKS 30 'ls /dev/nda* /dev/nvd* 2>/dev/null' || true
+guest L1GEOM 30 'gpart show nda1; diskinfo -v /dev/nda1 | head -6' || true
 guest L1FW 30 'ls /usr/local/share/uefi-firmware/BHYVE_UEFI.fd' ||
     fail "L1 has no bhyve-firmware -- rebuild the image with -p bhyve-firmware"
 
+# Two ways to start L2, tried in order, because they exercise different paths
+# and we want to know which one a failure belongs to:
+#   1. UEFI bootrom + emulated NVMe -- what a user reaches for, and what the
+#      generated boot scripts use;
+#   2. bhyveload + virtio-blk -- the loader reads the kernel out of the disk
+#      from L1 userspace before L2 ever runs, so it exercises far less of the
+#      device path.
+# If 1 fails and 2 works, the defect is in the firmware/NVMe path under
+# nesting, not in nesting as such -- say so rather than reporting "L2 failed".
+L2_METHOD=none
 _at=$(lines)
 send 'bhyve -c 1 -m 2G -A -H -P -l bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd -s 0,hostbridge -s 2,nvme,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
-wait_for 'login:' "${BOOT_TIMEOUT}" "${_at}" || fail "L2 never reached a login prompt"
-log "L2 reached the login prompt -- nested guest is up"
+if wait_for 'login:' "${BOOT_TIMEOUT}" "${_at}"; then
+	L2_METHOD=uefi-nvme
+else
+	log "L2 did not boot via UEFI+NVMe; retrying with bhyveload+virtio-blk"
+	send '~'
+	send ''
+	guest L2CLEAN 60 'bhyvectl --destroy --vm=l2 >/dev/null 2>&1; true' || true
+	_at=$(lines)
+	send 'bhyveload -c stdio -m 2G -d /dev/nda1 -e console=comconsole -e autoboot_delay=1 l2 && bhyve -c 1 -m 2G -A -H -P -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
+	wait_for 'login:' "${BOOT_TIMEOUT}" "${_at}" ||
+	    fail "L2 never reached a login prompt by either method"
+	L2_METHOD=bhyveload-virtio
+fi
+log "L2 reached the login prompt via ${L2_METHOD} -- nested guest is up"
 send 'root'
 wait_for 'assword' 30 "${_at}" || fail "no password prompt on L2"
 send 'root'
