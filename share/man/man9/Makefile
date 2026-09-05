@@ -422,6 +422,7 @@ MAN=	accept_filter.9 \
 	vm_page_wire.9 \
 	vm_set_page_size.9 \
 	vmem.9 \
+	vmm_nested.9 \
 	vn_deallocate.9 \
 	vn_fullpath.9 \
 	vn_isdisk.9 \
