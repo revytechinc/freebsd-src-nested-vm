@@ -170,6 +170,13 @@ struct vmx {
 	uint64_t	eptp;
 	long		eptgen[MAXCPU];		/* cached pmap->pm_eptgen */
 	pmap_t		pmap;
+	/*
+	 * hw.vmm.nested.enable as it stood when this VM was created. Written
+	 * once, in vmx_init(), and read-only thereafter: the sysctl must not
+	 * be consulted again while the VM runs, or nesting would appear to
+	 * switch off under a guest that is already using it.
+	 */
+	bool		nested_gate;
 };
 
 extern bool vmx_have_msr_tsc_aux;
