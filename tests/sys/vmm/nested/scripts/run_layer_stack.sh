@@ -339,6 +339,12 @@ if [ "${L2_METHOD}" = none ]; then
 	# find its root disk. "?" there lists what it can actually see, which
 	# is the difference between a plumbing problem and a hypervisor one.
 	guest L2ASK 60 'grep -aq "mountroot>" /tmp/l2.log && printf "?\r" > /dev/nmdm0B; sleep 3; true' || true
+	# Whether L2 is executing at all is the question a silent console cannot
+	# answer. Climbing vm-exit counters mean the guest is running and the
+	# console is the problem; zero means it never entered, which is a
+	# different bug entirely.
+	guest L2STATS 60 'bhyvectl --vm=l2 --get-stats 2>&1 | grep -iE "vm exits|vmentry|vmexit" | head -6' || true
+	guest L2ALIVE 60 'ps -o pid,pcpu,command | grep -E "bhyve.* l2$" | head -2' || true
 	guest L2DIAG 60 'tail -5 /tmp/l2.err; tail -40 /tmp/l2.log' || true
 	fail "L2 never reached a login prompt by any method"
 fi
