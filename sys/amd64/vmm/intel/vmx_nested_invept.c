@@ -4,7 +4,7 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
- * INVEPT / INVVPID emulation for nested VMX (SDM Vol 3 §30.3).
+ * INVEPT / INVVPID emulation for nested VMX.
  *
  * L2 runs on L0's EPT and VPID, so an L1 EPTP or VPID names nothing
  * the hardware knows about. Any valid L1 request is honoured by

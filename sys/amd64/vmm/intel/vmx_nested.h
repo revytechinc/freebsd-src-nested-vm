@@ -68,7 +68,7 @@ struct vmx_nested_state {
 	uint64_t		ept12_gen_flushed;/* gen at last ept02 flush */
 };
 
-/* VM-instruction error numbers (SDM Vol 3 §30.4). */
+/* VM-instruction error numbers. */
 #define	VMX_INSERR_VMCALL_IN_ROOT		1
 #define	VMX_INSERR_VMCLEAR_INVALID_ADDR		2
 #define	VMX_INSERR_VMCLEAR_VMXON_PTR		3

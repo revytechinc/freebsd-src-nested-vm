@@ -11,7 +11,7 @@
  *
  * The tests call the production svm_msr_bitmap_*() functions exported
  * by vmm.ko (this module depends on it) and check them against the
- * MSRPM layout in AMD APM Vol 2 §15.11, so a regression in the real
+ * architectural MSRPM layout, so a regression in the real
  * code is what fails here.
  */
 
@@ -194,7 +194,7 @@ SYSCTL_PROC(_hw_vmm_svm_nested, OID_AUTO, test_bitmap,
     test_bitmap_handler, "I", "MSRPM set/clear/test round trip (write 1)");
 SYSCTL_PROC(_hw_vmm_svm_nested, OID_AUTO, test_layout,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, NULL, 0,
-    test_layout_handler, "I", "MSRPM offsets against APM 15.11 (write 1)");
+    test_layout_handler, "I", "MSRPM offsets (write 1)");
 SYSCTL_PROC(_hw_vmm_svm_nested, OID_AUTO, test_lbr,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, NULL, 0,
     test_lbr_handler, "I", "LBR MSR range interception (write 1)");
