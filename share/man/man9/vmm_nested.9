@@ -1,0 +1,185 @@
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" All rights reserved.
+.\"
+.Dd August 28, 2026
+.Dt VMM_NESTED 9
+.Os
+.Sh NAME
+.Nm vmm_nested
+.Nd nested virtualization support in the bhyve hypervisor
+.Sh SYNOPSIS
+.Cd "hw.vmm.nested.enable=1"
+.Pp
+.In machine/vmm.h
+.In dev/vmm/vmm_dev.h
+.Pp
+.Dv VMMCTL_CREATE_NESTED
+.Pp
+.Dv VMMAPI_OPEN_CREATE_NESTED
+.Sh DESCRIPTION
+The
+.Nm
+facility lets
+.Xr bhyve 8
+expose hardware-assisted virtualization
+.Pq Intel VMX or AMD SVM
+to a guest, so that a level-1 (L1) guest can act as a hypervisor for
+its own level-2 (L2) virtual machines.
+.Pp
+Two gates must both be open before a guest sees the feature:
+.Bl -tag -width indent
+.It Va hw.vmm.nested.enable
+Host-wide switch, default 0.
+It can only be set to 1 when
+.Va hw.vmm.nested.vmx
+or
+.Va hw.vmm.nested.svm
+reports 2, meaning the host CPU supports what the implementation
+needs and the host is not itself a guest;
+otherwise the write fails with
+.Er EOPNOTSUPP .
+As a
+.Xr loader.conf 5
+tunable the value is applied after the vendor probe runs.
+.It Per-VM opt-in
+A virtual machine created through the
+.Dv VMMCTL_CREATE_NESTED
+ioctl, or through
+.Xr vm_create 3
+with the
+.Dv VMMAPI_OPEN_CREATE_NESTED
+flag
+.Pq Nm bhyve Fl N ,
+carries the
+.Va nested_enabled
+flag.
+VMs created any other way never enter the nested code paths.
+.El
+.Pp
+When both gates are open, CPUID leaf 1 advertises VMX (Intel hosts)
+or leaf 0x80000001 advertises SVM and leaf 0x8000000A reports the
+emulated SVM feature set (AMD hosts).
+.Ss AMD SVM
+An L1 hypervisor's
+.Dv VMRUN ,
+.Dv VMLOAD ,
+.Dv VMSAVE ,
+.Dv CLGI
+and
+.Dv STGI
+instructions are emulated.
+On
+.Dv VMRUN
+the L1 save area is parked, the L2 save area from the guest VMCB is
+loaded into the hardware VMCB together with the union of L0's and
+L1's intercepts, and L2 runs until an exit that L1 asked to intercept
+(intercept vectors, IOPM or MSRPM).
+That exit is then delivered to L1 exactly as hardware would: the L2
+state and exit information are written to the guest VMCB, L1 resumes
+after
+.Dv VMRUN
+with GIF clear.
+Exits L1 did not ask for are handled by L0 on L2's behalf.
+.Pp
+When L1 enables nested paging for its guest, L2 runs under a per-vCPU
+shadow of L1's nested page table that L0 fills on demand from L2 nested
+page faults and discards when L1 requests a TLB flush or switches
+.Dv N_CR3 ;
+faults L1's table cannot resolve are reflected to L1 as nested page
+faults of its guest.
+When L1 runs its guest without nested paging, L2 guest-physical
+addresses are L1 guest-physical addresses and L0's own table applies.
+The SVM feature leaf advertises nested paging and NRIPS only; AVIC, LBR
+virtualization, flush-by-ASID and VMCB clean bits are not offered.
+.Ss Intel VMX
+.Dv VMXON ,
+.Dv VMXOFF ,
+.Dv VMPTRLD ,
+.Dv VMPTRST ,
+.Dv VMCLEAR ,
+.Dv VMREAD ,
+.Dv VMWRITE ,
+.Dv VMCALL ,
+.Dv INVEPT
+and
+.Dv INVVPID
+are emulated with architectural operand decoding and the
+VMsucceed/VMfail conventions of the SDM.
+L1's VMCS is kept as a private per-vCPU copy that is written back to
+guest memory whenever the current VMCS changes; no L1-supplied value is
+ever written into the hardware VMCS.
+.Pp
+Entering an L2 guest is not implemented yet:
+.Dv VMLAUNCH
+and
+.Dv VMRESUME
+pass the instruction-level checks and then complete as a
+.Dq VM-entry failure due to invalid guest state
+delivered to L1 through the VMCS host-state area, which every L1
+hypervisor treats as a fatal error for that L2 guest.
+.Sh SYSCTL VARIABLES
+.Bl -tag -width "hw.vmm.nested.svm_timer_fastpath"
+.It Va hw.vmm.nested.enable
+Host-wide gate, see above.
+Writable at runtime and settable as a
+.Xr loader.conf 5
+tunable.
+The default is 1.
+Setting it to 0 disables nesting for virtual machines created afterwards;
+machines already running are unaffected.
+Writing 1 on a host whose preflight gate failed returns
+.Er EOPNOTSUPP
+rather than silently doing nothing.
+.It Va hw.vmm.nested.vmx , Va hw.vmm.nested.svm
+Read-only vendor probe status: 0 unsupported, 1 the host is itself a
+guest, 2 ready.
+.It Va hw.vmm.nested.vmx_l2
+Intel only.
+Run L2 guests on hardware.
+The default is 1; setting it to 0 falls back to a synthetic
+entry-failure path, which is a debugging aid rather than a supported
+mode.
+Still subject to
+.Va hw.vmm.nested.enable .
+.It Va hw.vmm.nested.l2stats
+Read-only Intel L2 counters: VM entries, events injected into L2,
+events swallowed, and events re-delivered after an exit interrupted
+their delivery.
+A non-zero swallow count indicates lost interrupts.
+.It Va hw.vmm.nested.svm_l2inj
+Read-only AMD histogram of the interrupt vectors injected into L2,
+together with the event-queue counters.
+.It Va hw.vmm.nested.svm_debug
+Log the first few hundred nested-SVM events per vCPU (VMRUN, exits
+reflected to L1, L2 page faults) to the console.
+Slow; bring-up only.
+The default is 0.
+.It Va hw.vmm.nested.svm_timer_fastpath
+AMD only.
+Answer an L2 guest's i8254 and ACPI timer port reads in
+.Nm
+rather than reflecting them to the guest hypervisor.
+The default is 1.
+.It Va hw.vmm.nested.svm_evtq_defer
+Test knob.
+Carry every requeued L2 event one extra entry through the per-vCPU
+event queue, to exercise the queue's ordering.
+Not for normal use.
+The default is 0.
+.El
+.Sh SEE ALSO
+.Xr vm_create 3 ,
+.Xr vmm 4 ,
+.Xr loader.conf 5 ,
+.Xr bhyve 8 ,
+.Xr sysctl 8
+.Sh HISTORY
+Nested virtualization support first appeared in the CloudBSD
+.Fx 16.0-CURRENT
+tree.
+.Sh BUGS
+The feature is experimental and off by default.
+L2 execution exists only on AMD; live migration and snapshots of nested
+VMs are not supported.
