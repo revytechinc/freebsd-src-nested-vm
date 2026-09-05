@@ -111,6 +111,52 @@ SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, l2stats,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
     vmx_l2_stats_sysctl, "A", "L2 exit-reason histogram and inject counters");
 
+/*
+ * Diagnostic for repeat-fault loops in the L2 EPT path: which branch each
+ * fault took, and whether the same GPA keeps coming back. The qualification
+ * carries the permissions of the entry that faulted (bits 3:5), so a loop
+ * shows both what L2 asked for and what ept02 was granting at the time.
+ */
+static struct {
+	uint64_t	gpa;
+	uint64_t	qual;
+	uint64_t	repeats;
+	uint64_t	n_ad;
+	uint64_t	n_reflect;
+	uint64_t	n_fill;
+	uint64_t	n_fillfail;
+} vmx_l2f;
+
+static int
+vmx_l2fault_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct sbuf sb;
+	uint64_t q;
+	int error;
+
+	sbuf_new_for_sysctl(&sb, NULL, 256, req);
+	q = vmx_l2f.qual;
+	sbuf_printf(&sb, "gpa=%#lx repeats=%lu qual=%#lx",
+	    (unsigned long)vmx_l2f.gpa, (unsigned long)vmx_l2f.repeats,
+	    (unsigned long)q);
+	sbuf_printf(&sb, " access=%s%s%s granted=%s%s%s",
+	    (q & EPT_VIOLATION_DATA_READ) ? "r" : "-",
+	    (q & EPT_VIOLATION_DATA_WRITE) ? "w" : "-",
+	    (q & EPT_VIOLATION_INST_FETCH) ? "x" : "-",
+	    (q & EPT_VIOLATION_GPA_READABLE) ? "r" : "-",
+	    (q & EPT_VIOLATION_GPA_WRITEABLE) ? "w" : "-",
+	    (q & EPT_VIOLATION_GPA_EXECUTABLE) ? "x" : "-");
+	sbuf_printf(&sb, "\nad=%lu reflect=%lu fill=%lu fillfail=%lu\n",
+	    (unsigned long)vmx_l2f.n_ad, (unsigned long)vmx_l2f.n_reflect,
+	    (unsigned long)vmx_l2f.n_fill, (unsigned long)vmx_l2f.n_fillfail);
+	error = sbuf_finish(&sb);
+	sbuf_delete(&sb);
+	return (error);
+}
+SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, vmx_l2fault,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
+    vmx_l2fault_sysctl, "A", "last L2 EPT fault: GPA, access vs granted, path taken");
+
 
 /* Host-state fields copied verbatim vmcs01 -> vmcs02. */
 static const uint32_t vmcs02_host_fields[] = {
@@ -247,6 +293,14 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 
 	ns = vmx_nested_state(vcpu);
 
+	if (l2_gpa == vmx_l2f.gpa)
+		vmx_l2f.repeats++;
+	else {
+		vmx_l2f.gpa = l2_gpa;
+		vmx_l2f.repeats = 0;
+	}
+	vmx_l2f.qual = qual;
+
 	/*
 	 * A host whose EPT lacks hardware accessed/dirty bits makes the pmap
 	 * emulate them: a valid entry is left hardware-unreadable until the
@@ -270,6 +324,7 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 			ftype = 0;
 		if (ftype != 0 &&
 		    pmap_emulate_accessed_dirty(ns->ept02, l2_gpa, ftype) == 0) {
+			vmx_l2f.n_ad++;
 			VMX_CTR2(vcpu, "L2 EPT: %s bit emulated for gpa %#lx",
 			    ftype == VM_PROT_READ ? "accessed" : "dirty",
 			    (unsigned long)l2_gpa);
@@ -295,6 +350,7 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 	 */
 	if (vmx_nested_ept12_translate(vcpu, l2_gpa, VM_PROT_READ,
 	    &l1_gpa) != 0) {
+		vmx_l2f.n_reflect++;
 		VMX_CTR1(vcpu, "L2 EPT: gpa %#lx unexpectedly unmapped",
 		    (unsigned long)l2_gpa);
 		return (1);
@@ -323,10 +379,12 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 	vm_page_xunbusy(m);
 	vm_gpa_release(cookie);
 	if (error != KERN_SUCCESS) {
+		vmx_l2f.n_fillfail++;
 		VMX_CTR2(vcpu, "L2 EPT02 pmap_enter(%#lx) failed %d",
 		    (unsigned long)l2_gpa, error);
 		return (1);
 	}
+	vmx_l2f.n_fill++;
 	return (0);
 }
 
