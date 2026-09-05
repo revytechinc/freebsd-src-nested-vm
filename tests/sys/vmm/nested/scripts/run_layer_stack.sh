@@ -241,7 +241,14 @@ l2_start() { # <label> <bhyve args...>
 	# split the stream between them, so the new log would miss half the
 	# console and report a booting guest as a failure.
 	guest "L2KILL" 60 'bhyvectl --destroy --vm=l2 >/dev/null 2>&1; pkill -f "bhyve.* l2$"; pkill -f "cat /dev/nmdm0B"; sleep 1; rm -f /tmp/l2.log; true' || true
-	guest "L2READER" 30 '(cat /dev/nmdm0B >> /tmp/l2.log &) ; sleep 1; true' ||
+	# The same console rule as on L0, which this had been missing: with the
+	# B side left cooked and echoing, everything L2 prints is sent straight
+	# back to it as input. The loader's output came back doubled and its
+	# boot stalled, and the firmware read the echo as a keypress and dropped
+	# into its boot manager -- which is what "no bootable device" was.
+	# Order matters: the reader must hold the tty open while stty runs, or
+	# the last close resets termios and flushes what the guest printed.
+	guest "L2READER" 30 '(cat /dev/nmdm0B >> /tmp/l2.log &) ; sleep 1; stty -f /dev/nmdm0B raw -echo clocal' ||
 	    return 1
 	log "L2 attempt: ${_label}"
 	_spawn_at=$(lines)
