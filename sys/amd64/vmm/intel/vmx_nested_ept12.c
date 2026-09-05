@@ -9,15 +9,14 @@
  * EPT12 as the inner page table for L2 (L2 GPA -> EPT12 -> L1 GPA
  * -> EPT (L0) -> HPA).
  *
- * The EPT12 page-table format follows Intel SDM Vol 3 §29.  The
- * L0-side walk goes through up to four 4KB tables of 8-byte
+ * The EPT12 page-table format is the architectural EPT format.
+ * The L0-side walk goes through up to four 4KB tables of 8-byte
  * entries: PML4 -> PDPT -> PD -> PT, indexed by GPA bits 47:39 /
  * 38:30 / 29:21 / 20:12.  Each non-leaf PTE carries the physical
  * address of the next-level table; a leaf PTE carries the
  * translated HPA.
  *
- * Original BSD code; Intel SDM Vol 3 §29 / §30.4 are referenced
- * for the EPTP encoding only.
+ * Original BSD code.
  */
 
 #include <sys/param.h>
@@ -41,7 +40,7 @@
 extern int vmm_nested_enable;
 
 /*
- * Intel SDM Vol 3 §29.3 EPT entry format.  Bit layout of each
+ * Architectural EPT entry format.  Bit layout of each
  * 8-byte EPT PTE / PDPTE / PDE:
  *   bit 0    - Read access
  *   bit 1    - Write access
@@ -66,8 +65,8 @@ extern int vmm_nested_enable;
 #define	EPT_PTE_LARGE		(1U << 7)
 
 /*
- * Large-page / 4KB leaf PTE physical-address masks.  Per Intel
- * SDM Vol 3 §29.3, the low-order address bits are reserved and
+ * Large-page / 4KB leaf PTE physical-address masks.  The
+ * low-order address bits are reserved and
  * must be zero in a leaf PTE; the L2 page offset is OR-ed in by
  * the walker after masking the PTE address.
  *
@@ -118,7 +117,7 @@ vmx_nested_ept12_install(struct vmx_vcpu *vcpu, uint64_t ept12_pte)
  *
  * The 'access' argument carries the requested L2 access type
  * (VM_PROT_READ / VM_PROT_WRITE / VM_PROT_EXECUTE).  Every
- * walked PTE must permit that access (Intel SDM Vol 3 §29.3.4).
+ * walked PTE must permit that access.
  *
  * Returns VM_SUCCESS and writes *out_l1_gpa on success.  On
  * failure returns -1 and leaves *out_l1_gpa untouched.  The
@@ -158,7 +157,7 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 	 * Validate the requested access type.  Exactly one of
 	 * VM_PROT_READ/WRITE/EXECUTE must be set — we don't
 	 * support combined access in the walker because EPT
-	 * bit-checking is per-access-type (Intel SDM §29.3.4).
+	 * bit-checking is per-access-type.
 	 */
 	switch (access) {
 	case VM_PROT_READ:
@@ -238,10 +237,10 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 
 		/*
 		 * Enforce the requested access type at every walked
-		 * level (Intel SDM Vol 3 §29.3.4).  Each non-leaf
+		 * level.  Each non-leaf
 		 * table descriptor must also carry the access bit
 		 * for a translation that will eventually be allowed
-		 * — the SDM requires permission bits to combine
+		 * — the architecture requires permission bits to combine
 		 * with AND across all levels.
 		 */
 		if ((pte & access_bit) == 0) {
@@ -252,7 +251,7 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 		}
 
 		/*
-		 * Reserved-bit validation per Intel SDM Vol 3 §29.3.
+		 * Reserved-bit validation.
 		 * Bits the architecture marks as reserved must be
 		 * zero; a non-zero reserved bit triggers an EPT
 		 * misconfiguration (#VMEXIT INVEPT/INVVPID aside,
@@ -297,7 +296,7 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 		 * large bit.
 		 *
 		 * For large-page entries the low address bits are
-		 * reserved and must be zero (Intel SDM Vol 3 §29.3):
+		 * reserved and must be zero:
 		 * 1GB PDPTE: bits 29:12 reserved; 2MB PDE: bits
 		 * 20:12 reserved.  AND them out before OR-ing the
 		 * page offset so L1 cannot steer the translation

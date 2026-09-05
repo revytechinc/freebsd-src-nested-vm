@@ -2080,8 +2080,7 @@ svm_inj_interrupts(struct svm_softc *sc, struct svm_vcpu *vcpu,
 		 * and is never woken again.  This is what stalls a triple-
 		 * nested (L3) boot, where L0 self-handles far more exits.
 		 *
-		 * Put the event back (the AMD analogue of KVM's
-		 * svm_complete_interrupts(); EXITINTINFO and EVENTINJ share a
+		 * Put the event back (EXITINTINFO and EVENTINJ share a
 		 * layout).  Only re-entry into L2 reaches here -- a reflected
 		 * exit runs L1 instead, and svm_nested_vmexit() has already
 		 * copied EXITINTINFO into VMCB12 for L1 to replay.
@@ -2103,9 +2102,9 @@ svm_inj_interrupts(struct svm_softc *sc, struct svm_vcpu *vcpu,
 		 * the architectural order -- the fault was raised *during*
 		 * delivery of the queued event, so it is the more recent,
 		 * higher-priority condition and its handler must run first;
-		 * the interrupted event is re-delivered afterwards, which is
-		 * also what KVM does with its re-queued event.  Among queued
-		 * events the order L1 handed them over is preserved (FIFO).
+		 * the interrupted event is re-delivered afterwards.  Among
+		 * queued events the order L1 handed them over is preserved
+		 * (FIFO).
 		 */
 		ctrl = svm_get_vmcb_ctrl(vcpu);
 		held = svm_nested_evtq_count(vcpu);

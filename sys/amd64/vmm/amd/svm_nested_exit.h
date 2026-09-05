@@ -10,10 +10,9 @@
  * return control to L1 — L1's view of "VMEXIT" is the same view L0
  * has of its own VMEXITs. The L2 exit must therefore be reflected
  * into L1's VMCB12 (ExitCode, ExitInfo1, ExitInfo2, ExitIntInfo)
- * with semantics identical to the AMD APM Vol 2 §15.5 specification.
+ * with architecturally identical semantics.
  *
- * Original BSD code. KVM arch/x86/kvm/svm/svm.c::nested_svm_exit_handled
- * was consulted for the dispatch order only; no source was copied.
+ * Original BSD code.
  */
 
 #ifndef _VMM_SVM_NESTED_EXIT_H_
@@ -30,8 +29,8 @@ struct svm_vcpu;
  *
  * 'exitcode' is the L2 hardware exit code (one of VMCB_EXIT_*).
  * 'exitinfo1' and 'exitinfo2' are the L2 hardware qualification
- * data (per AMD APM Vol 2 §15.5; for an NPF, info1 carries the
- * error code and info2 the GPA).
+ * data (for an NPF, info1 carries the error code and info2
+ * the GPA).
  *
  * After this call returns:
  *   - vcpu->nested_in_l2 is cleared (L1 resumes).

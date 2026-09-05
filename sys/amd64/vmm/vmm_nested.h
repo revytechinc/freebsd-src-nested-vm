@@ -5,7 +5,7 @@
  * All rights reserved.
  *
  * Nested virtualization support for bhyve.
- * Original BSD code; KVM is referenced only for design.
+ * Original BSD code.
  */
 
 #ifndef _VMM_NESTED_H_

@@ -41,7 +41,7 @@
 #define	ACPI_PM_PORT	0x408		/* freedev006 acpi_timer0 */
 #define	ACPI_PM_FREQ	3579545u
 
-/* SVM IOIO EXITINFO1 bits (APM Vol 2 15.10.2). */
+/* SVM IOIO EXITINFO1 bits. */
 #define	IOIO_IN		(1u << 0)
 #define	IOIO_STR	(1u << 2)
 #define	IOIO_REP	(1u << 3)

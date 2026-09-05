@@ -192,7 +192,7 @@ vmxtest_cap_msr_read(void)
 	revid = (uint32_t)(basic & 0xffffffff);
 	if ((revid & 0x80000000U) != 0) {
 		/*
-		 * SDM Vol 3 §25.6.2: bits 30:0 are the VMCS revision
+		 * Bits 30:0 are the VMCS revision
 		 * identifier; bit 31 is reserved and must be 0.
 		 */
 		VMXTEST_FAIL(1,
@@ -347,7 +347,7 @@ vmxtest_cr4_vmxe(void)
  *
  * MSR_VMX_CR0_FIXED0 (0x486) and MSR_VMX_CR0_FIXED1 (0x487) report
  * which CR0 bits are forced to 0 or forced to 1 inside a VMX guest.
- * Per SDM Vol 3 §25.6.5/§25.6.6:
+ * Architecturally:
  *   - FIXED0 must have PE (bit 0) and PG (bit 31) set: a guest
  *     cannot be in real mode (no paging implies no segmentation).
  *   - FIXED1 must be non-zero: at least one CR0 bit must be

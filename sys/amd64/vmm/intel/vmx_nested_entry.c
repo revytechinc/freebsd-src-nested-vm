@@ -29,8 +29,7 @@
  * with the gate off VMLAUNCH/VMRESUME report an architectural VM-entry
  * failure to L1 (see vmx_nested_vmlaunch.c) and none of this runs.
  *
- * Original BSD code; Intel SDM Vol 3 Ch. 24-28 referenced for the VMCS
- * layout and entry/exit semantics.
+ * Original BSD code.
  */
 
 #include <sys/param.h>

@@ -12,11 +12,10 @@
  * offsets are our own and only the revision ID at offset 0 has to
  * match what L1 wrote. Every field an L1 hypervisor may legitimately
  * access has a slot; fields in the read-only VM-exit information
- * class (SDM Vol 3 App. B, encoding bits 11:10 == 01) reject VMWRITE
+ * class (encoding bits 11:10 == 01) reject VMWRITE
  * with VM-instruction error 13.
  *
- * Original BSD code; Intel SDM Vol 3 Appendix B is referenced for the
- * encodings and widths.
+ * Original BSD code.
  */
 
 #include <sys/param.h>
