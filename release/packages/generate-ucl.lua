@@ -230,6 +230,16 @@ if pkgprefix ~= nil and obj["deps"] ~= nil then
 	obj["deps"] = newdeps
 end
 
+-- A downstream prefix produces packages that install exactly the files the
+-- upstream FreeBSD-* packages install, so the two sets cannot coexist.  pkg(8)
+-- only reports that as a file-conflict part way through an upgrade, leaving a
+-- half-converted system; declaring the conflict lets it refuse up front and
+-- say which package to remove.  Nothing to declare when we are the upstream
+-- packager.
+if pkgprefix ~= nil and pkgprefix ~= "FreeBSD" and pkgname ~= nil then
+	obj["conflicts"] = { "FreeBSD-" .. pkgname }
+end
+
 -- Add comment and desc suffix.
 if no_suffix_pkgs[pkgname] == nil then
 	add_suffixes(obj)
