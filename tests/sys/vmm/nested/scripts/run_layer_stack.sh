@@ -121,6 +121,10 @@ BHYVE_PID=$!
 sleep 2
 kill -0 "${BHYVE_PID}" 2>/dev/null ||
     fail "bhyve exited immediately: $(cat "${WORKDIR}/bhyve.log")"
+# bhyve holds the A side open now, so opening B will not block. Open it for
+# writing before stty runs: the reader and this descriptor keep the tty open,
+# and a last close would reset termios and flush what the guest has printed.
+exec 3> "${B}" || fail "cannot open ${B} for writing"
 stty -f "${B}" raw -echo clocal || fail "cannot set ${B} raw -echo clocal"
 
 wait_for 'login:' "${BOOT_TIMEOUT}" || fail "L1 never reached a login prompt"
