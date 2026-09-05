@@ -28,6 +28,8 @@
 #include <sys/systm.h>
 #include <sys/sysctl.h>
 
+#include <machine/atomic.h>
+
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
@@ -131,12 +133,18 @@ svm_nested_vmrun_invalid(struct vmcb *vmcb12)
  * that svm_nested_l2_exit() reflects to L1.
  */
 static bool
-svm_nested_vmcb12_consistent(const struct vmcb *vmcb12)
+svm_nested_vmcb12_consistent(const struct vmcb *vmcb12, const uint32_t *intcpt12)
 {
 	const struct vmcb_state *st = &vmcb12->state;
 	const struct vmcb_ctrl *ctrl = &vmcb12->ctrl;
 
-	if ((ctrl->intercept[VMCB_CTRL2_INTCPT] & VMCB_INTCPT_VMRUN) == 0)
+	/*
+	 * The intercept words come from the caller's snapshot, not from the
+	 * still-writable VMCB12: validating one fetch and composing VMCB02
+	 * from another is the pattern that produced a race-reachable host DoS
+	 * here once already.
+	 */
+	if ((intcpt12[VMCB_CTRL2_INTCPT] & VMCB_INTCPT_VMRUN) == 0)
 		return (false);
 	if (ctrl->asid == 0)
 		return (false);
@@ -172,6 +180,7 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	uint64_t gpa;
 	void *cookie;
 	uint64_t iopm_pa, msrpm_pa;
+	uint32_t intcpt12[5];
 	uint32_t intcpt1;
 	int i;
 
@@ -206,12 +215,19 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	 * misaligned base past the alignment check into vm_gpa_hold(), whose
 	 * page-crossing guard panic()s -- a race-reachable whole-host DoS from
 	 * any multi-vCPU nested L1. Use only these locals hereafter.
+	 *
+	 * Read them with atomic_load: a plain read of a mapping another vCPU
+	 * can write is not a guaranteed single fetch, and a compiler free to
+	 * re-read the source would put the race back exactly where this
+	 * snapshot was meant to remove it.
 	 */
-	intcpt1 = vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT];
-	iopm_pa = vmcb12->ctrl.iopm_base_pa;
-	msrpm_pa = vmcb12->ctrl.msrpm_base_pa;
+	for (i = 0; i < 5; i++)
+		intcpt12[i] = atomic_load_32(&vmcb12->ctrl.intercept[i]);
+	intcpt1 = intcpt12[VMCB_CTRL1_INTCPT];
+	iopm_pa = atomic_load_64(&vmcb12->ctrl.iopm_base_pa);
+	msrpm_pa = atomic_load_64(&vmcb12->ctrl.msrpm_base_pa);
 
-	if (!svm_nested_vmcb12_consistent(vmcb12) ||
+	if (!svm_nested_vmcb12_consistent(vmcb12, intcpt12) ||
 	    ((intcpt1 & VMCB_INTCPT_IO) != 0 && (iopm_pa & PAGE_MASK) != 0) ||
 	    ((intcpt1 & VMCB_INTCPT_MSR) != 0 && (msrpm_pa & PAGE_MASK) != 0)) {
 		SVM_CTR1(vcpu, "nested VMRUN: inconsistent VMCB12 %#lx",
@@ -275,8 +291,7 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	 */
 	vmcb->state = vmcb12->state;
 	for (i = 0; i < 5; i++)
-		ctrl->intercept[i] = ns->l0_intercept[i] |
-		    vmcb12->ctrl.intercept[i];
+		ctrl->intercept[i] = ns->l0_intercept[i] | intcpt12[i];
 	ctrl->intercept[VMCB_CTRL2_INTCPT] |= VMCB_INTCPT_VMRUN |
 	    VMCB_INTCPT_VMLOAD | VMCB_INTCPT_VMSAVE | VMCB_INTCPT_STGI |
 	    VMCB_INTCPT_CLGI | VMCB_INTCPT_SKINIT;
@@ -304,7 +319,7 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	{
 		extern uint64_t svm_l2_vmruns, svm_l2_vintr_want, svm_l2_notintr;
 		svm_l2_vmruns++;
-		if ((vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT] & VMCB_INTCPT_VINTR) != 0)
+		if ((intcpt1 & VMCB_INTCPT_VINTR) != 0)
 			svm_l2_vintr_want++;
 		if ((vmcb12->state.rflags & PSL_I) == 0)
 			svm_l2_notintr++;
