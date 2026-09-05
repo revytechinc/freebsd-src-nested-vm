@@ -81,8 +81,13 @@ wait_for() {
 	while [ "${_n}" -lt "${_t}" ]; do
 		tail -n +"$((_after + 1))" "${CONS}" | tr -d '\015' |
 		    grep -Eaq "${_re}" && return 0
-		kill -0 "${BHYVE_PID:-$$}" 2>/dev/null ||
-		    { log "bhyve exited while waiting for ${_re}"; return 1; }
+		kill -0 "${BHYVE_PID:-$$}" 2>/dev/null || {
+			wait "${BHYVE_PID}" 2>/dev/null
+			log "L1's bhyve exited (status $?) while waiting for ${_re}"
+			log "  bhyve said: $(tail -3 "${WORKDIR}/bhyve.log" |
+			    tr '\n' ' ')"
+			return 1
+		}
 		sleep 1; _n=$((_n + 1))
 	done
 	return 1
