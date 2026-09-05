@@ -182,7 +182,14 @@ static int trap_wbinvd;
 SYSCTL_INT(_hw_vmm, OID_AUTO, trap_wbinvd, CTLFLAG_RDTUN, &trap_wbinvd, 0,
     "WBINVD triggers a VM-exit");
 
-int vmm_nested_enable;
+/*
+ * hw.vmm.nested.enable: the single master switch for nested virtualization.
+ * It is ON by default; an operator turns nesting off host-wide by setting it
+ * to 0.  There is no per-VM opt-in flag -- bhyve(8)/bhyveload(8) -N is
+ * accepted but ignored.  vmm_init() forces this back to 0 on hardware that
+ * cannot do nesting at all (see vmm_nested_supported()).
+ */
+int vmm_nested_enable = 1;
 static int vmm_nested_enable_sysctl(SYSCTL_HANDLER_ARGS);
 bool vmm_nested_supported(void);
 extern int svm_nested_status;
