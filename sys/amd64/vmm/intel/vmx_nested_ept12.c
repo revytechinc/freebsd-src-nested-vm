@@ -96,15 +96,37 @@ extern int vmm_nested_enable;
  */
 #define	EPT_WALK_MAX_LEVELS	4
 
-void
+int
 vmx_nested_ept12_install(struct vmx_vcpu *vcpu, uint64_t ept12_pte)
 {
 	struct vmx_nested_state *ns;
+	unsigned levels;
 
 	ns = vmx_nested_state(vcpu);
 	if (ns == NULL)
-		return;
+		return (-1);
+
+	/*
+	 * L1 chooses this value, and the walker below implements exactly one
+	 * shape of walk. The page-walk-length field holds the level count less
+	 * one -- the same encoding eptp() uses to build our own EPTP -- so a
+	 * root asking for any other depth would be walked as if it were
+	 * EPT_WALK_MAX_LEVELS deep, silently translating through the wrong
+	 * table level rather than telling L1 anything.
+	 *
+	 * Fail the nested VM entry rather than storing 0 and letting the
+	 * translation fail later: an EPT violation reflected to an L1 whose own
+	 * tables map the address is one L1 resumes from, forever. A VM-entry
+	 * failure is something L1 can see and report.
+	 */
+	levels = ((ept12_pte >> 3) & 0x7) + 1;
+	if (ept12_pte != 0 && levels != EPT_WALK_MAX_LEVELS) {
+		VMX_CTR2(vcpu, "nested EPT12: refusing EPTP %#lx with a "
+		    "%u-level walk", (unsigned long)ept12_pte, levels);
+		return (-1);
+	}
 	ns->ept12_pte = ept12_pte;
+	return (0);
 }
 
 /*
