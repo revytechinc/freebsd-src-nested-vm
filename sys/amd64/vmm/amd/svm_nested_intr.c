@@ -15,12 +15,11 @@
  *   - Alternatively, propagate the interrupt up to L1, which then
  *     decides what to do.
  *
- * Wave1 implements injection via the L1 VMCB12 EventInjection field
- * (per AMD APM Vol 2 §15.20). The PIR (Pending Interrupt Register)
+ * Wave1 implements injection via the L1 VMCB12 EventInjection
+ * field. The PIR (Pending Interrupt Register)
  * is maintained per-L2-vCPU so a noisy L2 device does not flood L1.
  *
- * Original BSD code; KVM arch/x86/kvm/svm/svm.c::svm_deliver_nested_*
- * was consulted for the field encoding only; no source copied.
+ * Original BSD code.
  */
 
 #include <sys/cdefs.h>
@@ -128,8 +127,7 @@ svm_nested_pir_highest(struct svm_vcpu *vcpu)
  * L0 may have just injected an exception of its own into L2 (a nested
  * fault raised while the interrupted event was being delivered).  This
  * queue is where the event waits in that case, so that "EVENTINJ is
- * busy" can never mean "the event is dropped".  It is the AMD analogue
- * of the event queue KVM's svm_complete_interrupts() feeds.
+ * busy" can never mean "the event is dropped".
  *
  * Entries are raw EVENTINJ words: vector, type, error-code-valid and
  * error code all travel together, and EXITINTINFO shares the layout,
@@ -203,7 +201,7 @@ svm_nested_evtq_flush(struct svm_vcpu *vcpu)
 }
 
 /*
- * Build the EventInjection word per AMD APM Vol 2 §15.20:
+ * Build the EventInjection word:
  *   bits  7:0  : vector
  *   bits 10:8  : type (0=INTR, 2=NMI, 3=EXCEPTION, 4=INTn)
  *   bit  11    : error-code valid
