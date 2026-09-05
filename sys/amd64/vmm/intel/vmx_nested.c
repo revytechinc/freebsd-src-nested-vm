@@ -46,11 +46,14 @@ extern int vmm_nested_enable;
  *  - The state->vmcs_field_dirty / vmcs_field_ro pointers stay
  *    NULL until a later Wave task allocates them lazily; the
  *    shadow helpers below guard against NULL.
- *  - A non-NULL return guarantees that nested_enabled was true
- *    and vmm_nested_enable was non-zero at the moment of the
- *    access; if either flips between this check and the caller's
- *    use the worst case is an early return -1 from the per-task
- *    handler (which bubbles up as VM_EXITCODE_VMINSN to userland).
+ *  - Whether a VM may nest is fixed when the VM is created: the
+ *    host-wide sysctl is captured in vmx->nested_gate by vmx_init()
+ *    and read nowhere else, so the answer cannot change under a
+ *    caller and a nested-enabled VM always has nested state. The
+ *    earlier version re-read the sysctl on every call and claimed
+ *    the worst case was an early return; it was not -- callers
+ *    dereference this, so flipping the sysctl under a live nested
+ *    guest dereferenced NULL in the kernel.
  */
 struct vmx_nested_state *
 vmx_nested_state(struct vmx_vcpu *vcpu)
@@ -62,7 +65,7 @@ vmx_nested_state(struct vmx_vcpu *vcpu)
 	vmx = vcpu->vmx;
 	if (vmx == NULL || vmx->vm == NULL)
 		return (NULL);
-	if (!vmx->vm->nested_enabled || vmm_nested_enable == 0)
+	if (!vmx->vm->nested_enabled || !vmx->nested_gate)
 		return (NULL);
 
 	/*

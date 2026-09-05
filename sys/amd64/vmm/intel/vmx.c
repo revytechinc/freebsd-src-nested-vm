@@ -1151,6 +1151,17 @@ vmx_init(struct vm *vm, pmap_t pmap)
 	vmx = malloc(sizeof(struct vmx), M_VMX, M_WAITOK | M_ZERO);
 	vmx->vm = vm;
 
+	/*
+	 * Take the host-wide gate once, here, while the VM is being created
+	 * and before any vcpu exists. Re-reading the sysctl on every
+	 * vmx_nested_state() call made that function start returning NULL
+	 * under a running nested guest the moment the sysctl was flipped, and
+	 * callers dereference the result -- so turning nesting off panicked
+	 * the host instead of disabling anything. Turning it off still stops
+	 * nesting, for VMs created afterwards.
+	 */
+	vmx->nested_gate = (vmm_nested_enable != 0);
+
 	vmx->eptp = eptp(vtophys((vm_offset_t)pmap->pm_pmltop));
 
 	/*
@@ -1246,10 +1257,10 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 	 * VMCS_LINK_POINTER.  We intentionally do not touch the
 	 * shadow bit or link pointer here -- doing so would break
 	 * every nested-enabled VMCS that has not yet installed a
-	 * VMCS12 (Intel SDM Vol 3 §25.4.2 requires a valid link
-	 * pointer when shadowing is on).
+	 * VMCS12, because a valid link pointer is required whenever
+	 * shadowing is on.
 	 */
-	if (vmx->vm->nested_enabled) {
+	if (vmx->vm->nested_enabled && vmx->nested_gate) {
 		vcpu->nvmcs12 = malloc_aligned(sizeof(*vcpu->nvmcs12),
 		    PAGE_SIZE, M_VMX, M_WAITOK | M_ZERO);
 		if (vcpu->nvmcs12 == NULL)
