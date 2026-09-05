@@ -446,7 +446,22 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	}
 
 	val = vmcs_read(VMCS_PRI_PROC_BASED_CTLS);
-	val &= ~(uint64_t)PROCBASED_USE_TPR_SHADOW;
+	/*
+	 * The window-exiting controls inherited here are vmcs01's, and vmcs01's
+	 * are L0's own: L0 arms them when it has an event pending for L1 while
+	 * L1 is not yet interruptible. They describe L1's interruptibility, not
+	 * L2's. Carried into vmcs02 they arm a window exit for a guest nobody
+	 * asked them for, and the resulting exit is indistinguishable from one
+	 * L1 requested -- reflecting it panics an L1 whose own bookkeeping has
+	 * no matching request. Drop them and take only what VMCS12 asks for
+	 * below. Nothing is lost: vmcs01 keeps its copy, and vmcs02 runs with
+	 * the VMX-preemption timer armed (see PINBASED_PREMPTION_TIMER above),
+	 * so L2 is forced back to L0 roughly every millisecond whatever it is
+	 * doing. L0's own window request therefore fires the next time L1 runs,
+	 * which is soon and does not depend on L2 exiting for its own reasons.
+	 */
+	val &= ~(uint64_t)(PROCBASED_USE_TPR_SHADOW |
+	    PROCBASED_INT_WINDOW_EXITING | PROCBASED_NMI_WINDOW_EXITING);
 	val |= PROCBASED_SECONDARY_CONTROLS;
 	/*
 	 * Propagate L1's interrupt/NMI-window-exiting request from VMCS12.
@@ -691,18 +706,53 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 		return (1);
 	}
 	case EXIT_REASON_NMI_WINDOW:
-	case EXIT_REASON_INTR_WINDOW:
+	case EXIT_REASON_INTR_WINDOW: {
+		uint64_t v12ctls, want;
+
 		/*
-		 * L2 became interruptible and vmcs02 carried the window-exiting
-		 * control L1 requested (propagated from VMCS12 in
-		 * vmx_nested_build_vmcs02()). Reflect the window exit to L1 so
-		 * its hypervisor clears the control and injects the pending
-		 * event through VMCS12 ENTRY_INTR_INFO on the next entry.
-		 * Handling it at L0 (return 1) would swallow the one signal L1
-		 * uses to inject, which is why L2 received no interrupts.
+		 * L2 became interruptible. Reflect the window exit to L1 so its
+		 * hypervisor clears the control and injects the pending event
+		 * through VMCS12 ENTRY_INTR_INFO on the next entry. Handling it
+		 * at L0 (return 1) would swallow the one signal L1 uses to
+		 * inject, which is why L2 received no interrupts.
+		 *
+		 * Reflect it only if L1 actually armed that window in VMCS12.
+		 * An exit from a control L1 never requested is not L1's to
+		 * handle: its window-clearing path asserts on bookkeeping that
+		 * recorded no such request, so reflecting one panics L1 -- a
+		 * guest-triggerable host crash, since L1 is a guest. Clear the
+		 * stray control out of vmcs02 and resume L2 instead. This is
+		 * belt and braces: vmx_nested_build_vmcs02() no longer lets
+		 * vmcs01's own window controls reach vmcs02, and this keeps any
+		 * future path that does from reaching L1 as a panic.
 		 */
+		want = reason == EXIT_REASON_INTR_WINDOW ?
+		    PROCBASED_INT_WINDOW_EXITING : PROCBASED_NMI_WINDOW_EXITING;
+		v12ctls = 0;
+		if (vmcs12_read_field(vcpu->nvmcs12, VMCS_PRI_PROC_BASED_CTLS,
+		    &v12ctls) != 0) {
+			/*
+			 * What L1 armed is now unknown, and the two ways of
+			 * guessing are not equally bad: reflecting an exit L1
+			 * did not ask for panics it, while withholding one it
+			 * did ask for costs L2 an injection it will get on a
+			 * later window. Take the survivable branch, but say so
+			 * -- vmx_nested_build_vmcs02() reads this same encoding
+			 * on every entry, so a failure here means something is
+			 * wrong well beyond this exit.
+			 */
+			VMX_CTR1(vcpu, "nested: VMCS12 proc-based ctls "
+			    "unreadable at window exit %u", reason);
+			v12ctls = 0;
+		}
+		if ((v12ctls & want) == 0) {
+			vmcs_write(VMCS_PRI_PROC_BASED_CTLS,
+			    vmcs_read(VMCS_PRI_PROC_BASED_CTLS) & ~want);
+			return (1);
+		}
 		vmx_nested_reflect_l2_exit(vcpu, reason, qual, 0);
 		return (0);
+	}
 	default:
 		/* Everything else goes up to L1's hypervisor. */
 		vmx_nested_reflect_l2_exit(vcpu, reason, qual, 0);
