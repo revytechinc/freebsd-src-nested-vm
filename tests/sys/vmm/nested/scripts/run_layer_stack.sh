@@ -173,6 +173,14 @@ log "L1 reached the login prompt"
 send 'root'
 wait_for 'assword' 30 || fail "no password prompt on L1"
 send 'root'
+# Wait for the prompt before typing anything else. login(1) runs resizewin,
+# which reads from the terminal for several seconds and swallows whatever
+# arrives meanwhile -- the marker assignment sent blind was eaten there, and
+# every later command then waited for a marker the guest could not produce.
+# Anchor on the whole prompt, not a bare "# ": the login banner and boot
+# messages contain that sequence, and matching one of those would send the
+# assignment blind again -- intermittently, which is worse.
+wait_for 'root@[^ ]*:~ #' 120 || fail "L1 never produced a shell prompt"
 send "M=${MARKER_VALUE}"
 guest L1SHELL 60 'true' || fail "no shell on L1"
 log "L1 root shell"
@@ -292,7 +300,7 @@ l2_expect 'login:' 120 || fail "L2 never offered a login prompt"
 guest L2USER 60 "printf 'root\\r' > /dev/nmdm0B" || true
 l2_expect 'assword' 60 || fail "L2 never asked for a password"
 guest L2PASS 60 "printf 'root\\r' > /dev/nmdm0B" || true
-l2_expect '# ' 90 || fail "L2 never produced a shell prompt"
+l2_expect 'root@[^ ]*:~ #' 90 || fail "L2 never produced a shell prompt"
 guest L2MARK 60 "printf 'M=${MARKER_VALUE}\\r' > /dev/nmdm0B" || true
 l2 L2SHELL 60 'true' || fail "no shell on L2"
 log "L2 root shell"
