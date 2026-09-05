@@ -174,16 +174,36 @@ vmx_nested_ept02_cleanup(struct vmx_vcpu *vcpu)
 	struct vmx_nested_state *ns;
 
 	ns = vmx_nested_state(vcpu);
-	if (ns == NULL || ns->ept02 == NULL)
+	if (ns == NULL)
 		return;
-	pmap_remove(ns->ept02, 0, VM_MAXUSER_ADDRESS);
-	pmap_release(ns->ept02);
-	PMAP_LOCK_DESTROY(ns->ept02);
-if (ns->msr_bitmap02 != NULL)
+	/*
+	 * Release each allocation on its own condition. Keying the whole
+	 * function off ept02 would be correct only for as long as ept02 stays
+	 * the first thing allocated, which is not a property the reader of a
+	 * cleanup function should have to go and verify.
+	 */
+	if (ns->ept02 != NULL) {
+		pmap_remove(ns->ept02, 0, VM_MAXUSER_ADDRESS);
+		pmap_release(ns->ept02);
+		PMAP_LOCK_DESTROY(ns->ept02);
+		free(ns->ept02, M_VMX_NESTED);
+		ns->ept02 = NULL;
+		ns->ept02_eptp = 0;
+	}
+	if (ns->msr_bitmap02 != NULL) {
 		free(ns->msr_bitmap02, M_VMX_NESTED);
-	free(ns->ept02, M_VMX_NESTED);
-	ns->ept02 = NULL;
-	ns->ept02_eptp = 0;
+		/*
+		 * Clear the pointer and the physical address with it. Today the
+		 * only caller frees the nested state straight afterwards, so
+		 * nothing observes them -- but vmx_nested_build_vmcs02() skips
+		 * the allocation when the pointer is non-NULL, so a future
+		 * caller that rebuilt the state would write through freed
+		 * memory and program VMCS_MSR_BITMAP with a freed page, handing
+		 * L2's MSR interception to whatever reused it.
+		 */
+		ns->msr_bitmap02 = NULL;
+		ns->msr_bitmap02_pa = 0;
+	}
 	if (ns->vmcs02 != NULL) {
 		free(ns->vmcs02, M_VMX_NESTED);
 		ns->vmcs02 = NULL;
