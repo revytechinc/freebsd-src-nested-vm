@@ -163,26 +163,34 @@ guest L1FW 30 'ls /usr/local/share/uefi-firmware/BHYVE_UEFI.fd' ||
 # and we want to know which one a failure belongs to:
 #   1. UEFI bootrom + emulated NVMe -- what a user reaches for, and what the
 #      generated boot scripts use;
-#   2. bhyveload + virtio-blk -- the loader reads the kernel out of the disk
+#   2. UEFI bootrom + virtio-blk -- same firmware, different device model;
+#   3. bhyveload + virtio-blk -- the loader reads the kernel out of the disk
 #      from L1 userspace before L2 ever runs, so it exercises far less of the
 #      device path.
-# If 1 fails and 2 works, the defect is in the firmware/NVMe path under
-# nesting, not in nesting as such -- say so rather than reporting "L2 failed".
+# Which one first succeeds names the culprit: 2 working means the NVMe model
+# is at fault, 3 working means the firmware's own device I/O is, and none
+# working means nesting itself. Reporting a bare "L2 failed" says none of that.
 L2_METHOD=none
 _at=$(lines)
 send 'bhyve -c 1 -m 2G -A -H -P -l bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd -s 0,hostbridge -s 2,nvme,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
 if wait_for 'login:' "${BOOT_TIMEOUT}" "${_at}"; then
 	L2_METHOD=uefi-nvme
 else
-	log "L2 did not boot via UEFI+NVMe; retrying with bhyveload+virtio-blk"
-	send '~'
-	send ''
+	log "L2 did not boot via UEFI+NVMe; retrying with UEFI+virtio-blk"
 	guest L2CLEAN 60 'bhyvectl --destroy --vm=l2 >/dev/null 2>&1; true' || true
 	_at=$(lines)
-	send 'bhyveload -c stdio -m 2G -d /dev/nda1 -e console=comconsole -e autoboot_delay=1 l2 && bhyve -c 1 -m 2G -A -H -P -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
-	wait_for 'login:' "${BOOT_TIMEOUT}" "${_at}" ||
-	    fail "L2 never reached a login prompt by either method"
-	L2_METHOD=bhyveload-virtio
+	send 'bhyve -c 1 -m 2G -A -H -P -l bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
+	if wait_for 'login:' "${BOOT_TIMEOUT}" "${_at}"; then
+		L2_METHOD=uefi-virtio
+	else
+		log "L2 did not boot via UEFI either; retrying with bhyveload+virtio-blk"
+		guest L2CLEAN2 60 'bhyvectl --destroy --vm=l2 >/dev/null 2>&1; true' || true
+		_at=$(lines)
+		send 'bhyveload -c stdio -m 2G -d /dev/nda1 -e console=comconsole -e autoboot_delay=1 l2 && bhyve -c 1 -m 2G -A -H -P -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
+		wait_for 'login:' "${BOOT_TIMEOUT}" "${_at}" ||
+		    fail "L2 never reached a login prompt by any method"
+		L2_METHOD=bhyveload-virtio
+	fi
 fi
 log "L2 reached the login prompt via ${L2_METHOD} -- nested guest is up"
 send 'root'
