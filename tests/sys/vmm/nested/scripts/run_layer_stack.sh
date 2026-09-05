@@ -82,8 +82,19 @@ wait_for() {
 		tail -n +"$((_after + 1))" "${CONS}" | tr -d '\015' |
 		    grep -Eaq "${_re}" && return 0
 		kill -0 "${BHYVE_PID:-$$}" 2>/dev/null || {
-			wait "${BHYVE_PID}" 2>/dev/null
-			log "L1's bhyve exited (status $?) while waiting for ${_re}"
+			# wait(1) only reports a real status for a direct,
+			# unreaped child; if it fails, $? is the shell's own
+			# error and would be reported as bhyve's.
+			if wait "${BHYVE_PID}" 2>/dev/null; then
+				_st=0
+			else
+				_st=$?
+				# 127 means either "not a live child" or a real
+				# exit 127 from a failed exec; say both.
+				[ "${_st}" = 127 ] &&
+				    _st="127 (already reaped, or exec failed)"
+			fi
+			log "L1's bhyve exited (status ${_st}) while waiting for ${_re}"
 			log "  bhyve said: $(tail -3 "${WORKDIR}/bhyve.log" |
 			    tr '\n' ' ')"
 			return 1
@@ -114,11 +125,19 @@ wait_for_l2_login() { # <after-line>
 
 # Run a command in the guest and wait for its marker, so we never guess whether
 # a long-running command has finished.
+#
+# The marker cannot be spelled out in the command, because the guest's tty
+# echoes the command line straight back into the console log -- a plain marker
+# matches its own echo and reports success before the command has run at all.
+# So the guest expands it: what we type carries ${M}, and only the guest's
+# output carries the value. MARKER_VALUE is set in the guest once it has a
+# shell.
+MARKER_VALUE=Zq
 guest() { # <marker> <timeout> <command...>
 	_marker=$1; _t=$2; shift 2
 	_at=$(lines)
-	send "$* ; echo ===${_marker}==="
-	wait_for "===${_marker}===" "${_t}" "${_at}" ||
+	send "$* ; echo \"===\${M}${_marker}===\""
+	wait_for "===${MARKER_VALUE}${_marker}===" "${_t}" "${_at}" ||
 	    { log "guest command timed out: $*"; return 1; }
 	return 0
 }
@@ -154,6 +173,7 @@ log "L1 reached the login prompt"
 send 'root'
 wait_for 'assword' 30 || fail "no password prompt on L1"
 send 'root'
+send "M=${MARKER_VALUE}"
 guest L1SHELL 60 'true' || fail "no shell on L1"
 log "L1 root shell"
 
@@ -181,59 +201,112 @@ guest L1GEOM 30 'gpart show nda1; diskinfo -v /dev/nda1 | head -6' || true
 guest L1FW 30 'ls /usr/local/share/uefi-firmware/BHYVE_UEFI.fd' ||
     fail "L1 has no bhyve-firmware -- rebuild the image with -p bhyve-firmware"
 
-# Two ways to start L2, tried in order, because they exercise different paths
-# and we want to know which one a failure belongs to:
-#   1. UEFI bootrom + emulated NVMe -- what a user reaches for, and what the
-#      generated boot scripts use;
-#   2. UEFI bootrom + virtio-blk -- same firmware, different device model;
-#   3. bhyveload + virtio-blk -- the loader reads the kernel out of the disk
-#      from L1 userspace before L2 ever runs, so it exercises far less of the
-#      device path.
-# Which one first succeeds names the culprit: 2 working means the NVMe model
-# is at fault, 3 working means the firmware's own device I/O is, and none
-# working means nesting itself. Reporting a bare "L2 failed" says none of that.
-L2_METHOD=none
-_at=$(lines)
-send 'bhyve -c 1 -m 2G -A -H -P -l bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd -s 0,hostbridge -s 2,nvme,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
-if wait_for_l2_login "${_at}"; then
-	L2_METHOD=uefi-nvme
-else
-	log "L2 did not boot via UEFI+NVMe; retrying with UEFI+virtio-blk"
-	guest L2CLEAN 60 'bhyvectl --destroy --vm=l2 >/dev/null 2>&1; true' || true
+# L2 gets its own nmdm console inside L1, and L1 starts it in the background.
+# Running the inner bhyve in L1's foreground looked simpler, but when the guest
+# does not boot the firmware sits at its boot manager forever holding L1's only
+# terminal -- there is no way to interrupt it, so the run cannot even clean up.
+# With nmdm, L1's shell stays ours throughout and L2 can be destroyed.
+guest L1NMDM 60 'kldload -n nmdm; ls /dev/nmdm0B >/dev/null 2>&1 || echo NONMDM' ||
+    fail "L1 could not load nmdm"
+
+# Ask L1 to watch L2's console and report the first thing that settles the
+# question, rather than polling it over the console one grep at a time.
+l2_start() { # <label> <bhyve args...>
+	_label=$1; shift
+	# The previous attempt's reader must go too: two cats on one nmdm side
+	# split the stream between them, so the new log would miss half the
+	# console and report a booting guest as a failure.
+	guest "L2KILL" 60 'bhyvectl --destroy --vm=l2 >/dev/null 2>&1; pkill -f "bhyve.* l2$"; pkill -f "cat /dev/nmdm0B"; sleep 1; rm -f /tmp/l2.log; true' || true
+	guest "L2READER" 30 '(cat /dev/nmdm0B >> /tmp/l2.log &) ; sleep 1; true' ||
+	    return 1
+	log "L2 attempt: ${_label}"
+	_spawn_at=$(lines)
+	guest "L2SPAWN" 90 "$* > /tmp/l2.err 2>&1 & n=0; while [ \$n -lt 20 ]; do pgrep -qf 'bhyve.* l2\$' && break; sleep 1; n=\$((n+1)); done; pgrep -qf 'bhyve.* l2\$' && echo \"\${M}SPAWNED\" || cat /tmp/l2.err" ||
+	    return 1
+	tail -n +"$((_spawn_at + 1))" "${CONS}" | tr -d '\015' |
+	    grep -aq "${MARKER_VALUE}SPAWNED" || {
+		log "  L2's bhyve did not start: $(tail -3 "${CONS}")"
+		return 1
+	}
 	_at=$(lines)
-	send 'bhyve -c 1 -m 2G -A -H -P -l bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
-	if wait_for_l2_login "${_at}"; then
-		L2_METHOD=uefi-virtio
-	else
-		log "L2 did not boot via UEFI either; retrying with bhyveload+virtio-blk"
-		guest L2CLEAN2 60 'bhyvectl --destroy --vm=l2 >/dev/null 2>&1; true' || true
-		_at=$(lines)
-		send 'bhyveload -c stdio -m 2G -d /dev/nda1 -e console=comconsole -e autoboot_delay=1 l2 && bhyve -c 1 -m 2G -A -H -P -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
-		wait_for 'login:' "${BOOT_TIMEOUT}" "${_at}" ||
-		    fail "L2 never reached a login prompt by any method"
-		L2_METHOD=bhyveload-virtio
-	fi
+	guest "L2WATCH" $((BOOT_TIMEOUT + 30)) \
+	    "n=0; r=timeout; while [ \$n -lt ${BOOT_TIMEOUT} ]; do \
+	       if grep -aq 'login:' /tmp/l2.log; then r=login; break; fi; \
+	       if grep -aq 'No bootable option' /tmp/l2.log; then r=nobootdev; break; fi; \
+	       if ! pgrep -qf 'bhyve.* l2\$'; then r=exited; break; fi; \
+	       sleep 1; n=\$((n+1)); done; echo L2RESULT=\$r" || return 1
+	_res=$(tail -n +"$((_at + 1))" "${CONS}" | tr -d '\015' |
+	    grep -ao 'L2RESULT=[a-z]*' | tail -1 | cut -d= -f2)
+	log "  result: ${_res:-none}"
+	[ "${_res}" = login ]
+}
+
+# Three attempts, varying firmware and device model one at a time, so a failure
+# names the culprit: UEFI+virtio working means the NVMe model is at fault,
+# bhyveload+virtio working means the firmware's own device I/O is, and none
+# working means nesting itself.
+FW=/usr/local/share/uefi-firmware/BHYVE_UEFI.fd
+L2_METHOD=none
+if l2_start uefi-nvme \
+    "bhyve -c 1 -m 2G -A -H -P -l bootrom,${FW} -s 0,hostbridge -s 2,nvme,/dev/nda1 -s 31,lpc -l com1,/dev/nmdm0A l2"; then
+	L2_METHOD=uefi-nvme
+elif l2_start uefi-virtio \
+    "bhyve -c 1 -m 2G -A -H -P -l bootrom,${FW} -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,/dev/nmdm0A l2"; then
+	L2_METHOD=uefi-virtio
+elif l2_start bhyveload-virtio \
+    "bhyveload -c /dev/nmdm0A -m 2G -d /dev/nda1 -e console=comconsole -e autoboot_delay=1 l2 && bhyve -c 1 -m 2G -A -H -P -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,/dev/nmdm0A l2"; then
+	L2_METHOD=bhyveload-virtio
+else
+	guest L2DIAG 60 'tail -5 /tmp/l2.err; tail -20 /tmp/l2.log' || true
+	fail "L2 never reached a login prompt by any method"
 fi
 log "L2 reached the login prompt via ${L2_METHOD} -- nested guest is up"
-send 'root'
-wait_for 'assword' 30 "${_at}" || fail "no password prompt on L2"
-send 'root'
-guest L2SHELL 60 'true' || fail "no shell on L2"
+
+# From here every L2 command goes through L1: we write to L2's console and read
+# L2's log, both from L1's shell.
+l2() { # <marker> <timeout> <command...>
+	_m=$1; _t=$2; shift 2
+	# Same echo problem one layer down: L2's tty repeats what we send it, so
+	# the marker is assembled inside L2 from a variable it was given.
+	guest "L2CMD_${_m}" 60 "printf '%s\\r' '$* ; echo \"===\${M}${_m}===\"' > /dev/nmdm0B" ||
+	    return 1
+	_at=$(lines)
+	guest "L2SEEN_${_m}" $((_t + 30)) \
+	    "n=0; while [ \$n -lt ${_t} ]; do grep -aq \"===\${M}${_m}===\" /tmp/l2.log && break; sleep 1; n=\$((n+1)); done; grep -aq \"===\${M}${_m}===\" /tmp/l2.log && echo \"\${M}HIT${_m}\" || echo \"\${M}MISS${_m}\"" ||
+	    return 1
+	tail -n +"$((_at + 1))" "${CONS}" | tr -d '\015' |
+	    grep -aq "${MARKER_VALUE}HIT${_m}"
+}
+
+l2_expect() { # <regex> <timeout>
+	_re=$1; _t=$2
+	_eat=$(lines)
+	guest "L2EXP" $((_t + 30)) \
+	    "n=0; while [ \$n -lt ${_t} ]; do grep -aEq '${_re}' /tmp/l2.log && break; sleep 1; n=\$((n+1)); done; grep -aEq '${_re}' /tmp/l2.log && echo \"\${M}EXPOK\" || echo \"\${M}EXPMISS\"" ||
+	    return 1
+	tail -n +"$((_eat + 1))" "${CONS}" | tr -d '\015' |
+	    grep -aq "${MARKER_VALUE}EXPOK"
+}
+
+l2_expect 'login:' 120 || fail "L2 never offered a login prompt"
+guest L2USER 60 "printf 'root\\r' > /dev/nmdm0B" || true
+l2_expect 'assword' 60 || fail "L2 never asked for a password"
+guest L2PASS 60 "printf 'root\\r' > /dev/nmdm0B" || true
+l2_expect '# ' 90 || fail "L2 never produced a shell prompt"
+guest L2MARK 60 "printf 'M=${MARKER_VALUE}\\r' > /dev/nmdm0B" || true
+l2 L2SHELL 60 'true' || fail "no shell on L2"
 log "L2 root shell"
+l2 L2UNAME 30 'uname -a' || fail "L2 unresponsive"
 
-guest L2UNAME 30 'uname -a' || fail "L2 unresponsive"
-
-# --- ZFS inside L2, three hypervisor layers away from the disk --------
+# --- ZFS inside L2, two hypervisor layers away from the disk ----------
 log "L2: ZFS workload"
-guest L2ZPOOL 60 'zpool status nested2 | head -20' || fail "L2 cannot see its pool"
-guest L2MKDS 60 'zfs create nested2/stress' || fail "L2 zfs create"
-guest L2WRITE 300 \
-    'dd if=/dev/random of=/nested2/stress/blob bs=1m count=256 status=none && sync' ||
+l2 L2ZPOOL 60 'zpool status nested2' || fail "L2 cannot see its pool"
+l2 L2MKDS 60 'zfs create nested2/stress' || fail "L2 zfs create"
+l2 L2WRITE 300 'dd if=/dev/random of=/nested2/stress/blob bs=1m count=256 status=none && sync' ||
     fail "L2 write"
-guest L2SNAP 60 'zfs snapshot nested2/stress@one' || fail "L2 snapshot"
-guest L2SCRUB 600 \
-    'zpool scrub -w nested2; zpool status nested2 | grep -E "errors:|scan:"' ||
-    fail "L2 scrub"
+l2 L2SNAP 60 'zfs snapshot nested2/stress@one' || fail "L2 snapshot"
+l2 L2SCRUB 600 'zpool scrub -w nested2; zpool status nested2' || fail "L2 scrub"
+guest L2COLLECT 60 'grep -aE "errors:|scan: scrub" /tmp/l2.log | tail -5' || true
 
 log "=== scrub results ==="
 tr -d '\015' < "${CONS}" | grep -E "errors:|scan: scrub" | tail -10
