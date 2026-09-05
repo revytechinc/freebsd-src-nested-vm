@@ -10,8 +10,7 @@
  * functionality; this file provides the per-vCPU nested-state
  * pointer and the bitmap-allocation hooks that those files share.
  *
- * Original BSD code; Intel SDM Vol 3 §30 is referenced for VMCS
- * field-bitmap semantics only.
+ * Original BSD code.
  */
 
 #include <sys/param.h>
@@ -86,7 +85,7 @@ vmx_nested_state(struct vmx_vcpu *vcpu)
 /*
  * Initialise the VMCS12 shadow field bitmaps.  Called from
  * vmx_nested_load_vmcs12() on each fresh VMPTRLD.  The bitmaps are
- * 4KB so every Intel SDM §30 field encoding (16/32/64/natural
+ * 4KB so every architectural field encoding (16/32/64/natural
  * width) gets its own slot; only the bit positions that fall inside
  * the architecture-supported encoding range carry meaning.
  *

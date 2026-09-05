@@ -4,7 +4,7 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
- * VMCLEAR emulation for nested VMX (SDM Vol 3 §30.3).
+ * VMCLEAR emulation for nested VMX.
  */
 
 #include <sys/param.h>

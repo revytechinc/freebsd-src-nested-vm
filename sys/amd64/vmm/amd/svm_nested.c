@@ -8,7 +8,7 @@
  * code: L0 uses them to build the MSRPM it runs L1 under, and the L2
  * exit path uses the same offset computation to consult L1's MSRPM.
  *
- * Layout per AMD APM Vol 2 §15.11 ("MSR Intercepts"). The map is two
+ * Layout of the MSR intercept bitmap. The map is two
  * 4 KB pages; each MSR owns two consecutive bits, the lower one for
  * RDMSR and the upper one for WRMSR, a set bit meaning "intercept":
  *

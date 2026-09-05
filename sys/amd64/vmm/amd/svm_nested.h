@@ -5,7 +5,7 @@
  * All rights reserved.
  *
  * Nested virtualization support for bhyve on AMD SVM.
- * Original BSD code; AMD APM Vol 2 §15.11 is referenced for layout only.
+ * Original BSD code.
  */
 
 #ifndef _VMM_SVM_NESTED_H_
@@ -17,8 +17,8 @@
 #include "vmcb.h"
 
 /*
- * AMD SVM MSR permission map helpers; layout documented in svm_nested.c
- * (APM Vol 2 §15.11). Access selectors for the *_intercept() calls:
+ * AMD SVM MSR permission map helpers; layout documented in
+ * svm_nested.c. Access selectors for the *_intercept() calls:
  */
 #ifndef MSR_BITMAP_ACCESS_READ
 #define	MSR_BITMAP_ACCESS_READ	0x1

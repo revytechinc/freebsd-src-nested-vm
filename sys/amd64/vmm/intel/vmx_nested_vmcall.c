@@ -6,7 +6,7 @@
  *
  * VMCALL from L1 (VMX root operation). Outside SMM there is no
  * SMM-transfer monitor, so the instruction fails: VMfailValid(1) with a
- * current VMCS, VMfailInvalid without one (SDM Vol 3 §30.3). VMCALL
+ * current VMCS, VMfailInvalid without one. VMCALL
  * from an L2 guest is an unconditional VM exit that will be reflected
  * to L1 once L2 entry exists.
  */

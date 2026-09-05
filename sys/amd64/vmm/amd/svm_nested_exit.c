@@ -15,8 +15,7 @@
  * Otherwise L0 handles the exit itself on behalf of L2 (CPUID, I/O to
  * L0-emulated devices, nested page faults under the flat-NPT model).
  *
- * Original BSD code; AMD APM Vol 2 §15.6 and §15.7 are referenced for
- * the #VMEXIT semantics and the exit-code / intercept-bit mapping.
+ * Original BSD code.
  */
 
 #include <sys/cdefs.h>
@@ -74,7 +73,7 @@ svm_nested_release_vmcb12(struct svm_vcpu *vcpu)
 }
 
 /*
- * Does L1's IOPM intercept 'port'? One bit per port (APM §15.10.1); the
+ * Does L1's IOPM intercept 'port'? One bit per port; the
  * pages were held at VMRUN so this is safe in the exit handler. A page
  * that could not be held reads as "intercept" (fail closed).
  */
@@ -120,7 +119,7 @@ svm_nested_l1_msrpm_intercepts(struct svm_vcpu *vcpu, uint64_t exitinfo1)
 
 /*
  * Would L1 have taken this exit? Exit codes below 0xA0 map directly
- * onto the five 32-bit intercept vectors (APM §15.7 / Appendix C).
+ * onto the five 32-bit intercept vectors.
  */
 static bool
 svm_nested_l1_intercepts(struct svm_vcpu *vcpu, uint64_t exitcode,
@@ -211,7 +210,7 @@ svm_nested_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
 /*
  * #VMEXIT restores only part of the host (L1) state from the host save
  * area: the segment registers ES/CS/SS/DS, GDTR/IDTR, EFER, CR0/CR3/CR4,
- * RFLAGS, RIP, RSP and RAX (APM Vol 2 §15.5.2 / §15.6). FS, GS, TR,
+ * RFLAGS, RIP, RSP and RAX. FS, GS, TR,
  * LDTR, KernelGsBase, STAR/LSTAR/CSTAR/SFMASK and the SYSENTER MSRs are
  * deliberately left as L2 loaded them, so that L1's VMSAVE after the
  * exit captures L2's values and L1 reloads its own with its usual
