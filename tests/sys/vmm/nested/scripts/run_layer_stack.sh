@@ -248,12 +248,19 @@ l2_start() { # <label> <bhyve args...>
 	# into its boot manager -- which is what "no bootable device" was.
 	# Order matters: the reader must hold the tty open while stty runs, or
 	# the last close resets termios and flushes what the guest printed.
-	guest "L2READER" 30 '(cat /dev/nmdm0B >> /tmp/l2.log &) ; sleep 1; stty -f /dev/nmdm0B raw -echo clocal' ||
+	guest "L2READER" 30 '(cat /dev/nmdm0B >> /tmp/l2.log &) ; sleep 1; true' ||
 	    return 1
 	log "L2 attempt: ${_label}"
 	_spawn_at=$(lines)
 	guest "L2SPAWN" 90 "$* > /tmp/l2.err 2>&1 & sp && echo \"\${M}SPAWNED\" || cat /tmp/l2.err" ||
 	    return 1
+	# Only now: the B side blocks in ttydcd until its peer is open, so an
+	# stty before bhyve opens the A side hangs L1's shell outright. With the
+	# side cooked and echoing, everything L2 prints comes straight back at
+	# it as input -- the loader's output arrived doubled and its boot
+	# stalled, and the firmware read its own echo as a keypress and dropped
+	# into the boot manager, which is what "no bootable device" was.
+	guest "L2RAW" 30 'stty -f /dev/nmdm0B raw -echo clocal' || return 1
 	tail -n +"$((_spawn_at + 1))" "${CONS}" | tr -d '\015' |
 	    grep -aq "${MARKER_VALUE}SPAWNED" || {
 		log "  L2's bhyve did not start: $(tail -3 "${CONS}")"
