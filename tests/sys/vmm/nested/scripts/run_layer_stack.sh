@@ -356,8 +356,15 @@ tr -d '\015' < "${CONS}" | grep -E "errors:|scan: scrub" | tail -10
 
 # A scrub that repaired anything, or reported any error, is a failure however
 # cleanly the guests booted.
-if tr -d '\015' < "${CONS}" | grep -E "errors:" | grep -qv "No known data errors"
-then
+#
+# Match zpool's own output, not the console at large: the commands we type are
+# echoed back, and one of them contains the word "errors:", so a blanket grep
+# reported a data error on every clean run. zpool indents both lines it prints.
+_bad=$(tr -d '\015' < "${CONS}" |
+    grep -E "^[[:space:]]+(errors:|scan: scrub)" |
+    grep -vE "No known data errors|repaired 0B .* with 0 errors")
+if [ -n "${_bad}" ]; then
+	log "${_bad}"
 	fail "a scrub reported data errors -- see ${CONS}"
 fi
 
