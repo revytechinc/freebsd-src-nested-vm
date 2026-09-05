@@ -226,7 +226,7 @@ guest L1VARS 30 "FW=${FW:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}; D=/dev/
     fail "L1 would not take the setup line"
 guest L1FN1 30 'sp() { n=0; while [ $n -lt 20 ]; do pgrep -qf "bhyve.* l2$" && return 0; sleep 1; n=$((n+1)); done; return 1; }' ||
     fail "L1 would not take the spawn helper"
-guest L1FN2 30 'w1() { grep -aq "login:" /tmp/l2.log && { echo login; return; }; grep -aq "No bootable" /tmp/l2.log && { echo nobootdev; return; }; pgrep -qf "bhyve.* l2$" || echo exited; }' ||
+guest L1FN2 30 'w1() { grep -aq "login:" /tmp/l2.log && { echo login; return; }; grep -aq "mountroot>" /tmp/l2.log && { echo mountroot; return; }; grep -aq "No bootable" /tmp/l2.log && { echo nobootdev; return; }; pgrep -qf "bhyve.* l2$" || echo exited; }' ||
     fail "L1 would not take the poll helper"
 guest L1FN3 30 'wl() { n=0; while [ $n -lt '"${BOOT_TIMEOUT}"' ]; do r=$(w1); [ -n "$r" ] && break; sleep 1; n=$((n+1)); done; echo L2RESULT=${r:-timeout}; }' ||
     fail "L1 would not take the watch helper"
@@ -289,7 +289,11 @@ elif l2_start bhyveload-virtio \
     'bhyveload -c $C -m 2G -d $D -e console=comconsole -e autoboot_delay=1 l2 && bhyve -c 1 -m 2G -A -H -P -s 0,hostbridge -s 3,virtio-blk,$D -s 31,lpc -l com1,$C l2'; then
 	L2_METHOD=bhyveload-virtio
 else
-	guest L2DIAG 60 'tail -5 /tmp/l2.err; tail -20 /tmp/l2.log' || true
+	# A guest sitting at mountroot> has booted a kernel and only failed to
+	# find its root disk. "?" there lists what it can actually see, which
+	# is the difference between a plumbing problem and a hypervisor one.
+	guest L2ASK 60 'grep -aq "mountroot>" /tmp/l2.log && printf "?\r" > /dev/nmdm0B; sleep 3; true' || true
+	guest L2DIAG 60 'tail -5 /tmp/l2.err; tail -40 /tmp/l2.log' || true
 	fail "L2 never reached a login prompt by any method"
 fi
 log "L2 reached the login prompt via ${L2_METHOD} -- nested guest is up"
