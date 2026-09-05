@@ -217,6 +217,22 @@ guest L1FW 30 'ls /usr/local/share/uefi-firmware/BHYVE_UEFI.fd' ||
 guest L1NMDM 60 'kldload -n nmdm; ls /dev/nmdm0B >/dev/null 2>&1 || echo NONMDM' ||
     fail "L1 could not load nmdm"
 
+# A tty in canonical mode drops everything past MAX_CANON (255 bytes) on a
+# line, and the long spawn-and-wait one-liners went over it: the tail of the
+# command was lost, the shell sat waiting for a closing quote, and the next
+# command was swallowed into it. Give L1 short helpers and short variables
+# once, so every line sent afterwards stays well inside the limit.
+guest L1VARS 30 "FW=${FW:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}; D=/dev/nda1; C=/dev/nmdm0A" ||
+    fail "L1 would not take the setup line"
+guest L1FN1 30 'sp() { n=0; while [ $n -lt 20 ]; do pgrep -qf "bhyve.* l2$" && return 0; sleep 1; n=$((n+1)); done; return 1; }' ||
+    fail "L1 would not take the spawn helper"
+guest L1FN2 30 'w1() { grep -aq "login:" /tmp/l2.log && { echo login; return; }; grep -aq "No bootable" /tmp/l2.log && { echo nobootdev; return; }; pgrep -qf "bhyve.* l2$" || echo exited; }' ||
+    fail "L1 would not take the poll helper"
+guest L1FN3 30 'wl() { n=0; while [ $n -lt '"${BOOT_TIMEOUT}"' ]; do r=$(w1); [ -n "$r" ] && break; sleep 1; n=$((n+1)); done; echo L2RESULT=${r:-timeout}; }' ||
+    fail "L1 would not take the watch helper"
+guest L1FN4 30 'wm() { n=0; while [ $n -lt $2 ]; do grep -aq "===${M}$1===" /tmp/l2.log && { echo "${M}HIT$1"; return; }; sleep 1; n=$((n+1)); done; echo "${M}MISS$1"; }' ||
+    fail "L1 would not take the marker helper"
+
 # Ask L1 to watch L2's console and report the first thing that settles the
 # question, rather than polling it over the console one grep at a time.
 l2_start() { # <label> <bhyve args...>
@@ -229,7 +245,7 @@ l2_start() { # <label> <bhyve args...>
 	    return 1
 	log "L2 attempt: ${_label}"
 	_spawn_at=$(lines)
-	guest "L2SPAWN" 90 "$* > /tmp/l2.err 2>&1 & n=0; while [ \$n -lt 20 ]; do pgrep -qf 'bhyve.* l2\$' && break; sleep 1; n=\$((n+1)); done; pgrep -qf 'bhyve.* l2\$' && echo \"\${M}SPAWNED\" || cat /tmp/l2.err" ||
+	guest "L2SPAWN" 90 "$* > /tmp/l2.err 2>&1 & sp && echo \"\${M}SPAWNED\" || cat /tmp/l2.err" ||
 	    return 1
 	tail -n +"$((_spawn_at + 1))" "${CONS}" | tr -d '\015' |
 	    grep -aq "${MARKER_VALUE}SPAWNED" || {
@@ -237,12 +253,7 @@ l2_start() { # <label> <bhyve args...>
 		return 1
 	}
 	_at=$(lines)
-	guest "L2WATCH" $((BOOT_TIMEOUT + 30)) \
-	    "n=0; r=timeout; while [ \$n -lt ${BOOT_TIMEOUT} ]; do \
-	       if grep -aq 'login:' /tmp/l2.log; then r=login; break; fi; \
-	       if grep -aq 'No bootable option' /tmp/l2.log; then r=nobootdev; break; fi; \
-	       if ! pgrep -qf 'bhyve.* l2\$'; then r=exited; break; fi; \
-	       sleep 1; n=\$((n+1)); done; echo L2RESULT=\$r" || return 1
+	guest "L2WATCH" $((BOOT_TIMEOUT + 30)) "wl" || return 1
 	_res=$(tail -n +"$((_at + 1))" "${CONS}" | tr -d '\015' |
 	    grep -ao 'L2RESULT=[a-z]*' | tail -1 | cut -d= -f2)
 	log "  result: ${_res:-none}"
@@ -256,13 +267,13 @@ l2_start() { # <label> <bhyve args...>
 FW=/usr/local/share/uefi-firmware/BHYVE_UEFI.fd
 L2_METHOD=none
 if l2_start uefi-nvme \
-    "bhyve -c 1 -m 2G -A -H -P -l bootrom,${FW} -s 0,hostbridge -s 2,nvme,/dev/nda1 -s 31,lpc -l com1,/dev/nmdm0A l2"; then
+    'bhyve -c 1 -m 2G -A -H -P -l bootrom,$FW -s 0,hostbridge -s 2,nvme,$D -s 31,lpc -l com1,$C l2'; then
 	L2_METHOD=uefi-nvme
 elif l2_start uefi-virtio \
-    "bhyve -c 1 -m 2G -A -H -P -l bootrom,${FW} -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,/dev/nmdm0A l2"; then
+    'bhyve -c 1 -m 2G -A -H -P -l bootrom,$FW -s 0,hostbridge -s 3,virtio-blk,$D -s 31,lpc -l com1,$C l2'; then
 	L2_METHOD=uefi-virtio
 elif l2_start bhyveload-virtio \
-    "bhyveload -c /dev/nmdm0A -m 2G -d /dev/nda1 -e console=comconsole -e autoboot_delay=1 l2 && bhyve -c 1 -m 2G -A -H -P -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,/dev/nmdm0A l2"; then
+    'bhyveload -c $C -m 2G -d $D -e console=comconsole -e autoboot_delay=1 l2 && bhyve -c 1 -m 2G -A -H -P -s 0,hostbridge -s 3,virtio-blk,$D -s 31,lpc -l com1,$C l2'; then
 	L2_METHOD=bhyveload-virtio
 else
 	guest L2DIAG 60 'tail -5 /tmp/l2.err; tail -20 /tmp/l2.log' || true
@@ -279,9 +290,7 @@ l2() { # <marker> <timeout> <command...>
 	guest "L2CMD_${_m}" 60 "printf '%s\\r' '$* ; echo \"===\${M}${_m}===\"' > /dev/nmdm0B" ||
 	    return 1
 	_at=$(lines)
-	guest "L2SEEN_${_m}" $((_t + 30)) \
-	    "n=0; while [ \$n -lt ${_t} ]; do grep -aq \"===\${M}${_m}===\" /tmp/l2.log && break; sleep 1; n=\$((n+1)); done; grep -aq \"===\${M}${_m}===\" /tmp/l2.log && echo \"\${M}HIT${_m}\" || echo \"\${M}MISS${_m}\"" ||
-	    return 1
+	guest "L2SEEN_${_m}" $((_t + 30)) "wm ${_m} ${_t}" || return 1
 	tail -n +"$((_at + 1))" "${CONS}" | tr -d '\015' |
 	    grep -aq "${MARKER_VALUE}HIT${_m}"
 }
