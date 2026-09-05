@@ -149,14 +149,34 @@ guest() { # <marker> <timeout> <command...>
 ( cat "${B}" >> "${CONS}" ) &
 READER=$!
 
-log "starting L1 (${CPUS} vCPUs, ${MEM}); L2's disk is attached to it"
-bhyve -c "${CPUS}" -m "${MEM}" -A -H -P \
-    -l bootrom,"${BOOTROM}" \
-    -s 0,hostbridge \
-    -s 2,nvme,"${L1}" \
-    -s 3,virtio-blk,"${L2}" \
-    -s 31,lpc \
-    -l com1,"${A}" "${VMNAME}" > "${WORKDIR}/bhyve.log" 2>&1 &
+# How L1 itself is booted is a variable, not a detail: the path known to work
+# on Intel boots L1 with bhyveload, and the failure being chased appeared only
+# once L1 was started from the UEFI bootrom instead.
+: "${L1_BOOT:=uefi}"
+log "starting L1 (${CPUS} vCPUs, ${MEM}, boot=${L1_BOOT}); L2's disk is attached to it"
+case "${L1_BOOT}" in
+uefi)
+	bhyve -c "${CPUS}" -m "${MEM}" -A -H -P \
+	    -l bootrom,"${BOOTROM}" \
+	    -s 0,hostbridge \
+	    -s 2,nvme,"${L1}" \
+	    -s 3,virtio-blk,"${L2}" \
+	    -s 31,lpc \
+	    -l com1,"${A}" "${VMNAME}" > "${WORKDIR}/bhyve.log" 2>&1 &
+	;;
+bhyveload)
+	bhyveload -c stdio -m "${MEM}" -d "${L1}" -e autoboot_delay=1 \
+	    "${VMNAME}" > "${WORKDIR}/bhyveload.log" 2>&1 </dev/null ||
+	    fail "bhyveload: $(tail -3 "${WORKDIR}/bhyveload.log")"
+	bhyve -c "${CPUS}" -m "${MEM}" -A -H -P \
+	    -s 0,hostbridge \
+	    -s 2,virtio-blk,"${L1}" \
+	    -s 3,virtio-blk,"${L2}" \
+	    -s 31,lpc \
+	    -l com1,"${A}" "${VMNAME}" > "${WORKDIR}/bhyve.log" 2>&1 &
+	;;
+*)	fail "unknown L1_BOOT: ${L1_BOOT}" ;;
+esac
 BHYVE_PID=$!
 
 sleep 2
@@ -205,7 +225,11 @@ log "L1: loading vmm and launching L2 from the second disk"
 guest L1VMM 90 'kldload -n vmm; sysctl -n hw.vmm.nested.enable' ||
     fail "L1 could not load vmm"
 guest L1DISKS 30 'ls /dev/nda* /dev/vtbd* 2>/dev/null' || true
-guest L1GEOM 30 'gpart show vtbd0; diskinfo -v /dev/vtbd0 | head -6' || true
+# Which device L2's disk appears as depends on how L1 was booted: under UEFI
+# L1's own root is an NVMe namespace and L2's disk is the only virtio one;
+# under bhyveload both are virtio, so L2's is the second.
+if [ "${L1_BOOT}" = bhyveload ]; then L2DEV=/dev/vtbd1; else L2DEV=/dev/vtbd0; fi
+guest L1GEOM 30 "gpart show ${L2DEV#/dev/}; diskinfo -v ${L2DEV} | head -6" || true
 guest L1FW 30 'ls /usr/local/share/uefi-firmware/BHYVE_UEFI.fd' ||
     fail "L1 has no bhyve-firmware -- rebuild the image with -p bhyve-firmware"
 
@@ -231,7 +255,7 @@ guest L1GEOMFLAGS 30 'sysctl kern.geom.debugflags=0x10' ||
 # command was lost, the shell sat waiting for a closing quote, and the next
 # command was swallowed into it. Give L1 short helpers and short variables
 # once, so every line sent afterwards stays well inside the limit.
-guest L1VARS 30 "FW=${FW:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}; D=/dev/vtbd0; C=/dev/nmdm0A" ||
+guest L1VARS 30 "FW=${FW:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}; D=${L2DEV}; C=/dev/nmdm0A" ||
     fail "L1 would not take the setup line"
 guest L1FN1 30 'sp() { n=0; while [ $n -lt 20 ]; do pgrep -qf "bhyve.* l2$" && return 0; sleep 1; n=$((n+1)); done; return 1; }' ||
     fail "L1 would not take the spawn helper"
