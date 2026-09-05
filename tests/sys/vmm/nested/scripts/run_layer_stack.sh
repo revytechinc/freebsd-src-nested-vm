@@ -90,6 +90,23 @@ wait_for() {
 
 lines() { wc -l < "${CONS}" | tr -d ' '; }
 
+# Wait for a login prompt, but give up at once on the firmware's own "there is
+# nothing to boot here" message rather than sitting out the whole boot timeout.
+wait_for_l2_login() { # <after-line>
+	_at=$1; _n=0
+	while [ "${_n}" -lt "${BOOT_TIMEOUT}" ]; do
+		_tail=$(tail -n +"$((_at + 1))" "${CONS}" | tr -d '\015')
+		printf '%s' "${_tail}" | grep -Eaq 'login:' && return 0
+		printf '%s' "${_tail}" |
+		    grep -Eaq 'No bootable option or device was found' && {
+			log "  firmware found nothing to boot on that device"
+			return 1
+		}
+		sleep 1; _n=$((_n + 1))
+	done
+	return 1
+}
+
 # Run a command in the guest and wait for its marker, so we never guess whether
 # a long-running command has finished.
 guest() { # <marker> <timeout> <command...>
@@ -173,14 +190,14 @@ guest L1FW 30 'ls /usr/local/share/uefi-firmware/BHYVE_UEFI.fd' ||
 L2_METHOD=none
 _at=$(lines)
 send 'bhyve -c 1 -m 2G -A -H -P -l bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd -s 0,hostbridge -s 2,nvme,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
-if wait_for 'login:' "${BOOT_TIMEOUT}" "${_at}"; then
+if wait_for_l2_login "${_at}"; then
 	L2_METHOD=uefi-nvme
 else
 	log "L2 did not boot via UEFI+NVMe; retrying with UEFI+virtio-blk"
 	guest L2CLEAN 60 'bhyvectl --destroy --vm=l2 >/dev/null 2>&1; true' || true
 	_at=$(lines)
 	send 'bhyve -c 1 -m 2G -A -H -P -l bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd -s 0,hostbridge -s 3,virtio-blk,/dev/nda1 -s 31,lpc -l com1,stdio l2 ; echo ===L2EXIT==='
-	if wait_for 'login:' "${BOOT_TIMEOUT}" "${_at}"; then
+	if wait_for_l2_login "${_at}"; then
 		L2_METHOD=uefi-virtio
 	else
 		log "L2 did not boot via UEFI either; retrying with bhyveload+virtio-blk"
