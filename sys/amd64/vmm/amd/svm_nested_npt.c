@@ -242,9 +242,15 @@ svm_nested_npt_fault(struct svm_vcpu *vcpu, uint64_t g2, uint64_t exitinfo1)
 	 * hold. The mapping is unwired so the page stays under the normal
 	 * control of L1's VM object; NPT02 is torn down through its PV
 	 * entries when the page goes away.
+	 *
+	 * prot is what L1 grants; the flags argument is what this fault was.
+	 * Passing prot for both marked every fault a write whenever L1 granted
+	 * write, so a pure read or instruction fetch dirtied L1's page for no
+	 * reason. access is necessarily a subset of prot here: the walk above
+	 * reflects the fault to L1 unless (access & granted) == access.
 	 */
 	vm_page_busy_acquire(m, 0);
-	error = pmap_enter(ns->npt02, g2 & ~PAGE_MASK, m, prot, prot, 0);
+	error = pmap_enter(ns->npt02, g2 & ~PAGE_MASK, m, prot, access, 0);
 	vm_page_xunbusy(m);
 	vm_gpa_release(cookie);
 	if (error != KERN_SUCCESS) {
