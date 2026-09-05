@@ -60,6 +60,24 @@ if [ -f /etc/installerconfig ]; then
 	exit 
 fi
 
+# Experimental-build notice. This is the first thing anyone booting the media
+# sees, before the Welcome menu, and it has a single button: acknowledging it is
+# the only way forward, so it cannot be skipped past or dismissed by accident.
+# Scripted installs exit in the /etc/installerconfig block above and never reach
+# this, so unattended installs are unaffected.
+bsddialog --backtitle "${OSNAME} Installer" \
+    --title "Experimental build - not for production use" \
+    --ok-label "I Understand" \
+    --msgbox "This is an EXPERIMENTAL build.
+
+It is FreeBSD 16-CURRENT carrying new bhyve nested-virtualization code in the kernel and the hypervisor. That code has NOT been security audited and has NOT been production hardened.
+
+It can panic or destabilise the machine it runs on.
+
+Do not install this on production equipment, or on any machine whose data you care about. Use throwaway or test hardware only.
+
+You proceed entirely at your own risk." 0 0
+
 bsddialog --backtitle "${OSNAME} Installer" --title "Welcome" --extra-button --extra-label "Shell" --ok-label "Install" --cancel-label "Live System" --yesno "Welcome to ${OSNAME}! Would you like to begin an installation or use the live system?" 0 0
 
 case $? in
