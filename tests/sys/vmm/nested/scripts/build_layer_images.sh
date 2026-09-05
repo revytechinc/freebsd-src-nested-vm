@@ -34,10 +34,18 @@ set -eu
 
 PROGRAM="${0##*/}"
 
+# Under doas/sudo, HOME is root's, but the checkout and the images belong to
+# the invoking user -- defaulting to /root silently builds in the wrong place.
+_user=${DOAS_USER:-${SUDO_USER:-}}
+if [ -n "${_user}" ]; then
+	_home=$(getent passwd "${_user}" 2>/dev/null | cut -d: -f6)
+fi
+: "${_home:=${HOME}}"
+
 LAYERS=${LAYERS:-3}
 SIZE_GB=${SIZE_GB:-15}
-WORKDIR=${WORKDIR:-${HOME}/imagine-work}
-OCCAMBSD=${OCCAMBSD:-${HOME}/occambsd}
+WORKDIR=${WORKDIR:-${_home}/imagine-work}
+OCCAMBSD=${OCCAMBSD:-${_home}/occambsd}
 RELEASE=${RELEASE:-}
 PACKAGES=${PACKAGES:-bhyve-firmware}
 
@@ -76,12 +84,25 @@ done
 
 mkdir -p "${WORKDIR}"
 
+# imagine.sh mounts every image it builds on one fixed mountpoint, so two
+# concurrent runs quietly climb over each other's mounts and pools. Refuse the
+# second one rather than corrupt both images.
+LOCKDIR=${WORKDIR}/.build.lock
+if ! mkdir "${LOCKDIR}" 2>/dev/null; then
+	echo "${PROGRAM}: another build holds ${LOCKDIR}" >&2
+	echo "  wait for it, or remove the directory if it is stale" >&2
+	exit 1
+fi
+trap 'rmdir "${LOCKDIR}" 2>/dev/null' EXIT INT TERM
+
 n=1
 while [ "${n}" -le "${LAYERS}" ]; do
 	image="${WORKDIR}/nested${n}.raw"
 	layerdir="${WORKDIR}/layer${n}"
 
-	if [ -f "${image}" ]; then
+	# imagine.sh writes the .size marker last, so an image without one is a
+	# partial build, not something to reuse.
+	if [ -f "${image}" ] && [ -f "${image}.size" ]; then
 		echo "${PROGRAM}: layer ${n}: ${image} exists, skipping"
 		n=$((n + 1))
 		continue
