@@ -248,6 +248,36 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 	ns = vmx_nested_state(vcpu);
 
 	/*
+	 * A host whose EPT lacks hardware accessed/dirty bits makes the pmap
+	 * emulate them: a valid entry is left hardware-unreadable until the
+	 * first access faults, and the fault handler sets the bit and retries.
+	 * vm_handle_paging() does this for the pmap backing an ordinary guest,
+	 * but ept02 is a pmap of ours that nothing else knows about, so the
+	 * emulation has to happen here.  Without it L2 re-faults on the same
+	 * page forever: the walk below succeeds, the fill re-enters a mapping
+	 * that is already present and still unreadable, and we resume L2 into
+	 * an identical fault.  On hardware with real A/D bits this is a cheap
+	 * no-op -- pmap_emulate_accessed_dirty() returns -1 at once.
+	 */
+	if (ns->ept02 != NULL) {
+		int ftype;
+
+		if ((qual & EPT_VIOLATION_DATA_WRITE) != 0)
+			ftype = VM_PROT_WRITE;
+		else if ((qual & EPT_VIOLATION_DATA_READ) != 0)
+			ftype = VM_PROT_READ;
+		else
+			ftype = 0;
+		if (ftype != 0 &&
+		    pmap_emulate_accessed_dirty(ns->ept02, l2_gpa, ftype) == 0) {
+			VMX_CTR2(vcpu, "L2 EPT: %s bit emulated for gpa %#lx",
+			    ftype == VM_PROT_READ ? "accessed" : "dirty",
+			    (unsigned long)l2_gpa);
+			return (0);
+		}
+	}
+
+	/*
 	 * Runs from vm_run()'s deferred path: no VMCS is current and reflect
 	 * (which does VMCLEAR/VMPTRLD, i.e. a critical_exit) must NOT be called
 	 * here. The reflect-vs-fill decision was already made in vmx_run()
