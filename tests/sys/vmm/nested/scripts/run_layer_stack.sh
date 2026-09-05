@@ -282,22 +282,35 @@ l2_start() { # <label> <bhyve args...>
 	[ "${_res}" = login ]
 }
 
-# Three attempts, varying firmware and device model one at a time, so a failure
-# names the culprit: UEFI+virtio working means the NVMe model is at fault,
-# bhyveload+virtio working means the firmware's own device I/O is, and none
-# working means nesting itself.
+# The methods to try, in order, varying firmware and device model one at a
+# time so a failure names the culprit. The order is overridable, because the
+# order itself hides results: a failed attempt costs L1's console, so where the
+# first two fail the third never runs -- which is exactly how the method that
+# matches our known-good path went untested on Intel.
 FW=/usr/local/share/uefi-firmware/BHYVE_UEFI.fd
 L2_METHOD=none
-if l2_start uefi-nvme \
-    'bhyve -c 1 -m 2G -A -H -P -l bootrom,$FW -s 0,hostbridge -s 2,nvme,$D -s 31,lpc -l com1,$C l2'; then
-	L2_METHOD=uefi-nvme
-elif l2_start uefi-virtio \
-    'bhyve -c 1 -m 2G -A -H -P -l bootrom,$FW -s 0,hostbridge -s 3,virtio-blk,$D -s 31,lpc -l com1,$C l2'; then
-	L2_METHOD=uefi-virtio
-elif l2_start bhyveload-virtio \
-    'bhyveload -c $C -m 2G -d $D -e console=comconsole -e autoboot_delay=1 l2 && bhyve -c 1 -m 2G -A -H -P -s 0,hostbridge -s 3,virtio-blk,$D -s 31,lpc -l com1,$C l2'; then
-	L2_METHOD=bhyveload-virtio
-else
+: "${L2_METHODS:=uefi-nvme uefi-virtio bhyveload-virtio}"
+
+for _m in ${L2_METHODS}; do
+	[ "${L2_METHOD}" = none ] || break
+	case "${_m}" in
+	uefi-nvme)
+		l2_start uefi-nvme \
+		    'bhyve -c 1 -m 2G -A -H -P -l bootrom,$FW -s 0,hostbridge -s 2,nvme,$D -s 31,lpc -l com1,$C l2' &&
+		    L2_METHOD=uefi-nvme ;;
+	uefi-virtio)
+		l2_start uefi-virtio \
+		    'bhyve -c 1 -m 2G -A -H -P -l bootrom,$FW -s 0,hostbridge -s 3,virtio-blk,$D -s 31,lpc -l com1,$C l2' &&
+		    L2_METHOD=uefi-virtio ;;
+	bhyveload-virtio)
+		l2_start bhyveload-virtio \
+		    'bhyveload -c $C -m 2G -d $D -e console=comconsole -e autoboot_delay=1 l2 && bhyve -c 1 -m 2G -A -H -P -s 0,hostbridge -s 3,virtio-blk,$D -s 31,lpc -l com1,$C l2' &&
+		    L2_METHOD=bhyveload-virtio ;;
+	*)	fail "unknown L2 method: ${_m}" ;;
+	esac
+done
+
+if [ "${L2_METHOD}" = none ]; then
 	# A guest sitting at mountroot> has booted a kernel and only failed to
 	# find its root disk. "?" there lists what it can actually see, which
 	# is the difference between a plumbing problem and a hypervisor one.
