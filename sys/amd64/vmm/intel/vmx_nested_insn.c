@@ -8,13 +8,11 @@
  * hypervisor:
  *
  *   - operand decoding from the VM-exit instruction-information field
- *     (SDM Vol 3 Tables 27-9 .. 27-14) plus guest linear -> physical
- *     translation;
- *   - the VMsucceed / VMfailValid / VMfailInvalid RFLAGS conventions
- *     (SDM Vol 3 §30.2);
+ *     plus guest linear -> physical translation;
+ *   - the VMsucceed / VMfailValid / VMfailInvalid RFLAGS conventions;
  *   - keeping L1's VMCS memory in sync with the private VMCS12 copy;
  *   - delivering a VM exit to L1 by loading the VMCS12 host-state
- *     area into the hardware VMCS (SDM Vol 3 §27.5).
+ *     area into the hardware VMCS.
  *
  * Original BSD code.
  */
@@ -44,7 +42,7 @@
 #include "vmx_nested.h"
 #include "vmx_nested_layout.h"
 
-/* VM-exit instruction information (SDM Vol 3 Table 27-13). */
+/* VM-exit instruction information. */
 #define	INSN_INFO_SCALING(i)		((i) & 0x3)
 #define	INSN_INFO_REG1(i)		(((i) >> 3) & 0xf)
 #define	INSN_INFO_ADDRSIZE(i)		(((i) >> 7) & 0x7)
@@ -329,7 +327,7 @@ vmx_nested_read_m64_operand(struct vmx_vcpu *vcpu, uint64_t *val)
 	return (0);
 }
 
-/* SDM Vol 3 §30.2: VMsucceed clears CF, PF, AF, ZF, SF and OF. */
+/* VMsucceed clears CF, PF, AF, ZF, SF and OF. */
 #define	VMX_RFLAGS_STATUS	(PSL_C | PSL_PF | PSL_AF | PSL_Z | PSL_N | PSL_V)
 
 void
@@ -377,7 +375,7 @@ vmx_nested_vmfail_valid(struct vmx_vcpu *vcpu, uint32_t error)
 }
 
 /*
- * Common legality check for every VMX instruction (SDM §30.3): #UD
+ * Common legality check for every VMX instruction: #UD
  * outside VMX operation, #GP for CPL > 0. Returns 0 if the instruction
  * may proceed; otherwise the fault has been injected.
  */
@@ -418,7 +416,7 @@ vmx_nested_flush_vmcs12(struct vmx_vcpu *vcpu)
 }
 
 /*
- * Segment access-rights values loaded on VM exit (SDM §27.5.2).
+ * Segment access-rights values loaded on VM exit.
  */
 #define	AR_CS_64	0xa09b
 #define	AR_CS_32	0xc09b
@@ -517,7 +515,7 @@ vmx_nested_vmexit_to_l1(struct vmx_vcpu *vcpu, uint32_t reason,
 	vmx_nested_vmcs_write(vcpu, VMCS_GUEST_RSP, val);
 	vmx_nested_vmcs_write(vcpu, VMCS_GUEST_RFLAGS, 0x2);	/* reserved bit 1 */
 
-	/* Segments (SDM Table 27-x, "loading host segment state"). */
+	/* Segments ("loading host segment state"). */
 	vmcs12_read_field(v12, VMCS_HOST_CS_SELECTOR, &val);
 	vmx_nested_load_host_seg(vcpu, VMCS_GUEST_CS_SELECTOR, VMCS_GUEST_CS_BASE,
 	    VMCS_GUEST_CS_LIMIT, VMCS_GUEST_CS_ACCESS_RIGHTS, val, 0,
@@ -578,7 +576,7 @@ vmx_nested_vmexit_to_l1(struct vmx_vcpu *vcpu, uint32_t reason,
 }
 
 /*
- * VMXON m64 (SDM Vol 3 §30.3): enter VMX operation. The region pointer
+ * VMXON m64: enter VMX operation. The region pointer
  * is validated but the region is never used by hardware; L1 runs as an
  * ordinary L0 guest throughout.
  */

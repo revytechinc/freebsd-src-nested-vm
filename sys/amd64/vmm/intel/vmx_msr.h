@@ -53,10 +53,8 @@ uint32_t vmx_revision(void);
  * values AND-OR'd with a nested-safe mask so L1 cannot discover L0
  * microarchitecture details that cannot actually be nested.
  *
- * Design reference: Intel SDM Vol 3 §25.1; the AND/OR mask pattern is
- * inspired by KVM's nested_vmx_*_msr derivations (no KVM code is
- * copied).  The masks are computed once at module-init time and
- * stored in static storage.
+ * The masks are computed once at module-init time and stored in
+ * static storage.
  */
 int vmx_nested_cap_msr_read(struct vmx_vcpu *vcpu, u_int msr, uint64_t *val);
 

@@ -12,7 +12,7 @@
  * instruction-level checks is completed the way hardware completes an
  * entry it cannot perform: with a "VM-entry failure due to invalid
  * guest state" exit delivered to L1 through the VMCS12 host-state
- * area (SDM Vol 3 §26.8). L1 hypervisors handle that exit as a fatal
+ * area. L1 hypervisors handle that exit as a fatal
  * error for the L2 guest and shut it down cleanly.
  */
 
@@ -58,7 +58,7 @@ vmx_nested_vmentry(struct vmx_vcpu *vcpu, bool launch)
 		vmx_nested_vmfail_invalid(vcpu);
 		return (0);
 	}
-	/* Entry with MOV SS / STI blocking is VMfailValid (SDM §26.1). */
+	/* Entry with MOV SS / STI blocking is VMfailValid. */
 	intr = vmx_nested_vmcs_read(vcpu, VMCS_GUEST_INTERRUPTIBILITY);
 	if ((intr & HWINTR_BLOCKING) != 0) {
 		vmx_nested_vmfail_valid(vcpu, VMX_INSERR_ENTRY_BLOCKED_MOVSS);

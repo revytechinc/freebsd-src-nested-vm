@@ -4,7 +4,7 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
- * VMPTRLD / VMPTRST emulation for nested VMX (SDM Vol 3 §30.3).
+ * VMPTRLD / VMPTRST emulation for nested VMX.
  *
  * The VMCS L1 names is copied into the private per-vCPU buffer
  * vcpu->nvmcs12; VMREAD/VMWRITE operate on that copy and it is flushed
@@ -117,7 +117,7 @@ vmx_nested_exit_vmptrld(struct vmx_vcpu *vcpu)
 
 /*
  * VMPTRST m64: store the current-VMCS pointer, or ~0 when there is
- * none (SDM: "VMCS pointer is invalid").
+ * none ("VMCS pointer is invalid").
  */
 int
 vmx_nested_exit_vmptrst(struct vmx_vcpu *vcpu)

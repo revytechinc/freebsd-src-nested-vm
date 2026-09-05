@@ -1,11 +1,12 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
+ * Copyright (c) 2026 REVYTECH, Inc.
+ * All rights reserved.
+ *
  * Nested SVM instruction emulation (VMRUN/VMLOAD/VMSAVE/CLGI/STGI).
  *
- * Original BSD code. AMD APM Vol 2 §15.5 (VMRUN/#VMEXIT), §15.5.2
- * (VMLOAD/VMSAVE) and §15.17 (GIF) are referenced for the instruction
- * semantics only.
+ * Original BSD code.
  *
  * Model (v1):
  *
@@ -126,7 +127,7 @@ svm_nested_vmrun_invalid(struct vmcb *vmcb12)
 }
 
 /*
- * Minimal subset of the APM §15.5.1 VMRUN consistency checks. Anything
+ * Minimal subset of the VMRUN consistency checks. Anything
  * L0 does not model is left to hardware, which reports an INVALID exit
  * that svm_nested_l2_exit() reflects to L1.
  */

@@ -11,8 +11,7 @@
  *
  * Extracted from vmx_nested_vmread.c so multiple compilation units
  * can share the same field table without duplicating the static
- * array.  Original BSD code; Intel SDM Vol 3 Appendix B is
- * referenced for the field encoding map.
+ * array.  Original BSD code.
  */
 
 #ifndef	_VMX_NESTED_LAYOUT_H_
@@ -37,7 +36,7 @@
  * exit/entry controls.  For encodings not in this table readers
  * return -1 and the caller is expected to inject #GP into L1.
  *
- * Field widths follow SDM Vol 3 Appendix B (field encoding):
+ * Field widths follow the architectural field encoding:
  *   - 16-bit fields  -> 2 bytes (packed, low bits of the 4-byte slot)
  *   - 32-bit fields  -> 4 bytes
  *   - 64-bit / natural-width fields on x86-64 -> 8 bytes
