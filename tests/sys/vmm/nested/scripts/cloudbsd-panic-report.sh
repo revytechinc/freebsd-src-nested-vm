@@ -46,13 +46,26 @@ detect_layer() {
 		return
 	fi
 	_guest=$(sysctl -n kern.vm_guest 2>/dev/null)
+	_vendor=$(sysctl -n hw.hv_vendor 2>/dev/null)
+	_vendor=${_vendor:-unknown}
 	case "${_guest}" in
 	none|"")
 		echo "L0 — bare metal (kern.vm_guest=none)" ;;
+	bhyve)
+		# Inside bhyve: this is our stack. Still cannot see how deep --
+		# a guest has no way to know its own nesting depth unless the
+		# image declares it.
+		echo "L1 or deeper — inside bhyve (kern.vm_guest=bhyve, hv_vendor=${_vendor}); exact depth unknown, no kenv marker" ;;
+	vmware|kvm|hv|xen|vbox|parallels|nvmm|generic)
+		# A FOREIGN outer hypervisor. Worth shouting about: this build
+		# is then relying on someone else's nested-virtualization
+		# support to expose VMX/SVM at all, so a panic here may belong
+		# to that layer rather than to this code. It also means any
+		# layer numbering is in THAT stack, not this project's.
+		echo "inside a FOREIGN hypervisor: ${_guest} (hv_vendor=${_vendor}) -- not bare metal, not bhyve. This build is relying on nested virtualization provided by ${_guest}; the panic may belong to that layer rather than to this code."
+		;;
 	*)
-		# We know we are inside something, but not how deep: a guest
-		# cannot see its own nesting depth unless the image says so.
-		echo "L1 or deeper — inside a ${_guest} guest (kern.vm_guest=${_guest}); exact depth unknown, no kenv marker" ;;
+		echo "inside an unrecognised hypervisor: kern.vm_guest=${_guest} (hv_vendor=${_vendor})" ;;
 	esac
 }
 
