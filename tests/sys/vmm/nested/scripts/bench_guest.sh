@@ -19,6 +19,12 @@
 # shellcheck shell=sh
 set -u
 
+# A guest console emits bytes that are not valid in a UTF-8 locale, and tr(1)
+# then fails with "Illegal byte sequence" instead of stripping carriage
+# returns -- which silently breaks every wait for guest output.
+LC_ALL=C
+export LC_ALL
+
 PROGRAM="${0##*/}"
 
 IMAGE=${IMAGE:-/home/mlapointe/nested-layers/nested1.raw}
