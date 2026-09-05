@@ -364,7 +364,8 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	 */
 	if (vmcs12_read_field(v12, VMCS_EPTP, &val) == 0 &&
 	    val != ns->ept12_pte) {
-		vmx_nested_ept12_install(vcpu, val);
+		if (vmx_nested_ept12_install(vcpu, val) != 0)
+			return (-1);
 		vmx_nested_ept02_flush(vcpu);
 		ns->ept12_gen_flushed = ns->ept12_gen;
 	} else if (ns->ept12_gen != ns->ept12_gen_flushed) {

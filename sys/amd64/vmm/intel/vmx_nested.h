@@ -152,7 +152,7 @@ int	vmx_nested_vmclear_handle(struct vmx_vcpu *vcpu, uint64_t gpa,
 int	vmx_nested_vmlaunch_handle(struct vmx_vcpu *vcpu);
 int	vmx_nested_vmresume_handle(struct vmx_vcpu *vcpu);
 int	vmx_nested_vmcall_handle(struct vmx_vcpu *vcpu);
-void	vmx_nested_ept12_install(struct vmx_vcpu *vcpu, uint64_t ept12_pte);
+int	vmx_nested_ept12_install(struct vmx_vcpu *vcpu, uint64_t ept12_pte);
 int	vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 	    int access, uint64_t *out_l1_gpa);
 int	vmx_nested_invept_handle(struct vmx_vcpu *vcpu, uint64_t type,
