@@ -24,6 +24,7 @@
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
+#include <machine/pmap.h>
 
 #include <machine/cpufunc.h>
 #include <machine/vmm.h>
@@ -228,6 +229,41 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 		    sizeof(pte));
 		vm_gpa_release(cookie);
 
+		/*
+		 * L1 may be using the emulated accessed/dirty scheme, which
+		 * FreeBSD selects when the CPU's EPT has no hardware A/D bits
+		 * (Ivy Bridge and earlier).  There, validity moves to the
+		 * software EPT_PG_EMUL_V bit and writability to
+		 * EPT_PG_EMUL_RW, while the hardware read and write bits
+		 * become the accessed and dirty proxies -- so a page L1 has
+		 * legitimately mapped, but which L2 has not touched yet, sits
+		 * with EPT_PG_READ clear.
+		 *
+		 * Reading those as permissions makes us reflect an EPT
+		 * violation for a page L1 believes is perfectly well mapped:
+		 * L1 finds nothing to fix, resumes L2, and the same access
+		 * faults again forever.  Execute permission is still the
+		 * hardware X bit in both schemes.
+		 */
+		if ((pte & EPT_PG_EMUL_V) != 0) {
+			bool ok;
+
+			if (access == VM_PROT_WRITE)
+				ok = (pte & EPT_PG_EMUL_RW) != 0;
+			else if (access == VM_PROT_EXECUTE)
+				ok = (pte & EPT_PTE_X) != 0;
+			else
+				ok = true;	/* valid implies readable */
+			if (!ok) {
+				VMX_CTR3(vcpu, "nested EPT12 walk: emulated-AD "
+				    "access denied at level=%d idx=%lu pte=%#lx",
+				    level, (unsigned long)idx,
+				    (unsigned long)pte);
+				return (-1);
+			}
+			goto walked;
+		}
+
 		if ((pte & (EPT_PTE_R | EPT_PTE_W | EPT_PTE_X)) == 0) {
 			VMX_CTR3(vcpu, "nested EPT12 walk: empty PTE at "
 			    "level=%d idx=%lu pte=%#lx",
@@ -249,6 +285,7 @@ vmx_nested_ept12_translate(struct vmx_vcpu *vcpu, uint64_t l2_gpa,
 			    level, (unsigned long)idx, (unsigned long)pte);
 			return (-1);
 		}
+walked:
 
 		/*
 		 * Reserved-bit validation.
