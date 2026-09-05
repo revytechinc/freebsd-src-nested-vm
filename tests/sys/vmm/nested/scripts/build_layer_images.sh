@@ -34,10 +34,18 @@ set -eu
 
 PROGRAM="${0##*/}"
 
+# Under doas/sudo, HOME is root's, but the checkout and the images belong to
+# the invoking user -- defaulting to /root silently builds in the wrong place.
+_user=${DOAS_USER:-${SUDO_USER:-}}
+if [ -n "${_user}" ]; then
+	_home=$(getent passwd "${_user}" 2>/dev/null | cut -d: -f6)
+fi
+: "${_home:=${HOME}}"
+
 LAYERS=${LAYERS:-3}
 SIZE_GB=${SIZE_GB:-15}
-WORKDIR=${WORKDIR:-${HOME}/imagine-work}
-OCCAMBSD=${OCCAMBSD:-${HOME}/occambsd}
+WORKDIR=${WORKDIR:-${_home}/imagine-work}
+OCCAMBSD=${OCCAMBSD:-${_home}/occambsd}
 RELEASE=${RELEASE:-}
 PACKAGES=${PACKAGES:-bhyve-firmware}
 
