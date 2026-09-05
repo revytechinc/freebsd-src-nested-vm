@@ -84,12 +84,25 @@ done
 
 mkdir -p "${WORKDIR}"
 
+# imagine.sh mounts every image it builds on one fixed mountpoint, so two
+# concurrent runs quietly climb over each other's mounts and pools. Refuse the
+# second one rather than corrupt both images.
+LOCKDIR=${WORKDIR}/.build.lock
+if ! mkdir "${LOCKDIR}" 2>/dev/null; then
+	echo "${PROGRAM}: another build holds ${LOCKDIR}" >&2
+	echo "  wait for it, or remove the directory if it is stale" >&2
+	exit 1
+fi
+trap 'rmdir "${LOCKDIR}" 2>/dev/null' EXIT INT TERM
+
 n=1
 while [ "${n}" -le "${LAYERS}" ]; do
 	image="${WORKDIR}/nested${n}.raw"
 	layerdir="${WORKDIR}/layer${n}"
 
-	if [ -f "${image}" ]; then
+	# imagine.sh writes the .size marker last, so an image without one is a
+	# partial build, not something to reuse.
+	if [ -f "${image}" ] && [ -f "${image}.size" ]; then
 		echo "${PROGRAM}: layer ${n}: ${image} exists, skipping"
 		n=$((n + 1))
 		continue
