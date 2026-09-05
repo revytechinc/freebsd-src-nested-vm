@@ -1890,7 +1890,16 @@ vie_calculate_gla(enum vm_cpu_mode cpu_mode, enum vm_reg_name seg,
 
 	KASSERT(seg >= VM_REG_GUEST_ES && seg <= VM_REG_GUEST_GS,
 	    ("%s: invalid segment %d", __func__, seg));
-	KASSERT(length == 1 || length == 2 || length == 4 || length == 8,
+	/*
+	 * Ordinary instruction operands are 1/2/4/8 bytes, but the VMX
+	 * instruction descriptors decoded by the nested-VMX path (e.g. the
+	 * 128-bit INVEPT/INVVPID descriptor) present a 16-byte memory operand.
+	 * 'length' is only consumed by the per-byte segment-limit check below,
+	 * which is correct for any positive length, so accept up to 16 here.
+	 * Without this an L1 hypervisor could panic L0 simply by issuing
+	 * INVEPT (vie_calculate_gla: invalid operand size 16).
+	 */
+	KASSERT(length >= 1 && length <= 16,
 	    ("%s: invalid operand size %d", __func__, length));
 	KASSERT((prot & ~(PROT_READ | PROT_WRITE)) == 0,
 	    ("%s: invalid prot %#x", __func__, prot));
