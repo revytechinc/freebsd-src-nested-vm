@@ -4,7 +4,7 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
- * VMREAD / VMWRITE emulation for nested VMX (SDM Vol 3 §30.3), against
+ * VMREAD / VMWRITE emulation for nested VMX, against
  * the private VMCS12 copy. Operands are decoded from the VM-exit
  * instruction-information field: the field encoding is always in the
  * register named by bits 31:28, the value in the register named by

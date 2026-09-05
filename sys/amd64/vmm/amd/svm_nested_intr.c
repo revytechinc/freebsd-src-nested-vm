@@ -15,12 +15,11 @@
  *   - Alternatively, propagate the interrupt up to L1, which then
  *     decides what to do.
  *
- * Wave1 implements injection via the L1 VMCB12 EventInjection field
- * (per AMD APM Vol 2 §15.20). The PIR (Pending Interrupt Register)
+ * Wave1 implements injection via the L1 VMCB12 EventInjection
+ * field. The PIR (Pending Interrupt Register)
  * is maintained per-L2-vCPU so a noisy L2 device does not flood L1.
  *
- * Original BSD code; KVM arch/x86/kvm/svm/svm.c::svm_deliver_nested_*
- * was consulted for the field encoding only; no source copied.
+ * Original BSD code.
  */
 
 #include <sys/cdefs.h>
@@ -109,7 +108,7 @@ svm_nested_pir_highest(struct svm_vcpu *vcpu)
 }
 
 /*
- * Build the EventInjection word per AMD APM Vol 2 §15.20:
+ * Build the EventInjection word:
  *   bits  7:0  : vector
  *   bits 10:8  : type (0=INTR, 2=NMI, 3=EXCEPTION, 4=INTn)
  *   bit  11    : error-code valid

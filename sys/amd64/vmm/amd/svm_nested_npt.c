@@ -11,7 +11,7 @@
  * only performs one level of nested translation, so L0 keeps a per-vCPU
  * "NPT02" pmap that maps L2 GPAs straight to host memory and runs L2
  * under it. It is filled lazily: every #NPF taken while in L2 walks
- * L1's table in L1 memory (APM Vol 2 §15.25), resolves the L1 GPA with
+ * L1's table in L1 memory, resolves the L1 GPA with
  * the ordinary vm_gpa_hold() machinery, and enters the page into NPT02.
  * A fault L1's table cannot resolve is reflected to L1 as an #NPF for
  * its L2 guest, exactly as hardware would report it.
