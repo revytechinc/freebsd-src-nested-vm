@@ -154,7 +154,7 @@ bhyve -c "${CPUS}" -m "${MEM}" -A -H -P \
     -l bootrom,"${BOOTROM}" \
     -s 0,hostbridge \
     -s 2,nvme,"${L1}" \
-    -s 3,nvme,"${L2}" \
+    -s 3,virtio-blk,"${L2}" \
     -s 31,lpc \
     -l com1,"${A}" "${VMNAME}" > "${WORKDIR}/bhyve.log" 2>&1 &
 BHYVE_PID=$!
@@ -205,7 +205,7 @@ log "L1: loading vmm and launching L2 from the second disk"
 guest L1VMM 90 'kldload -n vmm; sysctl -n hw.vmm.nested.enable' ||
     fail "L1 could not load vmm"
 guest L1DISKS 30 'ls /dev/nda* /dev/nvd* 2>/dev/null' || true
-guest L1GEOM 30 'gpart show nda1; diskinfo -v /dev/nda1 | head -6' || true
+guest L1GEOM 30 'gpart show vtbd1; diskinfo -v /dev/vtbd1 | head -6' || true
 guest L1FW 30 'ls /usr/local/share/uefi-firmware/BHYVE_UEFI.fd' ||
     fail "L1 has no bhyve-firmware -- rebuild the image with -p bhyve-firmware"
 
@@ -222,7 +222,7 @@ guest L1NMDM 60 'kldload -n nmdm; ls /dev/nmdm0B >/dev/null 2>&1 || echo NONMDM'
 # command was lost, the shell sat waiting for a closing quote, and the next
 # command was swallowed into it. Give L1 short helpers and short variables
 # once, so every line sent afterwards stays well inside the limit.
-guest L1VARS 30 "FW=${FW:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}; D=/dev/nda1; C=/dev/nmdm0A" ||
+guest L1VARS 30 "FW=${FW:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}; D=/dev/vtbd1; C=/dev/nmdm0A" ||
     fail "L1 would not take the setup line"
 guest L1FN1 30 'sp() { n=0; while [ $n -lt 20 ]; do pgrep -qf "bhyve.* l2$" && return 0; sleep 1; n=$((n+1)); done; return 1; }' ||
     fail "L1 would not take the spawn helper"
