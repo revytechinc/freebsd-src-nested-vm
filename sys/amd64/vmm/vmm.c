@@ -1329,6 +1329,19 @@ restart:
 	return (error);
 }
 
+/*
+ * True if a fault has been queued for this vcpu but not yet delivered. A
+ * caller that would otherwise advance the guest's RIP past the instruction it
+ * just emulated needs this: a faulting instruction did not execute, so it must
+ * be restarted rather than skipped.
+ */
+bool
+vm_exception_pending(struct vcpu *vcpu)
+{
+
+	return (vcpu->exception_pending != 0);
+}
+
 int
 vm_restart_instruction(struct vcpu *vcpu)
 {
