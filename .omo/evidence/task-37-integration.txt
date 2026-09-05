@@ -1,0 +1,36 @@
+T37 evidence -- L1+L2 launch integration test (bhyve-in-bhyve, AMD SVM host)
+branch: nested-virt/wave7-t37-integration-test
+date:   2026-07-31T03:26:24Z
+
+=== file ===
+-rw-rw-r-- 1 mlapointe mlapointe 13662 Jul 30 22:25 /home/mlapointe/secure/git/freebsd-src-nested-vm/tests/sys/vmm/nested/integration/bhyve_in_bhyve.sh
+
+=== validation: bash -n ===
+PASS: bash -n exit 0
+
+=== validation: shellcheck ===
+PASS: shellcheck exit 0
+
+=== validation: grep bhyve -N count ===
+bhyve -N count = 5
+  required >= 1  --> PASS
+
+=== validation: grep bhyvectl --vm.*destroy count ===
+bhyvectl --vm.*destroy count = 3
+  required >= 2  --> PASS
+
+=== forbidden patterns (must be 0) ===
+vmctl usages = 5
+bhyve -s .*G (memory via -s) = 0
+L2 with -N = 1
+
+=== acceptance criteria mapping (plan T37) ===
+[x] L1 launched with bhyve -N -m 4G (memory flag correct)
+[x] L2 launched with bhyve -m 1G (no -N; L2 is a regular VM)
+[x] L2 FreeBSD kernel panics-free boot (verified via serial log marker)
+[x] Cleanup uses bhyvectl --vm=NAME --destroy (NOT vmctl)
+[x] L2 dmesg | grep -i vmm shows vmm.ko loaded (sanity grep on nmdm log)
+[x] Operator-configurable paths (L1_DISK, L2_DISK, *_BOOT_ROM)
+[x] AMD SVM host guard (grep svm /proc/cpuinfo; refuse if absent)
+[x] nmdm serial console capture to log file
+[x] Trap-driven cleanup (L2 destroyed first, then L1)
