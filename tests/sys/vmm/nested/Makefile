@@ -16,6 +16,7 @@ ${PACKAGE}FILES+=	vmx_basic.sh
 # environment reverts silently takes an old harness with it, which then fails a
 # perfectly good kernel. Ship the tests with the build they test.
 SUBDIR+=	abisnap
+SUBDIR+=	demo
 SUBDIR+=	features
 SUBDIR+=	fuzz
 SUBDIR+=	hw

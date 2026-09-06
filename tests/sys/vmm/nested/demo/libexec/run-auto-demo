@@ -1,0 +1,103 @@
+#!/bin/sh
+
+# Open with the shared banner: it greets the room and states, every single
+# time, that this is new unaudited kernel code.
+/usr/local/libexec/cloudbsd-demo/demo-banner || true
+#
+# run-auto-demo -- privileged launcher for the CloudBSD nested-virtualization
+#                  AUTO demo  (host L0 -> L1 guest -> nested L2 guest).
+#
+# Installed root:wheel 0755 under /usr/local/libexec/cloudbsd-demo/ and invoked
+# by the demo account through a doas(1) rule that permits ONLY this exact path.
+#
+# Hardening notes:
+#   * the only argument accepted is a vCPU count, and it is re-parsed here
+#     rather than forwarded, so the doas rule cannot be bent into running the
+#     driver with arbitrary options;
+#   * the environment is rebuilt from scratch with env -i, so nothing the
+#     caller exports can influence what runs as root;
+#   * the driver, the disk image and the work directory are all root-owned and
+#     not writable by the demo account.
+#
+set -u
+umask 022
+
+SELFDIR=/usr/local/libexec/cloudbsd-demo
+DRIVER="${SELFDIR}/nested-demo.sh"
+
+# vCPUs per guest.  Accept a bare count or "all"; anything else is refused here,
+# so only a value this script has validated is ever handed to the driver.
+CORES=1
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-c|--cpus)
+		[ $# -ge 2 ] || { echo "run-auto-demo: -c needs a value" >&2; exit 1; }
+		CORES=$2; shift ;;
+	--all-cores)
+		CORES=all ;;
+	*)
+		echo "run-auto-demo: usage: run-auto-demo [-c N|all]" >&2; exit 1 ;;
+	esac
+	shift
+done
+case "${CORES}" in
+all)		CORES=$(sysctl -n hw.ncpu) ;;
+''|*[!0-9]*)	echo "run-auto-demo: -c takes a number or \"all\"" >&2; exit 1 ;;
+esac
+[ "${CORES}" -ge 1 ] 2>/dev/null || { echo "run-auto-demo: -c must be >= 1" >&2; exit 1; }
+WORKDIR=/usr/local/share/cloudbsd-demo/auto
+IMAGE="${WORKDIR}/nested-demo.raw"
+VMNAME="cloudbsd-demo-auto-$$"
+BHYVECTL=/usr/sbin/bhyvectl
+
+. "${SELFDIR}/watchdog-common"
+
+# TERM is the only caller-supplied value we forward (it drives tput colours).
+# Accept a conservative character set only.
+TERM_IN=${TERM:-xterm}
+case "${TERM_IN}" in
+	*[!A-Za-z0-9._-]*) TERM_IN=xterm ;;
+esac
+
+[ -x "${DRIVER}" ] || { echo "run-auto-demo: missing driver ${DRIVER}" >&2; exit 1; }
+[ -f "${IMAGE}" ]  || { echo "run-auto-demo: missing demo image ${IMAGE}" >&2; exit 1; }
+
+# Two runs can coexist (the VM name and the run disk are both pid-tagged), but
+# on a small host they will fight for RAM, so say what is happening rather than
+# letting the second one fail in a confusing way.
+others=$(pgrep -f "${SELFDIR}/nested-demo.sh" 2>/dev/null | grep -cv "^$$\\$" || true)
+if [ "${others:-0}" -gt 0 ]; then
+	echo "note: another nested demo is already running on this host;" >&2
+	echo "      both will run, but they share CPU and memory." >&2
+fi
+
+# Remove only the disk belonging to THIS run. The previous version globbed
+# every nesteddemo-run-*.raw in the work directory, so two people demoing at
+# once deleted each other's disk mid-boot -- and the loser saw what looked
+# like a hypervisor failure. The driver names its disk after its own pid and
+# already cleans up; this is the backstop for when it is killed outright.
+teardown() {
+	"${BHYVECTL}" --vm="${VMNAME}" --destroy >/dev/null 2>&1 || true
+	[ -n "${DRIVER_PID:-}" ] &&
+	    rm -f "${WORKDIR}"/*-run-"${DRIVER_PID}".raw 2>/dev/null || true
+}
+trap teardown EXIT INT TERM HUP
+
+WDPID=$(start_watchdog "$$" "${VMNAME}")
+
+/usr/bin/env -i \
+	PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin \
+	HOME=/root \
+	TERM="${TERM_IN}" \
+	WORKDIR="${WORKDIR}" \
+	VM="${VMNAME}" \
+	MEM=4G \
+	CORES="${CORES}" \
+	TIMEOUT=600 \
+	/bin/sh "${DRIVER}" &
+DRIVER_PID=$!
+wait "${DRIVER_PID}"
+rc=$?
+
+kill "${WDPID}" >/dev/null 2>&1 || true
+exit "${rc}"

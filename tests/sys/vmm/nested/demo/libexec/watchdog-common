@@ -1,0 +1,54 @@
+# Shared watchdog for the CloudBSD demo launchers.
+#
+# bhyve does not notice when the terminal it was started from goes away, so a
+# closed window or a dropped network link would leave a multi-gigabyte guest
+# running on this shared test host until someone hunted it down.  This watchdog
+# runs in the BACKGROUND (never in the foreground: the demo driver must keep
+# the terminal, because an async command's stdin is /dev/null and the guest
+# console needs a real keyboard) and destroys the VM when its session ends.
+#
+# Two independent signals, either of which means "nobody is at the other end":
+#   * a controlling terminal we started with can no longer be opened, or
+#   * the launcher has been reparented to init (its session leader is gone).
+#
+# The first signal only means anything if there was a terminal to lose.  A
+# launcher run from a script, from cron, or over ssh without a pty has no
+# controlling terminal at all, so /dev/tty cannot be opened even on the first
+# tick -- and reading that as "the operator has gone" made the watchdog tear
+# the guest down 25 seconds into every non-interactive run.  Sample once, up
+# front, and only watch the terminal if there is one.
+#
+# The background subshell MUST have its stdout redirected: this function is
+# called inside $( ), and a background child that inherits the substitution
+# pipe keeps it open, so $( ) would block until the watchdog exited.
+#
+# Usage:  start_watchdog <launcher-pid> <vm-name>   -> echoes the watchdog pid
+start_watchdog() {
+	_wd_pid=$1
+	_wd_vm=$2
+	_wd_tty=0
+	if stty -g >/dev/null 2>&1 </dev/tty; then
+		_wd_tty=1
+	fi
+	(
+		_born_ppid=$(ps -o ppid= -p "${_wd_pid}" 2>/dev/null | tr -d ' ')
+		while kill -0 "${_wd_pid}" 2>/dev/null; do
+			sleep 10
+			_now_ppid=$(ps -o ppid= -p "${_wd_pid}" 2>/dev/null | tr -d ' ')
+			[ -n "${_now_ppid}" ] || exit 0
+			_dead=0
+			[ "${_now_ppid}" = "1" ] && [ "${_born_ppid}" != "1" ] && _dead=1
+			if [ "${_wd_tty}" = "1" ]; then
+				stty -g >/dev/null 2>&1 </dev/tty || _dead=1
+			fi
+			if [ "${_dead}" = "1" ]; then
+				/usr/sbin/bhyvectl --vm="${_wd_vm}" --destroy >/dev/null 2>&1 || true
+				sleep 15
+				kill -0 "${_wd_pid}" 2>/dev/null && \
+					kill -TERM "${_wd_pid}" >/dev/null 2>&1 || true
+				exit 0
+			fi
+		done
+	) >/dev/null 2>&1 &
+	echo $!
+}

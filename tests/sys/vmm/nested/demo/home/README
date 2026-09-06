@@ -1,0 +1,49 @@
+Nested virtualization - hands-on
+================================
+
+Four scripts. Nothing here is locked down; this is your own account, so read
+or change anything you like.
+
+  0-what-can-this-host-do.sh      what this machine is, and whether it is ready
+  1-run-nested-demo.sh            the automatic demo   (~2 minutes)
+  2-step-through.sh               the step-through demo (interactive)
+  3-run-nested-demo-all-cores.sh  demo 1, but every guest gets every core
+
+Demo 1 answers "does it work" and gets out of the way: it boots a guest,
+that guest boots a guest inside itself, and the inner one prints
+NESTED_DEMO_L2_OK.
+
+Demo 2 is the one to sit with. It boots Layer 1 and hands you the console.
+At each layer you can look around and then descend:
+
+    uname -a           where am I
+    cat go-deeper.sh   read what the next step does
+    sh ./go-deeper.sh  descend one layer
+    poweroff           climb back up one layer
+
+Every run takes a private copy of the disk, so you can break things freely.
+
+Demo 3 is demo 1 run wide. Demos 1 and 2 give each guest a single vCPU,
+because that is the configuration they reliably complete in. Demo 3 gives
+both the L1 guest and the L2 guest inside it every core this host has, which
+means a second processor has to be brought up through two layers of
+hypervisor. That is the part still being stabilised, so demo 3 is the one
+that can stall where demo 1 does not - and when it does, the console log it
+names at the end is the useful artifact.
+
+Any width you like, on either demo:
+
+    sh 1-run-nested-demo.sh -c 4       four vCPUs per guest
+    sh 1-run-nested-demo.sh -c all     every core
+    sh 2-step-through.sh   -c 2        two vCPUs per layer
+
+The real work happens in the root-owned launchers, which you can read:
+
+    less /usr/local/libexec/cloudbsd-demo/run-auto-demo
+    less /usr/local/libexec/cloudbsd-demo/run-stepthrough
+    less /usr/local/libexec/cloudbsd-demo/nested-demo.sh
+
+Hosts differ. Some are AMD (SVM), some Intel (VMX), some are themselves
+virtual machines whose own host does not hand them the hardware, and not
+every machine has the nested build installed. Script 0 tells you which case
+you are in rather than letting a demo fail obscurely.
