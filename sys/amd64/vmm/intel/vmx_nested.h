@@ -66,6 +66,8 @@ struct vmx_nested_state {
 	uint64_t		ept02_eptp;
 	uint64_t		ept12_gen;	/* bumped on each L1 INVEPT */
 	uint64_t		ept12_gen_flushed;/* gen at last ept02 flush */
+	/* TSC at which L1 last handed the CPU to L2; see vmx_nested_l1_starved() */
+	uint64_t		l2_slice_tsc;
 };
 
 /* VM-instruction error numbers. */
