@@ -46,7 +46,6 @@
 
 extern int guest_ncpus;
 extern uint16_t cpu_cores, cpu_sockets, cpu_threads;
-extern bool nesting_enabled;
 
 #ifdef BHYVE_SNAPSHOT
 extern char *restore_file;

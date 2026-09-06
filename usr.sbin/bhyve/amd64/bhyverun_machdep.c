@@ -105,8 +105,6 @@ bhyve_usage(int code)
 	    "       -M: monitor mode\n"
 	    "       -m: memory size\n"
 	    "       -n: NUMA domain specification\n"
-	    "       -N: deprecated no-op; nesting is on by default\n"
-	    "           (control it with the hw.vmm.nested.enable sysctl)\n"
 	    "       -o: set config 'var' to 'value'\n"
 	    "       -P: vmexit from the guest on pause\n"
 	    "       -p: pin 'vcpu' to 'hostcpu'\n"
@@ -133,9 +131,9 @@ bhyve_optparse(int argc, char **argv)
 	int c;
 
 #ifdef BHYVE_SNAPSHOT
-	optstr = "aehuwxACDHIMNPSWYk:f:o:p:G:c:s:m:n:l:K:U:r:";
+	optstr = "aehuwxACDHIMPSWYk:f:o:p:G:c:s:m:n:l:K:U:r:";
 #else
-	optstr = "aehuwxACDHIMNPSWYk:f:o:p:G:c:s:m:n:l:K:U:";
+	optstr = "aehuwxACDHIMPSWYk:f:o:p:G:c:s:m:n:l:K:U:";
 #endif
 	while ((c = getopt(argc, argv, optstr)) != -1) {
 		switch (c) {
@@ -221,16 +219,6 @@ bhyve_optparse(int argc, char **argv)
 				    optarg);
 			if (!get_config_bool("acpi_tables"))
 				errx(EX_USAGE, "NUMA emulation requires ACPI");
-			break;
-		case 'N':
-			/*
-			 * Deprecated no-op.  Nested virtualization is on by
-			 * default and is controlled host-wide by the
-			 * hw.vmm.nested.enable sysctl; there is no per-VM
-			 * opt-in any more.  The option is still accepted so
-			 * that existing scripts keep working.
-			 */
-			nesting_enabled = true;
 			break;
 		case 'o':
 			if (!bhyve_parse_config_option(optarg)) {
