@@ -78,6 +78,11 @@ fi
 
 # --- report, rather than pretend -------------------------------------------
 echo
+if [ "$(uname -m)" != "amd64" ]; then
+	echo "arch     : $(uname -m) - this kit is amd64: amd64 guest images,"
+	echo "           booted the amd64 way. The scripts install; the demos"
+	echo "           will not run here."
+fi
 if [ -f "$AUTOIMG" ]; then
 	echo "demo 1/3 : ready"
 else
