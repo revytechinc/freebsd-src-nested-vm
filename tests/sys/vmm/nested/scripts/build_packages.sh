@@ -82,17 +82,26 @@ find "$STAGE/kernel" \( -name '*.debug' -o -name '*.full' -o -name '*.symbols' \
 rm -rf "$STAGE/kernel/usr/lib/debug" || true
 
 log "libvmmapi + bhyve"
+# -DWITHOUT_TESTS on the installs: these tools have test directories now, and
+# the bhyve package is not where tests belong -- they ship in the tests
+# package, staged from its own hierarchy. Without this the install walks into
+# usr.sbin/bhyveload/tests and fails, because this stage has only the handful
+# of directories created above and no /usr/tests tree to install into.
+#
+# WITHOUT_TESTS rather than MK_TESTS=no: the MK_ variables are derived from the
+# WITH_/WITHOUT_ knobs by bsd.mkopt.mk, so setting the derived one is the
+# indirect way round and depends on precedence rules that are not worth
+# relying on.
 make -C "${SRCTOP}/lib/libvmmapi" -j"$JOBS" all
 make -C "${SRCTOP}/usr.sbin/bhyve" -j"$JOBS" all
 make -C "${SRCTOP}/usr.sbin/bhyvectl" -j"$JOBS" all
 make -C "${SRCTOP}/usr.sbin/bhyveload" -j"$JOBS" all
-make -C "${SRCTOP}/lib/libvmmapi" install DESTDIR="$STAGE/bhyve"
-make -C "${SRCTOP}/usr.sbin/bhyve" install DESTDIR="$STAGE/bhyve"
-make -C "${SRCTOP}/usr.sbin/bhyvectl" install DESTDIR="$STAGE/bhyve"
+make -C "${SRCTOP}/lib/libvmmapi" install DESTDIR="$STAGE/bhyve" -DWITHOUT_TESTS
+make -C "${SRCTOP}/usr.sbin/bhyve" install DESTDIR="$STAGE/bhyve" -DWITHOUT_TESTS
+make -C "${SRCTOP}/usr.sbin/bhyvectl" install DESTDIR="$STAGE/bhyve" -DWITHOUT_TESTS
 # Ship bhyveload too: it is what creates the VM, so an installed system needs
-# the matching one.  (-N is no longer required for nesting -- it is on by
-# default and controlled by hw.vmm.nested.enable -- but -N is still accepted.)
-make -C "${SRCTOP}/usr.sbin/bhyveload" install DESTDIR="$STAGE/bhyve"
+# the matching one.
+make -C "${SRCTOP}/usr.sbin/bhyveload" install DESTDIR="$STAGE/bhyve" -DWITHOUT_TESTS
 
 # bhyve links libprivate9p.so.1 (lib9p), which is newer than any published stock
 # base snapshot -- bundle it so the package installs standalone on a stock
