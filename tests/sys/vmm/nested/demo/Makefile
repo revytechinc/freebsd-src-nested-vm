@@ -14,6 +14,8 @@ BINDIR=		${TESTSDIR}
 
 ${PACKAGE}FILES+=	install_demo_kit.sh
 ${PACKAGE}FILES+=	patch_demo_image.sh
+${PACKAGE}FILES+=	patch_l1_relay.sh
+${PACKAGE}FILES+=	patch_l2_spin.sh
 
 SUBDIR+=	home
 SUBDIR+=	libexec
