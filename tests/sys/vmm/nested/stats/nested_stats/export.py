@@ -16,20 +16,35 @@ output catches a note someone pastes into a new field next year.
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
 from .store import Reader, utcnow
 
-#: Patterns that must never reach a published file.  Kept as one list so the
-#: rule has a single home and a test can enumerate it.
+#: The backstop, not the control.
+#:
+#: The control is `build_document`, which constructs the published object out
+#: of a fixed list of named fields and copies nothing it was not asked for.
+#: These patterns exist to catch the case that control cannot: somebody adding
+#: a field next year and putting internal text through it.  A pattern list can
+#: only ever catch what it was told about, so a new field is still a decision
+#: to be made deliberately -- this just makes the common mistakes loud.
 FORBIDDEN = [
     (re.compile(r"freedev\d+", re.I), "an internal machine name"),
-    (re.compile(r"/home/[A-Za-z0-9._-]+"), "a home-directory path"),
+    (re.compile(r"(?:/usr)?/home/[A-Za-z0-9._-]+"), "a home-directory path"),
     (re.compile(r"/usr/local/bastille"), "an internal jail path"),
+    # Any absolute path under a root this project actually uses.  Nothing in
+    # the published document is supposed to be a filesystem path at all.
+    (re.compile(r"(?<![\w.])/(?:usr|var|tmp|root|zroot|mnt|net|nesteddemo)/"),
+     "an absolute filesystem path"),
     (re.compile(r"\b(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), "an internal IP"),
     (re.compile(r"\b192\.168\.\d{1,3}\.\d{1,3}\b"), "an internal IP"),
     (re.compile(r"\b172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b"), "an internal IP"),
+    # IPv6: unique-local and link-local.  The fleet is dual-stack, so these
+    # are as reachable a leak as the v4 ones.
+    (re.compile(r"\b[fF][cCdD][0-9a-fA-F]{2}:[0-9a-fA-F:]{2,}"), "a ULA IPv6 address"),
+    (re.compile(r"\b[fF][eE]80:[0-9a-fA-F:]{2,}"), "a link-local IPv6 address"),
 ]
 
 
@@ -111,11 +126,27 @@ def build_document(reader: Reader) -> dict[str, Any]:
 
 
 def export_json(reader: Reader, path: str) -> dict:
+    """Write the publication document, atomically.
+
+    The file is built beside its destination and renamed into place, so a
+    reader never sees a half-written document and a failure part-way through
+    leaves the previous good one intact.  Opening the destination directly
+    would truncate it before the first byte was written.
+    """
     doc = build_document(reader)
     text = json.dumps(doc, indent=2, sort_keys=True)
     scrub_check(text)
-    with open(path, "w") as fh:
-        fh.write(text + "\n")
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w") as fh:
+            fh.write(text + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
     return {"path": path, "bytes": len(text) + 1,
             "machines": len(doc["machines"]),
             "unlabelled": doc["machines_without_public_label"]}

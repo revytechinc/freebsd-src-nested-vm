@@ -63,6 +63,12 @@ CREATE INDEX IF NOT EXISTS build_sha_prefix ON build (sha_prefix);
 
 -- One ingest invocation.  Rows point back at it so a bad parser can be found
 -- and its output identified without guessing.
+--
+-- `argv` records the command line, which in practice contains absolute paths
+-- naming machines.  That is internal provenance and is deliberately kept: the
+-- database is not web-reachable.  It must never be exported -- publication
+-- builds its document from a fixed field list that does not include this
+-- table, and would refuse the paths anyway.
 CREATE TABLE IF NOT EXISTS ingest_batch (
     batch_id     INTEGER PRIMARY KEY,
     ts_utc       TEXT    NOT NULL,
@@ -196,6 +202,14 @@ CREATE INDEX IF NOT EXISTS inv_sha   ON inventory_entry (sha256);
 -- the logs this database exists to preserve are never advertised as disposable.
 CREATE TRIGGER IF NOT EXISTS inv_data_never_removable_ins
     AFTER INSERT ON inventory_entry
+    WHEN NEW.classification = 'measurement-data' AND NEW.safe_to_remove = 1
+    BEGIN SELECT RAISE(ABORT, 'measurement-data may never be flagged safe_to_remove'); END;
+
+-- The same invariant on the other edge.  An INSERT trigger alone would let
+-- `UPDATE ... SET safe_to_remove = 1`, or a reclassification of an already-
+-- flagged row to measurement-data, walk straight past it.
+CREATE TRIGGER IF NOT EXISTS inv_data_never_removable_upd
+    AFTER UPDATE ON inventory_entry
     WHEN NEW.classification = 'measurement-data' AND NEW.safe_to_remove = 1
     BEGIN SELECT RAISE(ABORT, 'measurement-data may never be flagged safe_to_remove'); END;
 

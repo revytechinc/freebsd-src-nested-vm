@@ -89,12 +89,17 @@ class Reader(_Base):
         failure mode obvious: one statement, and a bounded row count.
         """
         stripped = sql.strip().rstrip(";").strip()
-        if ";" in stripped:
-            raise StoreError("one statement only")
         head = stripped.lstrip("(").split(None, 1)[0].lower() if stripped else ""
         if head not in ("select", "with"):
             raise StoreError("only SELECT/WITH queries are accepted here")
-        cur = self.conn.execute(stripped)
+        # Single-statement is left to SQLite, which knows where a string
+        # literal ends.  Scanning for a semicolon here rejected `SELECT 'a;b'`
+        # and would still have let a trailing comment through, so it gave the
+        # appearance of a guard without being one.
+        try:
+            cur = self.conn.execute(stripped)
+        except sqlite3.ProgrammingError as exc:
+            raise StoreError(str(exc)) from None
         return cur.fetchmany(limit)
 
     # -- domain queries --------------------------------------------------
@@ -327,6 +332,15 @@ class Writer(_Base):
                 "%s matches %d builds: %s"
                 % (sha, len(rows), ", ".join(r["vmm_sha256"] for r in rows))
             )
+        found = rows[0]["vmm_sha256"]
+        # Sharing 16 hex characters is not sharing an identity.  Unless one
+        # sha is a prefix of the other, these are two builds that collided,
+        # and treating them as one would file results under the wrong vmm.ko.
+        if not (found.startswith(sha) or sha.startswith(found)):
+            raise AmbiguousBuild(
+                "%s collides with the stored build %s on their first 16 "
+                "characters but is a different sha" % (sha, found)
+            )
         return rows[0]
 
     def open_batch(self, argv: str, notes: str = "") -> int:
@@ -380,7 +394,11 @@ class Writer(_Base):
                  source, source_line, key, utcnow(), batch_id, notes),
             )
         except sqlite3.IntegrityError as exc:
-            if "content_key" in str(exc):
+            # Only the uniqueness of content_key means "this exact source line
+            # is already stored".  Any other violation on that column -- a NULL,
+            # say -- is a real failure and must not be reported as a no-op,
+            # which would read as "already ingested" for data never stored.
+            if "UNIQUE constraint failed: run.content_key" in str(exc):
                 return None
             raise
         run_id = cur.lastrowid

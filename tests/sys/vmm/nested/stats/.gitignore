@@ -1,0 +1,6 @@
+# Byte-compiled modules; a concurrent `git add -A` swept these in once already.
+__pycache__/
+*.pyc
+# The real fleet profile is not committed: this repository is public and
+# machine names are not.  See fleet.conf.sample.json.
+fleet.conf.json
