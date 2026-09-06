@@ -36,7 +36,7 @@
  * Test map (see sys/amd64/vmm/intel/vmx.c, vmx.h, vmx_msr.c):
  *   1. MSR_VMX_BASIC reads back non-zero (regression for the old
  *      "vmm_dev_machdep.c wrote 0 to the rdmsr handler" bug).
- *   2. vmx_nested_status sysctl == 2 -> VMCS shadowing ready
+ *   2. vmx_nested_status sysctl == 1 -> nested hardware ready
  *      (skipped when vmm.ko is not loaded).
  *   3. struct vmx_vcpu carries the per-vCPU nvmcs12 shadow region,
  *      and that struct vmcs is exactly PAGE_SIZE (which the
@@ -97,11 +97,10 @@ CTASSERT(__offsetof(struct vmx_vcpu, nvmcs12) != __offsetof(struct vmx_vcpu, vmc
 
 /*
  * vmx_nested_status lives in sys/amd64/vmm/intel/vmx.c as the
- * canonical read-only gate for "VMCS shadowing is ready to be used
- * by L1 on this host".  Values:
- *   0 = nested virt not supported on this CPU
- *   1 = nested virt supported but L0 hypervisor already running
- *   2 = VMCS shadowing ready (Haswell+/Tiger Lake+ class)
+ * canonical read-only gate for "this host's VMX can back a nested
+ * guest".  It is a boolean:
+ *   0 = the CPU does not have what the nested paths need
+ *   1 = ready
  *
  * We intentionally do not take a hard extern dependency on the
  * variable: reading it indirectly through the hw.vmm.nested.vmx
@@ -210,23 +209,23 @@ vmxtest_cap_msr_read(void)
 }
 
 /*
- * Test 2: VMCS-shadowing hardware gate (vmx_nested_status).
+ * Test 2: nested hardware gate (vmx_nested_status).
  *
- * This is the value exposed by hw.vmm.nested.vmx: 2 means the host
- * has VMCS shadowing and no conflicting L0 hypervisor, i.e. an L1
- * guest can be nested-virtualized.  0 means CPU lacks shadowing
- * (Ivy Bridge and earlier).  1 means a hypervisor is already running
- * on the L0 (Hyper-V, KVM, ...).
+ * This is the value exposed by hw.vmm.nested.vmx: 1 means the CPU has
+ * the VMX features the nested paths need (EPT and unrestricted guest),
+ * so an L1 guest can be nested-virtualized.  0 means it does not.
+ * The probe deliberately does not test for bare metal, so a guest with
+ * VMX exposed to it also reports 1 and can host a deeper guest.
  *
  * Skipped when vmm.ko is not loaded because vmx_nested_status is
  * only initialized in vmx_init(); the variable is in BSS until
  * then.
  */
 static void
-vmxtest_shadowing_gate(void)
+vmxtest_nested_gate(void)
 {
 	if (!vmxtest_is_intel()) {
-		VMXTEST_SKIP(2, "not Intel; skip VMCS-shadowing gate");
+		VMXTEST_SKIP(2, "not Intel; skip nested hardware gate");
 		return;
 	}
 	if (!vmxtest_vmm_loaded()) {
@@ -245,15 +244,12 @@ vmxtest_shadowing_gate(void)
 			return;
 		}
 		printf("vmx_nested_test: test-2 hw.vmm.nested.vmx=%d\n", status);
-		if (status == 2) {
+		if (status == 1) {
 			VMXTEST_PASS(2);
 		} else if (status == 0) {
-			VMXTEST_SKIP(2, "nested.vmx=0 (CPU lacks VMCS shadowing, e.g. Ivy Bridge)");
-		} else if (status == 1) {
-			VMXTEST_FAIL(2, "nested.vmx=1 (L0 hypervisor conflict)");
+			VMXTEST_SKIP(2, "nested.vmx=0 (CPU lacks unrestricted guest)");
 		} else {
-			VMXTEST_FAIL(2, "nested.vmx=%d (unexpected value)",
-			    status);
+			VMXTEST_FAIL(2, "nested.vmx=%d (not a boolean)", status);
 		}
 	}
 }
@@ -393,7 +389,7 @@ vmxtest_run_all(void)
 	printf("vmx_nested_test: starting 5 sub-tests (T17 / Wave 3)\n");
 
 	vmxtest_cap_msr_read();
-	vmxtest_shadowing_gate();
+	vmxtest_nested_gate();
 	vmxtest_vmcs12_alloc();
 	vmxtest_cr4_vmxe();
 	vmxtest_fixed_msr_read();

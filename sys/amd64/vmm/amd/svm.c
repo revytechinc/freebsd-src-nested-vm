@@ -215,7 +215,7 @@ SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm_timer_fastpath, CTLFLAG_RWTUN,
 
 SYSCTL_INT(_hw_vmm_nested, OID_AUTO, svm, CTLFLAG_RD,
     &svm_nested_status, 0,
-    "SVM nested virtualization preflight status (0=unsupported, 1=L0 conflict, 2=ready)");
+    "SVM nested virtualization preflight status (0=unsupported, 1=ready)");
 
 /*
  * SVM CPUID function 0x8000_000A, edx bit decoding.
@@ -404,7 +404,7 @@ svm_modinit(int ipinum)
 	 * nesting (L2 hosting L3, ...) requires a guest with SVM exposed to it to
 	 * report full capability so it can in turn enable nested-virt.
 	 */
-	svm_nested_status = 2;
+	svm_nested_status = 1;
 
 	vmcb_clean &= VMCB_CACHE_DEFAULT;
 

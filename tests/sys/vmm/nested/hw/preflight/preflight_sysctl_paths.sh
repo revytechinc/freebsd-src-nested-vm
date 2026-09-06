@@ -73,15 +73,15 @@ preflight_sysctl_paths_main()
 				exit 1
 				;;
 		esac
-		if [ "${v}" -lt 0 ] || [ "${v}" -gt 2 ]; then
-			echo "FAIL: sysctl ${oid} out of expected range 0..2: '${v}'"
+		if [ "${v}" -lt 0 ] || [ "${v}" -gt 1 ]; then
+			echo "FAIL: sysctl ${oid} is not a boolean: '${v}'"
 			exit 1
 		fi
 		printf '  %s = %s\n' "${oid}" "${v}"
 	done
 
 	# Exercise the master switch: on capable silicon it succeeds; on
-	# L0-conflict or unsupported hardware it returns EOPNOTSUPP.  Either
+	# unsupported hardware it returns EOPNOTSUPP.  Either
 	# path is a pass as long as the kernel responds predictably.
 	_saved_enable=$(sysctl -n hw.vmm.nested.enable 2>/dev/null || echo 1)
 	if sysctl hw.vmm.nested.enable=1 >/dev/null 2>&1; then

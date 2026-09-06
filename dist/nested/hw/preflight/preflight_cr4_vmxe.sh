@@ -27,8 +27,8 @@
 # Wave 5 / T14 + T15 follow-up: integration test for the CR4.VMXE
 # gate and the nested-status sysctl.  Confirms:
 #   * CR4_VMXE is the well-known 0x2000 bit (vmx_nested_test test 4).
-#   * hw.vmm.nested.vmx is 2 on Haswell+/Tiger Lake+, 0 on Ivy
-#     Bridge, and 1 when an L0 hypervisor is already running.
+#   * hw.vmm.nested.vmx is a boolean: 1 on any Intel part with the VMX
+#     features the nested paths need, 0 otherwise.
 #   * vmx_vcpu carries the nvmcs12 shadow region (T15) and the
 #     vmcs12 struct is PAGE_SIZE (T15).
 #
@@ -70,16 +70,16 @@ preflight_cr4_vmxe_main()
 		exit 0
 	fi
 
-	# 1) Live sysctl: hw.vmm.nested.vmx must be 0, 1, or 2.
+	# 1) Live sysctl: hw.vmm.nested.vmx must be a boolean.
 	vmx=$(sysctl -n hw.vmm.nested.vmx 2>/dev/null)
 	if [ -z "${vmx}" ]; then
 		echo "FAIL: hw.vmm.nested.vmx unreachable"
 		exit 1
 	fi
 	case "${vmx}" in
-		0|1|2) ;;
+		0|1) ;;
 		*)
-			echo "FAIL: hw.vmm.nested.vmx out of range: '${vmx}'"
+			echo "FAIL: hw.vmm.nested.vmx not a boolean: '${vmx}'"
 			exit 1
 			;;
 	esac
@@ -126,26 +126,21 @@ preflight_cr4_vmxe_main()
 		echo "  WARN: vmx_nested_test.c not readable; skipping CTASSERT check"
 	fi
 
-	# 4) On Intel hosts with Haswell+ silicon the nested.vmx gate
-	# should be 2 (or 1 if an L0 hypervisor is in the way).  On
-	# Ivy Bridge it is 0.  On non-Intel hosts skip the assertion.
-	origin=$( (grep -m1 'Origin=' /var/run/dmesg.boot 2>/dev/null || \
-	    echo '') | sed -n 's|.*Origin="\([^"]*\)".*|\1|p')
-	if [ "${origin}" = "GenuineIntel" ]; then
-		fam=$(grep -m1 'Origin=' /var/run/dmesg.boot 2>/dev/null | \
-		    sed -n 's|.*Family=0x\([0-9a-f]*\).*|\1|p')
-		mod=$(grep -m1 'Origin=' /var/run/dmesg.boot 2>/dev/null | \
-		    sed -n 's|.*Model=0x\([0-9a-f]*\).*|\1|p')
-		if [ "${fam}" = "6" ] && [ "${mod}" = "3a" ]; then
-			if [ "${vmx}" != "0" ]; then
-				echo "FAIL: Ivy Bridge expected nested.vmx=0, got '${vmx}'"
-				exit 1
-			fi
-		elif [ "${fam}" = "6" ]; then
-			if [ "${vmx}" != "1" ] && [ "${vmx}" != "2" ]; then
-				echo "FAIL: Haswell+ expected nested.vmx in {1,2}, got '${vmx}'"
-				exit 1
-			fi
+	# 4) The nested probe gates on unrestricted guest, so derive the
+	# expectation from the capability itself rather than from the CPU
+	# family: family 6 spans parts that legitimately lack it (Atom-class
+	# cores and pre-Ivy Bridge parts), and those correctly report 0.
+	# Hardware VMCS shadowing is not part of the gate, because it is never
+	# programmed into a VMCS.
+	ug=$(sysctl -n hw.vmm.vmx.cap.unrestricted_guest 2>/dev/null)
+	if [ -n "${ug}" ]; then
+		if [ "${ug}" = "1" ] && [ "${vmx}" != "1" ]; then
+			echo "FAIL: unrestricted guest present but nested.vmx='${vmx}', expected 1"
+			exit 1
+		fi
+		if [ "${ug}" = "0" ] && [ "${vmx}" != "0" ]; then
+			echo "FAIL: no unrestricted guest but nested.vmx='${vmx}', expected 0"
+			exit 1
 		fi
 	fi
 
