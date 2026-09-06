@@ -44,6 +44,9 @@ WORLDDIR?=	${.CURDIR:H}
 PORTSDIR?=	/usr/ports
 
 .include "${WORLDDIR}/share/mk/bsd.compat.pre.mk"
+# For PKG_NAME_PREFIX: the media has to select the base packages under the name
+# the world build gave them, so both must read it from the same place.
+.include "${WORLDDIR}/share/mk/bsd.pkg.pre.mk"
 
 .if !defined(TARGET) || empty(TARGET)
 TARGET=		${MACHINE}
@@ -244,7 +247,8 @@ disc1:
 	${.CURDIR}/scripts/pkgbase-stage.lua disc \
 	    ${.OBJDIR}/pkgbase-repo-dir \
 	    ${.TARGET}/usr/freebsd-packages/offline \
-	    "${_ALL_libcompats}" ${PKG_ABI} ${.OBJDIR}/pkgdb-disc1
+	    "${_ALL_libcompats}" ${PKG_ABI} ${.OBJDIR}/pkgdb-disc1 \
+	    "${PKG_NAME_PREFIX}"
 	cp ${.CURDIR}/scripts/FreeBSD-base-offline.conf \
 		${.TARGET}/usr/freebsd-packages/repos/
 	mtree -c -p ${.TARGET}/usr/freebsd-packages | \
@@ -347,7 +351,8 @@ dvd:
 	${.CURDIR}/scripts/pkgbase-stage.lua dvd \
 	    ${.OBJDIR}/pkgbase-repo-dir \
 	    ${.TARGET}/usr/freebsd-packages/offline \
-	    "${_ALL_libcompats}" ${PKG_ABI} ${.OBJDIR}/pkgdb-dvd
+	    "${_ALL_libcompats}" ${PKG_ABI} ${.OBJDIR}/pkgdb-dvd \
+	    "${PKG_NAME_PREFIX}"
 	cp ${.CURDIR}/scripts/FreeBSD-base-offline.conf \
 		${.TARGET}/usr/freebsd-packages/repos/
 	mtree -c -p ${.TARGET}/usr/freebsd-packages | \

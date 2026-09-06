@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Machine profiles and build identities.  This file is the ONLY place",
+    "fleet-specific facts live, and it is deliberately not committed: the",
+    "source repository is public and machine names are not.  Keep the real",
+    "one beside the database on the machine that holds it.",
+    "",
+    "public_label is what the website is allowed to print.  A machine with",
+    "no public_label is omitted from every export rather than published",
+    "under its internal name."
+  ],
+  "hosts": [
+    {
+      "name": "example-host",
+      "public_label": "CloudBSD VMX·GenN",
+      "cpu_model": "Intel Core iN-NNNNN",
+      "cpu_vendor": "intel",
+      "virt_type": "VMX",
+      "cores": 8,
+      "ram_bytes": 34359738368,
+      "notes": "what this machine is for"
+    }
+  ],
+  "builds": [
+    {
+      "vmm_sha256": "0000000000000000",
+      "status": "published",
+      "release_name": "16.0.YYYYMMDD.deepnestN",
+      "git_commit": "",
+      "notes": "what changed in this build"
+    }
+  ]
+}
