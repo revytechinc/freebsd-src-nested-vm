@@ -10,6 +10,15 @@
 local sys_wait = require("posix.sys.wait")
 local unistd = require("posix.unistd")
 
+-- The prefix the base packages on this media were named with, substituted from
+-- PKG_NAME_PREFIX when this script is built.  The media and the system
+-- installed from it are named alike, so the same value selects packages here
+-- and in the staging that put them on the media.
+local prefix = "%%PKG_NAME_PREFIX%%"
+-- It is a literal, not a pattern, so escape what Lua patterns treat specially
+-- before matching on it.
+local prefix_pat = prefix:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
+
 local all_libcompats <const> = "%%_ALL_libcompats%%"
 
 -- Run a command using the OS shell and capture the stdout
@@ -237,19 +246,25 @@ local function select_packages(pkg, options)
 		["debug"] = {},
 	}
 
-	-- Note: if you update this list, you must also update the list in
-	-- release/scripts/pkgbase-stage.lua.
+	-- Note: if you update this list, or how the prefix is escaped before
+	-- being matched on, you must make the same change in
+	-- release/scripts/pkgbase-stage.lua.  Both fail by selecting nothing
+	-- rather than by erroring, so a change made in only one is quiet.
 	local kernel_packages = {
 		-- Most architectures use this
-		["FreeBSD-kernel-generic"] = true,
+		[prefix .. "-kernel-generic"] = true,
 		-- PowerPC uses either of these, depending on platform
-		["FreeBSD-kernel-generic64"] = true,
-		["FreeBSD-kernel-generic64le"] = true,
+		[prefix .. "-kernel-generic64"] = true,
+		[prefix .. "-kernel-generic64le"] = true,
 	}
 
+	-- The repository name is an alias local to this build, written by the
+	-- pkgbase-repo-dir target in release/Makefile, and is deliberately not
+	-- derived from the prefix: renaming the packages does not rename the
+	-- repository they are fetched from.
 	local rquery = capture(pkg .. "rquery -U -r FreeBSD-base %n")
 	for package in rquery:gmatch("[^\n]+") do
-		local setname = package:match("^FreeBSD%-set%-(.+)$")
+		local setname = package:match("^" .. prefix_pat .. "%-set%-(.+)$")
 
 		if setname then
 			components[setname] = components[setname] or {}
@@ -293,7 +308,7 @@ local function select_packages(pkg, options)
 		-- actually exists, because some sets (src, tests) don't
 		-- have a -dbg subpackage.
 		for _, c in ipairs(pkglist) do
-			local setname = c:match("^FreeBSD%-set%-(.*)$")
+			local setname = c:match("^" .. prefix_pat .. "%-set%-(.*)$")
 			if debug and setname then
 				local dbgset = setname.."-dbg"
 				if components[dbgset] then

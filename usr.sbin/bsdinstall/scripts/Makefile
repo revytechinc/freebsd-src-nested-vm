@@ -1,4 +1,7 @@
 .include <bsd.compat.pre.mk>
+# For PKG_NAME_PREFIX: the installer selects base packages by name, so it must
+# be built knowing the name the world build gave them.
+.include <bsd.pkg.pre.mk>
 
 SCRIPTS=auto \
 	adduser \
@@ -34,6 +37,8 @@ BINDIR= ${LIBEXECDIR}/bsdinstall
 MAN=
 
 pkgbase: pkgbase.in
-	sed "s|%%_ALL_libcompats%%|${_ALL_libcompats}|" < ${.ALLSRC} > ${.TARGET}
+	sed -e "s|%%_ALL_libcompats%%|${_ALL_libcompats}|" \
+	    -e "s|%%PKG_NAME_PREFIX%%|${PKG_NAME_PREFIX}|" \
+	    < ${.ALLSRC} > ${.TARGET}
 
 .include <bsd.prog.mk>
