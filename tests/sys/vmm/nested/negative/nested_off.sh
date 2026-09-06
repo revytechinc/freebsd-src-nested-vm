@@ -242,14 +242,14 @@ set -- $(guest_cpuid_virt)
 oncpuvmx=$1; oncpusvm=$2
 log "phase 2 (enable=1, no -N): guest CPUID VMX=$oncpuvmx SVM=$oncpusvm"
 # The host vendor decides which bit has to come back.
-if [ "$HOST_VMX" = 2 ]; then
+if [ "$HOST_VMX" = 1 ]; then
 	[ "$oncpuvmx" = yes ] ||
 	    fail "hw.vmm.nested.enable=1 but the guest still has no VMX in its CPUID -- nesting is not on by default"
-elif [ "$HOST_SVM" = 2 ]; then
+elif [ "$HOST_SVM" = 1 ]; then
 	[ "$oncpusvm" = yes ] ||
 	    fail "hw.vmm.nested.enable=1 but the guest still has no SVM in its CPUID -- nesting is not on by default"
 else
-	skip "host reports neither hw.vmm.nested.vmx=2 nor .svm=2"
+	skip "host reports neither hw.vmm.nested.vmx=1 nor .svm=1"
 fi
 
 # If the guest also carries a nested-capable vmm(4), its own sysctls must

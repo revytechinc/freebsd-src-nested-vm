@@ -48,10 +48,10 @@ nested_basic_body()
 	fi
 	# Nesting is ON by default (the sysctl is the single master switch).
 	# vmm_init() forces it back to 0 only on hardware that cannot nest at
-	# all, i.e. when neither hw.vmm.nested.vmx nor .svm reports 2.
+	# all, i.e. when neither hw.vmm.nested.vmx nor .svm reports 1.
 	vmx=$(nested_sysctl_get vmx)
 	svm=$(nested_sysctl_get svm)
-	if [ "${vmx:-0}" = 2 ] || [ "${svm:-0}" = 2 ]; then
+	if [ "${vmx:-0}" = 1 ] || [ "${svm:-0}" = 1 ]; then
 		atf_check_equal "${enable}" "1"
 	else
 		atf_check_equal "${enable}" "0"

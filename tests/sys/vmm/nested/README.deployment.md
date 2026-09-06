@@ -135,7 +135,7 @@ Runtime semantics of a change:
 * `enable=0 -> 1` affects **new** VMs only. A VM created while nesting was
   off stays non-nesting until it is destroyed and recreated.
 * On hardware that genuinely cannot nest (`hw.vmm.nested.vmx` /
-  `hw.vmm.nested.svm` not equal to 2), `vmm_init()` forces the sysctl back
+  `hw.vmm.nested.svm` reporting 0), `vmm_init()` forces the sysctl back
   to 0 and refuses attempts to set it to 1 with `EOPNOTSUPP`.
 
 `negative/nested_off.sh` is the standing safety test for this contract: it

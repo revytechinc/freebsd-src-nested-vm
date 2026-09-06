@@ -76,7 +76,7 @@ command -v "$BHYVE" >/dev/null 2>&1 || skip "$BHYVE not found"
 kldstat -q -n vmm || skip "vmm.ko not loaded"
 if [ "$(sysctl -n hw.vmm.nested.enable 2>/dev/null)" != "1" ]; then
 	sysctl hw.vmm.nested.enable=1 >/dev/null 2>&1 ||
-	    skip "hw.vmm.nested.enable=1 refused (hw.vmm.nested.vmx/svm not 2?)"
+	    skip "hw.vmm.nested.enable=1 refused (hw.vmm.nested.vmx/svm not 1?)"
 fi
 
 WORKDIR=${WORKDIR:-$(mktemp -d /tmp/l2smoke.XXXXXX)}

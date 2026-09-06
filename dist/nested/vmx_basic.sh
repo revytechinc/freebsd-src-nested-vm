@@ -32,10 +32,10 @@
 # the kernel message buffer.  We then verify:
 #   - the kernel module loaded and produced "N/5 PASS" (or SKIP)
 #     output for the vmm-dependent sub-tests;
-#   - hw.vmm.nested.vmx sysctl is present and an integer in [0, 2];
-#   - hw.vmm.nested.svm sysctl is present and an integer in [0, 2];
-#   - on this host (T17 reference platform is the Tiger Lake i9-11950H
-#     which has VMCS shadowing), hw.vmm.nested.vmx must be 2 (ready).
+#   - hw.vmm.nested.vmx sysctl is present and is 0 or 1;
+#   - hw.vmm.nested.svm sysctl is present and is 0 or 1;
+#   - on any Intel host with EPT and unrestricted guest (every part
+#     from Ivy Bridge on), hw.vmm.nested.vmx must be 1 (ready).
 #
 # On hosts where vmm.ko is not built into the kernel the entire test
 # is skipped via atf_skip.
@@ -79,32 +79,32 @@ vmx_basic_body()
 	fi
 	atf_check_not_matches "${summary}" 'FAIL' "vmx_nested_test reported FAIL"
 
-	# 2. hw.vmm.nested.vmx must exist and be in [0, 2].
+	# 2. hw.vmm.nested.vmx must exist and be a boolean.
 	vmx_status=$(sysctl -n hw.vmm.nested.vmx 2>/dev/null) || \
 	    atf_skip "hw.vmm.nested.vmx not exposed"
 	case "${vmx_status}" in
-	0|1|2) ;;
-	*)	atf_fail "hw.vmm.nested.vmx=${vmx_status}, not in {0,1,2}" ;;
+	0|1) ;;
+	*)	atf_fail "hw.vmm.nested.vmx=${vmx_status}, not in {0,1}" ;;
 	esac
 
-	# 3. hw.vmm.nested.svm must exist and be in [0, 2] (may be 0 on Intel).
+	# 3. hw.vmm.nested.svm must exist and be a boolean (0 on Intel).
 	svm_status=$(sysctl -n hw.vmm.nested.svm 2>/dev/null) || \
 	    atf_skip "hw.vmm.nested.svm not exposed"
 	case "${svm_status}" in
-	0|1|2) ;;
-	*)	atf_fail "hw.vmm.nested.svm=${svm_status}, not in {0,1,2}" ;;
+	0|1) ;;
+	*)	atf_fail "hw.vmm.nested.svm=${svm_status}, not in {0,1}" ;;
 	esac
 
-	# 4. T17 reference host invariant: an Intel CPU with VMCS
-	#    shadowing (Haswell+ class, including Tiger Lake i9-11950H)
-	#    must report 2 (ready).  Skip on non-Intel CPUs.
-	if ! grep -qw vmx /var/run/dmesg.boot /var/log/dmesg 2>/dev/null; then
-		# Fall back to /proc/cpuinfo
-		if ! grep -qw vmx /proc/cpuinfo 2>/dev/null; then
-			atf_skip "host does not advertise Intel VMX"
-		fi
+	# 4. The nested probe gates on unrestricted guest, so tie the
+	#    invariant to that capability rather than to the bare presence of
+	#    the VMX flag: a VMX-capable part without unrestricted guest
+	#    correctly reports 0.  Hardware VMCS shadowing is not required.
+	ug=$(sysctl -n hw.vmm.vmx.cap.unrestricted_guest 2>/dev/null) || \
+	    atf_skip "hw.vmm.vmx.cap.unrestricted_guest not exposed (non-Intel host?)"
+	if [ -z "${ug}" ]; then
+		atf_skip "hw.vmm.vmx.cap.unrestricted_guest not exposed (non-Intel host?)"
 	fi
-	atf_check_equal "${vmx_status}" "2"
+	atf_check_equal "${vmx_status}" "${ug}"
 
 	atf_pass
 }

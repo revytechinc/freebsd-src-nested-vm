@@ -137,7 +137,7 @@ SYSCTL_NODE(_hw_vmm, OID_AUTO, vmx, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     NULL);
 SYSCTL_INT(_hw_vmm_nested, OID_AUTO, vmx, CTLFLAG_RD,
     &vmx_nested_status, 0,
-    "VMX nested virtualization preflight status (0=unsupported, 1=L0 conflict, 2=ready)");
+    "VMX nested virtualization preflight status (0=unsupported, 1=ready)");
 
 int vmxon_enabled[MAXCPU];
 static uint8_t *vmxon_region;
@@ -1042,9 +1042,11 @@ vmx_modinit(int ipinum)
 	smp_rendezvous(NULL, vmx_enable, NULL, NULL);
 
 	vmx_initialized = 1;
-	/* Key off the VMX nested hardware features, not bare-metal, so a guest
-	 * with VMX exposed can itself host a nested (L3) guest. */
-	vmx_nested_status = nested_hw ? 2 : 0;
+	/*
+	 * Key off the VMX nested hardware features, not bare-metal, so a guest
+	 * with VMX exposed can itself host a nested (L3) guest.
+	 */
+	vmx_nested_status = nested_hw ? 1 : 0;
 
 	/*
 	 * Nested-VMX (T15, T18): we deliberately do NOT OR the

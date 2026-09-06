@@ -200,14 +200,14 @@ vmm_nested_supported(void)
 {
 
 	/*
-	 * Nested-virt is supported wherever the hardware capability is present
-	 * (status == 2), including inside a guest that has VMX/SVM exposed to it.
-	 * This is what lets nesting recurse past one level (L2 -> L3 -> ...).
-	 * Nesting is on by default and is controlled purely by
-	 * hw.vmm.nested.enable; there is no per-VM opt-in.
+	 * Nested-virt is supported wherever the hardware capability is present,
+	 * including inside a guest that has VMX/SVM exposed to it.  This is what
+	 * lets nesting recurse past one level (L2 -> L3 -> ...).  Nesting is on
+	 * by default and is controlled purely by hw.vmm.nested.enable; there is
+	 * no per-VM opt-in.
 	 */
-	return ((vmm_is_intel() && vmx_nested_status == 2) ||
-	    (vmm_is_svm() && svm_nested_status == 2));
+	return ((vmm_is_intel() && vmx_nested_status != 0) ||
+	    (vmm_is_svm() && svm_nested_status != 0));
 }
 
 static int

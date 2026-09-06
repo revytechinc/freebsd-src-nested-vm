@@ -24,9 +24,14 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
-# T0a / Wave 0a: preflight integration -- Intel Ivy Bridge detection.
-# Verifies the wave-0a patch correctly maps Ivy Bridge (family=6 model=0x3a)
-# to hw.vmm.nested.vmx == 0, since Ivy Bridge lacks VMCS-shadowing.
+# Preflight integration -- Intel Ivy Bridge detection.
+#
+# Ivy Bridge (family=6 model=0x3a) has EPT and unrestricted guest but no
+# hardware VMCS shadowing.  Shadowing is never programmed into any VMCS, so
+# it is not required to advertise nested support, and this host must report
+# hw.vmm.nested.vmx == 1.  An earlier probe did require shadowing and so
+# refused every pre-Haswell part; this test is the guard against that
+# returning.
 
 # shellcheck shell=sh
 set -u
@@ -84,12 +89,20 @@ preflight_intel_ivybridge_main()
 		echo "FAIL: hw.vmm.nested.vmx unreachable on Ivy Bridge host"
 		exit 1
 	fi
-	if [ "${v}" != "0" ]; then
-		echo "FAIL: Ivy Bridge expected hw.vmm.nested.vmx=0, got '${v}'"
+
+	# The probe gates on unrestricted guest, so assert only what it
+	# promises: a part without that capability reports 0 correctly.
+	ug=$(sysctl -n hw.vmm.vmx.cap.unrestricted_guest 2>/dev/null)
+	if [ "${ug}" != "1" ]; then
+		echo "SKIP: Ivy Bridge host without unrestricted guest (cap='${ug}')"
+		exit 0
+	fi
+	if [ "${v}" != "1" ]; then
+		echo "FAIL: Ivy Bridge expected hw.vmm.nested.vmx=1, got '${v}'"
 		exit 1
 	fi
 
-	echo "PASS: preflight_intel_ivybridge mapped Ivy Bridge to vmx=0"
+	echo "PASS: preflight_intel_ivybridge mapped Ivy Bridge to vmx=1"
 }
 
 preflight_intel_ivybridge_main "$@"
@@ -97,7 +110,7 @@ preflight_intel_ivybridge_main "$@"
 atf_test_case "preflight_intel_ivybridge"
 preflight_intel_ivybridge_head()
 {
-	atf_set "descr" "Ivy Bridge detection -> hw.vmm.nested.vmx == 0"
+	atf_set "descr" "Ivy Bridge detection -> hw.vmm.nested.vmx == 1"
 	atf_set "require.user" "root"
 	atf_set "require.kmods" "vmm"
 }

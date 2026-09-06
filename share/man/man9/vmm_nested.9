@@ -1,0 +1,195 @@
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" All rights reserved.
+.\"
+.Dd September 5, 2026
+.Dt VMM_NESTED 9
+.Os
+.Sh NAME
+.Nm vmm_nested
+.Nd nested virtualization support in the bhyve hypervisor
+.Sh SYNOPSIS
+.Cd "hw.vmm.nested.enable=1"
+.Pp
+.In machine/vmm.h
+.In dev/vmm/vmm_dev.h
+.Sh DESCRIPTION
+The
+.Nm
+facility lets
+.Xr bhyve 8
+expose hardware-assisted virtualization
+.Pq Intel VMX or AMD SVM
+to a guest, so that a level-1
+.Pq L1
+guest can act as a hypervisor for its own level-2
+.Pq L2
+virtual machines.
+.Pp
+It is controlled by a single host-wide switch,
+.Va hw.vmm.nested.enable ,
+which is enabled by default on hardware that qualifies.
+There is no per-virtual-machine flag: every virtual machine created while
+the switch is on is nested-capable.
+.Pp
+When the switch is on, CPUID leaf 1 advertises VMX on Intel hosts, or
+leaf 0x80000001 advertises SVM and leaf 0x8000000A reports the emulated
+SVM feature set on AMD hosts.
+.Pp
+A virtual machine takes its nested-capable state from the switch at the
+moment it is created, and keeps it for its lifetime.
+Turning the switch off therefore does not change a virtual machine that
+is already running; it must be destroyed and created again.
+.Pp
+The hardware probe deliberately does not test for bare metal.
+A guest that has VMX or SVM exposed to it reports the same readiness as a
+physical host, which is what allows nesting to recurse beyond one level
+.Pq L2 hosting L3 .
+.Ss AMD SVM
+An L1 hypervisor's
+.Dv VMRUN ,
+.Dv VMLOAD ,
+.Dv VMSAVE ,
+.Dv CLGI
+and
+.Dv STGI
+instructions are emulated.
+On
+.Dv VMRUN
+the L1 save area is parked, the L2 save area from the guest VMCB is
+loaded into the hardware VMCB together with the union of L0's and
+L1's intercepts, and L2 runs until an exit that L1 asked to intercept
+.Pq intercept vectors, IOPM or MSRPM .
+That exit is then delivered to L1 exactly as hardware would: the L2
+state and exit information are written to the guest VMCB, and L1 resumes
+after
+.Dv VMRUN
+with GIF clear.
+Exits L1 did not ask for are handled by L0 on L2's behalf.
+.Pp
+When L1 enables nested paging for its guest, L2 runs under a per-vCPU
+shadow of L1's nested page table that L0 fills on demand from L2 nested
+page faults and discards when L1 requests a TLB flush or switches
+.Dv N_CR3 ;
+faults L1's table cannot resolve are reflected to L1 as nested page
+faults of its guest.
+When L1 runs its guest without nested paging, L2 guest-physical
+addresses are L1 guest-physical addresses and L0's own table applies.
+The SVM feature leaf advertises nested paging and NRIPS only; AVIC, LBR
+virtualization, flush-by-ASID and VMCB clean bits are not offered.
+.Ss Intel VMX
+.Dv VMXON ,
+.Dv VMXOFF ,
+.Dv VMPTRLD ,
+.Dv VMPTRST ,
+.Dv VMCLEAR ,
+.Dv VMREAD ,
+.Dv VMWRITE ,
+.Dv VMCALL ,
+.Dv INVEPT
+and
+.Dv INVVPID
+are emulated with architectural operand decoding and the architectural
+VMsucceed and VMfail result conventions.
+L1's VMCS
+.Pq VMCS12
+is kept as a private per-vCPU copy that is written back to guest memory
+whenever the current VMCS changes; no L1-supplied value is ever written
+into the hardware VMCS.
+.Pp
+.Dv VMLAUNCH
+and
+.Dv VMRESUME
+build a VMCS02 and run L2 on the hardware.
+VMCS02's host area is a verbatim copy of L0's, so an L2 exit returns to
+the same L0 context as an L1 exit; its control fields start from L0's
+known-good configuration, and only the fields that must differ for L2
+are overridden.
+L2 guest state is loaded from VMCS12 with L0's fixed CR0 and CR4 bits
+applied so that VM entry is legal.
+.Pp
+L2 runs under a per-vCPU shadow EPT
+.Pq EPT02
+mapping L2 guest-physical addresses to host addresses, filled lazily on
+L2 EPT violations by composing L1's EPT with L0's.
+A fault L1's EPT cannot resolve is reflected to L1 as an EPT violation of
+its guest.
+.Pp
+Hardware VMCS shadowing is never programmed into any VMCS, so it is not
+required in order to advertise nested support: Intel parts that have EPT
+and unrestricted guest but no shadowing, such as Ivy Bridge, are
+supported.
+.Sh SYSCTL VARIABLES
+.Bl -tag -width "hw.vmm.nested.svm_timer_fastpath"
+.It Va hw.vmm.nested.enable
+Host-wide switch, default 1.
+It can only be set to 1 when
+.Va hw.vmm.nested.vmx
+or
+.Va hw.vmm.nested.svm
+reports 1; otherwise the write fails with
+.Er EOPNOTSUPP .
+Setting it to 0 disables nested virtualization for virtual machines
+created afterwards.
+As a
+.Xr loader.conf 5
+tunable the value is applied after the vendor probe runs.
+.It Va hw.vmm.nested.vmx , Va hw.vmm.nested.svm
+Read-only vendor probe result, a boolean: 1 when this CPU has the
+features the nested paths need, 0 when it does not.
+On any given host at most one of the two can report 1.
+.El
+.Pp
+The remaining variables are bring-up and diagnostic aids.
+They are not a stable interface and may be removed.
+.Bl -tag -width "hw.vmm.nested.svm_timer_fastpath"
+.It Va hw.vmm.nested.vmx_l2
+Run Intel L2 guests on the hardware, default 1.
+Setting it to 0 is a kill switch: L1's
+.Dv VMLAUNCH
+and
+.Dv VMRESUME
+then report an architectural VM-entry failure instead, which every L1
+hypervisor treats as a fatal error for that L2 guest.
+.It Va hw.vmm.nested.l2stats
+Read-only L2 exit-reason histogram and injection counters for Intel.
+.It Va hw.vmm.nested.svm_debug
+Log the first nested-SVM events per vCPU
+.Pq VMRUN, exits reflected to L1, L2 page faults
+to the console.
+Slow; bring-up only.
+Default 0.
+.It Va hw.vmm.nested.svm_l2inj
+Read-only histogram of vectors injected into AMD L2 guests.
+.It Va hw.vmm.nested.svm_evtq_defer
+Carry every requeued L2 event one extra entry in the queue.
+A test knob for the event-requeue path.
+Default 0.
+.It Va hw.vmm.nested.svm_timer_fastpath
+Handle L2 i8254 and ACPI timer port reads in L0 rather than reflecting
+them to L1.
+Default 1.
+.El
+.Sh SEE ALSO
+.Xr vm_create 3 ,
+.Xr vmm 4 ,
+.Xr loader.conf 5 ,
+.Xr bhyve 8 ,
+.Xr sysctl 8
+.Sh HISTORY
+The
+.Nm
+facility appeared as an experimental addition to
+.Fx 16.0 .
+.Sh BUGS
+The feature is experimental.
+.Pp
+Live migration and snapshots of nested virtual machines are not
+supported.
+.Pp
+Nesting deeper than L2 is permitted by the probe but is exercised far
+less than L2, and should be treated as unproven.
+.Pp
+On Intel, exits that L1 asked to intercept but L0 does not are a later
+refinement: L2 currently runs under L0's intercepts.
