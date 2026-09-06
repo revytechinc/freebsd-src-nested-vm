@@ -803,9 +803,17 @@ vmx_modinit(int ipinum)
 		    "secondary processor-based controls\n");
 		return (error);
 	}
+	/*
+	 * Unrestricted guest is required; VMCS shadowing is not. Shadowing is
+	 * an optimisation for L1's VMREAD/VMWRITE, and this code enables it
+	 * per-vCPU later only where the part has it. Demanding it here refused
+	 * nesting outright on parts that have EPT and unrestricted guest but no
+	 * shadowing -- pre-Haswell Ivy Bridge, and 8th-gen Kaby Lake-G -- where
+	 * nesting otherwise works, just with every L1 VMCS access trapped.
+	 */
 	nested_hw = vmx_set_ctlreg(MSR_VMX_PROCBASED_CTLS2,
 	    MSR_VMX_PROCBASED_CTLS2,
-	    PROCBASED2_UNRESTRICTED_GUEST | PROCBASED2_VMCS_SHADOWING,
+	    PROCBASED2_UNRESTRICTED_GUEST,
 	    0, &tmp) == 0;
 
 	/* Check support for VPID */
@@ -1080,19 +1088,20 @@ vmx_modinit(int ipinum)
 	vmx_nested_status = nested_hw ? (vm_guest == VM_GUEST_NO ? 2 : 1) : 0;
 
 	/*
-	 * Nested-VMX (T15, T18): we deliberately do NOT OR the
-	 * VMCS-shadowing bit into the global `procbased_ctls2` here.
-	 * The Intel SDM (Vol 3 §25.4.2) requires that, when
-	 * VMCS shadowing is enabled, the shadow VMCS address in the
-	 * L0 VMCS must point at a valid, populated shadow VMCS --
-	 * otherwise VM-entry fails.  bhyve always writes
-	 * VMCS_LINK_POINTER = ~0 in vmcs_init(), which is the
-	 * correct value for a non-shadowing VMCS but is illegal
-	 * when shadowing is on.  So we leave the global ctl2
-	 * shadowing-free and only enable it per-vCPU, after
-	 * vmx_nested_load_vmcs12() has installed a real shadow VMCS
-	 * for the L1 (see `nested_enabled && ns->vmcs12_active`
-	 * below and the vmwrite in vmx_nested_load_vmcs12).
+	 * Nested-VMX: the VMCS-shadowing bit is deliberately not ORed into the
+	 * global `procbased_ctls2`. When shadowing is enabled the shadow VMCS
+	 * address in the L0 VMCS must point at a valid, populated shadow VMCS
+	 * or VM entry fails, and bhyve writes VMCS_LINK_POINTER = ~0 in
+	 * vmcs_init() -- correct for a non-shadowing VMCS, illegal with
+	 * shadowing on.
+	 *
+	 * Nothing enables it per-vCPU either: PROCBASED2_VMCS_SHADOWING has no
+	 * consumer in this tree. Shadowing is purely an optimisation for L1's
+	 * VMREAD/VMWRITE, so without it every L1 VMCS access traps to L0 and
+	 * nesting is correct but slower. That is why the hardware gate above
+	 * asks only for unrestricted guest: requiring shadowing there refused
+	 * nesting outright on parts that do not have it, for a feature this
+	 * code does not yet use on any part.
 	 */
 
 	return (0);
