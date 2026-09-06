@@ -102,6 +102,8 @@ vmx_nested_vmentry(struct vmx_vcpu *vcpu, bool launch)
 	vmcs12_write_field(vcpu->nvmcs12, VMCS_EXIT_INSTRUCTION_INFO, 0);
 	vmcs12_write_field(vcpu->nvmcs12, VMCS_GUEST_LINEAR_ADDRESS, 0);
 	vmcs12_write_field(vcpu->nvmcs12, VMCS_GUEST_PHYSICAL_ADDRESS, 0);
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_IDT_VECTORING_INFO, 0);
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_IDT_VECTORING_ERROR, 0);
 	vmx_nested_vmexit_to_l1(vcpu,
 	    EXIT_REASON_ENTRY_FAILURE | EXIT_REASON_INVALID_GUEST_STATE, 0);
 	return (1);
