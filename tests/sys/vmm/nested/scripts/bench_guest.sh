@@ -69,6 +69,20 @@ trap cleanup EXIT INT TERM
 send() { printf '%s\r' "$*" >&3; }
 lines() { wc -l < "${CONS}" | tr -d ' '; }
 
+# Fixed-string wait. The marker is data, not a pattern: it is matched against a
+# line the guest produced, and a MARKER_VALUE or marker containing a regex
+# metacharacter would otherwise change what is matched without saying so. The
+# whole timing correctness of this script rests on this comparison.
+wait_for_lit() {
+	_lit=$1; _t=$2; _after=${3:-0}; _n=0
+	while [ "${_n}" -lt "${_t}" ]; do
+		tail -n +"$((_after + 1))" "${CONS}" | tr -d '\015' |
+		    grep -Faq "${_lit}" && return 0
+		sleep 1; _n=$((_n + 1))
+	done
+	return 1
+}
+
 wait_for() {
 	_re=$1; _t=$2; _after=${3:-0}; _n=0
 	while [ "${_n}" -lt "${_t}" ]; do
@@ -79,11 +93,25 @@ wait_for() {
 	return 1
 }
 
+#
+# The marker cannot be spelled out in the command, because the guest's tty
+# echoes the command line straight back into the console log -- a plain marker
+# matches its own echo and reports success before the command has run at all.
+# Every timing this script takes was measured against that echo, so the
+# workloads were typed into a console that had not reached a shell and the
+# numbers were of nothing. So the guest expands it: what we type carries ${M},
+# and only the guest's output carries the value. MARKER_VALUE is set in the
+# guest once it has a shell.
+MARKER_VALUE=Zq
 guest() { # <marker> <timeout> <command...>
 	_marker=$1; _t=$2; shift 2
 	_at=$(lines)
-	send "$* ; echo ===${_marker}==="
-	wait_for "===${_marker}===" "${_t}" "${_at}" ||
+	# Re-assert M on every command. It is set once after login, but any
+	# path that re-enters the shell would drop it, and the guest would then
+	# emit an unprefixed marker while we waited for the prefixed one -- a
+	# timeout that reads like a hypervisor hang rather than harness state.
+	send "M=${MARKER_VALUE}; $* ; echo \"===\${M}${_marker}===\""
+	wait_for_lit "===${MARKER_VALUE}${_marker}===" "${_t}" "${_at}" ||
 	    { log "guest command timed out: $*"; return 1; }
 	return 0
 }
@@ -114,34 +142,61 @@ result boot_to_login_s "$(( $(date +%s) - start ))"
 send 'root'
 wait_for 'assword' 30 || fail "no password prompt"
 send 'root'
+# Wait for the prompt before typing anything else. login(1) runs resizewin,
+# which reads from the terminal for several seconds and swallows whatever
+# arrives meanwhile -- the marker assignment sent blind is eaten there, and
+# every later command then waits for a marker the guest cannot produce.
+# Anchor on the whole prompt, not a bare "# ": the login banner and boot
+# messages contain that sequence, and matching one of those sends the
+# assignment blind again -- intermittently, which is worse.
+wait_for 'root@[^ ]*:~ #' 120 || fail "guest never produced a shell prompt"
+send "M=${MARKER_VALUE}"
 guest READY 60 'true' || fail "no shell"
 
 # Guest-internal timings. Each one is printed by the guest itself, so the
 # numbers are not distorted by console latency; we only parse them out.
 guest CPUBENCH 300 \
-    'S=$(date +%s); i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done; echo BENCH_cpu_loop_s=$(( $(date +%s) - S ))' ||
+    '_o=$( { /usr/bin/time -p sh -c "i=0; while [ \$i -lt 400000 ]; do i=\$((i+1)); done"; } 2>&1 ); _s=$?; [ $_s -eq 0 ] && echo BENCH_cpu_loop_s=$(printf "%s\n" "$_o" | sed -n "s/^real *//p") || echo BENCH_cpu_loop_s_EXIT=$_s' ||
     log "cpu loop did not finish"
 guest SYSCALL 300 \
-    'S=$(date +%s); i=0; while [ $i -lt 4000 ]; do /usr/bin/true; i=$((i+1)); done; echo BENCH_exec_4000_s=$(( $(date +%s) - S ))' ||
+    '_o=$( { /usr/bin/time -p sh -c "i=0; while [ \$i -lt 4000 ]; do /usr/bin/true; i=\$((i+1)); done"; } 2>&1 ); _s=$?; [ $_s -eq 0 ] && echo BENCH_exec_4000_s=$(printf "%s\n" "$_o" | sed -n "s/^real *//p") || echo BENCH_exec_4000_s_EXIT=$_s' ||
     log "exec loop did not finish"
 guest DISKW 600 \
-    'S=$(date +%s); dd if=/dev/zero of=/root/blob bs=1m count=1024 status=none; sync; echo BENCH_write_1g_s=$(( $(date +%s) - S ))' ||
+    '_o=$( { /usr/bin/time -p sh -c "dd if=/dev/zero of=/root/blob bs=1m count=1024 status=none; sync"; } 2>&1 ); _s=$?; [ $_s -eq 0 ] && echo BENCH_write_1g_s=$(printf "%s\n" "$_o" | sed -n "s/^real *//p") || echo BENCH_write_1g_s_EXIT=$_s' ||
     log "write did not finish"
 guest DISKR 600 \
-    'S=$(date +%s); dd if=/root/blob of=/dev/null bs=1m status=none; echo BENCH_read_1g_s=$(( $(date +%s) - S ))' ||
+    '_o=$( { /usr/bin/time -p sh -c "dd if=/root/blob of=/dev/null bs=1m status=none"; } 2>&1 ); _s=$?; [ $_s -eq 0 ] && echo BENCH_read_1g_s=$(printf "%s\n" "$_o" | sed -n "s/^real *//p") || echo BENCH_read_1g_s_EXIT=$_s' ||
     log "read did not finish"
 
 # Host-side view of what the guest cost.
 stats=$(bhyvectl --vm="${VMNAME}" --get-stats 2>/dev/null)
-for k in "Number of VM exits" "vm exits due to nested page fault" \
+for k in "total number of vm exits" "vm exits due to nested page fault" \
     "number of times hlt was intercepted" "vm exits due to external interrupt"; do
 	v=$(printf '%s\n' "${stats}" | grep -i "${k}" | tail -1 |
 	    tr -s ' \t' ' ' | sed 's/.* \([0-9][0-9]*\).*/\1/')
-	[ -n "${v}" ] && result "$(printf '%s' "${k}" | tr ' ' '_')" "${v}"
+	if [ -n "${v}" ]; then
+		result "$(printf '%s' "${k}" | tr ' ' '_')" "${v}"
+	else
+		log "MISSING STAT: ${k} -- bhyvectl on this host may name it differently"
+	fi
 done
 
-tr -d '\015' < "${CONS}" | grep -o 'BENCH_[a-z0-9_]*=[0-9]*' | sort -u |
+#
+# One line per key, last value wins. sort -u collapsed duplicates only while
+# values were whole seconds; with fractional ones two runs of the same workload
+# differ and both would survive, reporting the same key twice.
+tr -d '\015' < "${CONS}" | grep -o 'BENCH_[a-z0-9_]*=[0-9][0-9.]*' |
+    awk -F= '{ v[$1] = $2 } END { for (k in v) print k "=" v[k] }' | sort |
     while IFS='=' read -r k v; do result "${k#BENCH_}" "${v}"; done
+
+#
+# A workload that dies still lets its marker through, so guest() cannot tell.
+# Say plainly which numbers are missing rather than leaving a silent gap that
+# looks the same as a run nobody asked for that measurement from.
+for k in cpu_loop_s exec_4000_s write_1g_s read_1g_s; do
+	tr -d '\015' < "${CONS}" |
+	    grep -q "BENCH_${k}=[0-9]" || log "MISSING RESULT: ${k}"
+done
 
 guest HALT 60 'shutdown -p now' || true
 log "done"
