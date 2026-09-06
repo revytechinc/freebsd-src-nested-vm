@@ -366,8 +366,10 @@ if [ "$CORES" -eq 1 ]; then
 	info "Starting L1 guest (1 vCPU)..."
 else
 	info "Starting L1 guest ($CORES vCPUs; L2 will get $CORES too)..."
-	warn "nested SMP is the path still being stabilised - a multi-vCPU L2 can"
-	warn "stall at its root mount where a single-vCPU one completes."
+	warn "nested SMP is the path still being stabilised.  A wide guest has"
+	warn "stalled at its root mount, aborted its L2 with a VM-entry failure,"
+	warn "and on one Intel host at 4 vCPUs it panicked the host itself."
+	warn "Run this on a machine you can afford to lose, not a busy one."
 fi
 # com1 is written to the console log; we tail it live so you SEE both guests.
 "$BHYVE" -c "$CORES" -m "$MEM" -A -H -P \

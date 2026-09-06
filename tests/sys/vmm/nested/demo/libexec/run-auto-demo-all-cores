@@ -1,0 +1,19 @@
+#!/bin/sh
+
+#
+# run-auto-demo-all-cores -- the automatic nested demo, run wide.
+#
+# This exists as its own launcher rather than as an argument to run-auto-demo
+# because of how doas(1) grants work: a rule written "cmd <path>" with no args
+# clause permits that command with NO arguments at all, so the restricted demo
+# account cannot pass --all-cores to run-auto-demo even though the option is
+# there. Giving the wide run its own fixed-purpose path keeps each doas rule
+# describing exactly one thing that can happen, which is the property that
+# makes the grant safe to read; widening the existing rule to accept arguments
+# would trade that away.
+#
+# All arguments are ignored, as in run-auto-demo, so this rule cannot be bent
+# either.
+#
+set -u
+exec /usr/local/libexec/cloudbsd-demo/run-auto-demo --all-cores

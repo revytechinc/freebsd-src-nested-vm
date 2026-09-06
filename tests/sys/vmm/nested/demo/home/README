@@ -1,13 +1,15 @@
 Nested virtualization - hands-on
 ================================
 
-Four scripts. Nothing here is locked down; this is your own account, so read
+Five scripts. Nothing here is locked down; this is your own account, so read
 or change anything you like.
 
   0-what-can-this-host-do.sh      what this machine is, and whether it is ready
   1-run-nested-demo.sh            the automatic demo   (~2 minutes)
   2-step-through.sh               the step-through demo (interactive)
   3-run-nested-demo-all-cores.sh  demo 1, but every guest gets every core
+  4-find-the-core-ceiling.sh      demo 1 at 1, 2, 3 ... cores, to find where
+                                  it stops working (long; hours on a big host)
 
 Demo 1 answers "does it work" and gets out of the way: it boots a guest,
 that guest boots a guest inside itself, and the inner one prints
@@ -27,9 +29,20 @@ Demo 3 is demo 1 run wide. Demos 1 and 2 give each guest a single vCPU,
 because that is the configuration they reliably complete in. Demo 3 gives
 both the L1 guest and the L2 guest inside it every core this host has, which
 means a second processor has to be brought up through two layers of
-hypervisor. That is the part still being stabilised, so demo 3 is the one
-that can stall where demo 1 does not - and when it does, the console log it
-names at the end is the useful artifact.
+hypervisor. That is the part still being stabilised.
+
+Demo 3 does not always finish, and how it fails is the interesting part. So
+far: 64 vCPUs per guest completed on AMD; 2 completed on both AMD and Intel;
+8 and 16 on Intel aborted the inner guest with a VM-entry failure; and 4 on
+one Intel host panicked the host itself. Run it on a machine you can afford
+to lose, and when it fails, keep the console log it names at the end.
+
+Script 4 is the one to leave running. It sweeps the width upward and records
+what happened at each step, and it writes each width to its log BEFORE the run
+rather than after - so if a wide guest takes the machine down, the last line of
+the log names the width that did it. Start it again after the reboot and it
+picks up where it left off, marks that width HOST-PANIC, and stops rather than
+proving the same thing twice.
 
 Any width you like, on either demo:
 

@@ -14,6 +14,7 @@ BINDIR=		${TESTSDIR}
 ${PACKAGE}FILES+=	demo-banner
 ${PACKAGE}FILES+=	nested-demo.sh
 ${PACKAGE}FILES+=	run-auto-demo
+${PACKAGE}FILES+=	run-auto-demo-all-cores
 ${PACKAGE}FILES+=	run-stepthrough
 ${PACKAGE}FILES+=	stepthrough-boot.sh
 ${PACKAGE}FILES+=	watchdog-common
