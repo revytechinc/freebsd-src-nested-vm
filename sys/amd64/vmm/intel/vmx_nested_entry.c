@@ -530,6 +530,12 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 		vmwrite(VMCS_ENTRY_INTR_INFO, 0);
 	}
 
+	/*
+	 * Start L2's slice. The software budget in vmx_nested_l1_starved() is
+	 * measured from here, so it covers everything L2 does until L1 next
+	 * runs, across any number of exits L0 handles on L2's behalf.
+	 */
+	ns->l2_slice_tsc = rdtsc();
 	ns->in_l2 = true;
 	VMCLEAR(ns->vmcs02);		/* flush to memory; vmx_run() reloads it */
 	ns->vmcs02_launched = false;
@@ -651,6 +657,74 @@ vmx_nested_reflect_copy(struct vmx_vcpu *vcpu, uint32_t reason, uint64_t qual,
 }
 
 /*
+ * Has L2 held the CPU for longer than its slice?
+ *
+ * vmcs02 arms the VMX-preemption timer to hand the CPU back to L1 about every
+ * millisecond, but that timer only counts down while L2 executes and is
+ * re-armed on every VM entry. Exits that L0 services and resumes L2 from --
+ * host external interrupts above all, which arrive far more often than the
+ * timer period -- therefore restart it before it can ever reach zero. L1 is
+ * then never scheduled: it cannot advance its device models, cannot run its
+ * block backend and cannot inject anything into L2, so L2 stalls forever with
+ * its own hypervisor starved underneath it. Measured on an 8th-gen Intel host:
+ * 2700 external-interrupt exits a second, against 8 preemption-timer exits in
+ * the whole life of the guest.
+ *
+ * So enforce the same budget in software, where no exit can reset it.
+ */
+static bool
+vmx_nested_l1_starved(struct vmx_nested_state *ns)
+{
+	uint64_t budget, delta, f, now;
+
+	if (ns == NULL || ns->l2_slice_tsc == 0)
+		return (false);
+	f = tsc_freq ? tsc_freq : 2600000000UL;
+	budget = f / 1000;
+	now = rdtsc();
+	delta = now - ns->l2_slice_tsc;
+	/*
+	 * A vcpu that migrated to a package whose TSC is not synchronised with
+	 * the one that latched the slice can read backwards, which in unsigned
+	 * arithmetic looks like an enormous elapsed time. Treat an implausible
+	 * delta as a bad sample rather than a spent slice, and restart the
+	 * slice so the next comparison is made against this CPU's clock.
+	 */
+	if (delta > 1000 * budget) {
+		ns->l2_slice_tsc = now;
+		return (false);
+	}
+	return (delta >= budget);
+}
+
+/*
+ * Hand the CPU back to L1 with a synthetic external-interrupt exit, which L1
+ * answers by injecting whatever it has pending for L2 and resuming it.
+ */
+static void
+vmx_nested_yield_to_l1(struct vmx_vcpu *vcpu, struct vmx_nested_state *ns)
+{
+
+	vmx_nested_reflect_l2_exit(vcpu, EXIT_REASON_EXT_INTR, 0, 0);
+	/*
+	 * The exit is manufactured, so the interruption information vmcs12 has
+	 * just been given describes either a host interrupt that is no business
+	 * of L1's or whatever happened to be there before. bhyve as L1 ignores
+	 * the field, but a different guest hypervisor may read it to identify a
+	 * vector, so leave it invalid rather than stale.
+	 */
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_EXIT_INTR_INFO, 0);
+	/*
+	 * Restart the slice here rather than leaving it to the next vmcs02
+	 * build: L1 may resume L2 without rebuilding vmcs02, and a start time
+	 * left stale would put every later host interrupt past the budget,
+	 * forcing a hand-back on each one instead of at the intended rate.
+	 */
+	if (ns != NULL)
+		ns->l2_slice_tsc = rdtsc();
+}
+
+/*
  * Decide what to do with an L2 exit taken on vmcs02 (current VMCS).
  * Returns 1 to resume L2, 0 to reflect to L1 (done here) and resume L1.
  */
@@ -658,8 +732,10 @@ int
 vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
     struct vm_exit *vmexit)
 {
+	struct vmx_nested_state *ns;
 	uint64_t qual;
 
+	ns = vmx_nested_state(vcpu);
 	qual = vmcs_read(VMCS_EXIT_QUALIFICATION);
 
 	switch (reason) {
@@ -670,7 +746,7 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 		 * handles by injecting any pending L2 interrupts (its vlapic
 		 * timer tick) and resuming L2.
 		 */
-		vmx_nested_reflect_l2_exit(vcpu, EXIT_REASON_EXT_INTR, 0, 0);
+		vmx_nested_yield_to_l1(vcpu, ns);
 		return (0);
 	case EXIT_REASON_EPT_FAULT:
 		/*
@@ -703,6 +779,11 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 		if ((intr_info & VMCS_INTR_VALID) != 0 &&
 		    (intr_info & VMCS_INTR_T_MASK) == VMCS_INTR_T_HWINTR)
 			vmx_trigger_hostintr(intr_info & 0xff);
+		if (vmx_nested_l1_starved(ns)) {
+			/* L2 has had its slice; let L1 run. */
+			vmx_nested_yield_to_l1(vcpu, ns);
+			return (0);
+		}
 		return (1);
 	}
 	case EXIT_REASON_NMI_WINDOW:
