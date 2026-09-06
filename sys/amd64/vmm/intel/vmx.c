@@ -218,7 +218,13 @@ static int cap_rdtscp;
 SYSCTL_INT(_hw_vmm_vmx_cap, OID_AUTO, rdtscp, CTLFLAG_RD, &cap_rdtscp, 0,
     "Guests are allowed to use RDTSCP");
 
-static int cap_unrestricted_guest;
+/*
+ * Not static: the nested path sets this control on vmcs02 explicitly rather
+ * than inheriting whatever vmcs01 happens to have, and gating that on the
+ * capability probed here is safer than depending on the nested-support probe
+ * continuing to require the same bit.
+ */
+int cap_unrestricted_guest;
 SYSCTL_INT(_hw_vmm_vmx_cap, OID_AUTO, unrestricted_guest, CTLFLAG_RD,
     &cap_unrestricted_guest, 0, "Unrestricted guests");
 

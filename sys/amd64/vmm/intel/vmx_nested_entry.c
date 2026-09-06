@@ -41,6 +41,13 @@
 #include <sys/mutex.h>
 #include <sys/sbuf.h>
 
+/*
+ * Basic exit reason reported when a VM entry is refused because the guest
+ * state was not consistent. Named here rather than written as a bare 33 at
+ * the comparison, which would read as a magic number in a switch of symbols.
+ */
+#define	VMX_REASON_INVALID_GUEST_STATE	33
+
 #include <vm/vm.h>
 #include <vm/vm_param.h>
 #include <vm/pmap.h>
@@ -53,6 +60,8 @@
 
 #include <dev/vmm/vmm_mem.h>
 #include <dev/vmm/vmm_ktr.h>
+#include <dev/vmm/vmm_param.h>
+#include <dev/vmm/vmm_vm.h>
 
 #include "vmm_host.h"
 #include "vmx_cpufunc.h"
@@ -133,6 +142,78 @@ SYSCTL_ULONG(_hw_vmm_nested, OID_AUTO, entryfail_build, CTLFLAG_RD,
 SYSCTL_ULONG(_hw_vmm_nested, OID_AUTO, entryfail_ept02, CTLFLAG_RD,
     &vmx_nested_entryfail_ept02, 0,
     "of entryfail_build, those that failed on EPT shadow init");
+
+/*
+ * First refused L2 entry, recorded field by field.
+ *
+ * When hardware refuses vmcs02 it reports only "invalid guest state" and an
+ * exit qualification of zero -- it does not say which check failed. Guessing
+ * which one it was has already cost two wrong theories, so capture the state
+ * that was actually offered, once, and read it back from userspace. Recording
+ * rather than printing keeps this out of vmx_run()'s critical section, where a
+ * printf would be a bug in its own right.
+ */
+static struct {
+	volatile u_int	captured;
+	int		vcpuid;
+	char		vmname[VM_MAX_NAMELEN];
+	uint64_t	activity, intr_state, pending_dbg;
+	uint64_t	entry_intr_info, entry_ctls, exit_qual;
+	uint64_t	cr0, cr4, efer, rflags, rip;
+	uint64_t	cs_ar, cs_sel, cs_base, cs_limit, ss_ar, tr_ar, tr_sel;
+	uint64_t	link_ptr, sec_ctls;
+} vmx_nested_refused;
+
+static int
+vmx_nested_refused_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct sbuf sb;
+	int error;
+
+	sbuf_new_for_sysctl(&sb, NULL, 512, req);
+	if (vmx_nested_refused.captured == 0)
+		sbuf_printf(&sb, "no refused L2 entry recorded\n");
+	else {
+		sbuf_printf(&sb, "vm=%s vcpu=%d activity=%#lx intr_state=%#lx "
+		    "pending_dbg=%#lx\n", vmx_nested_refused.vmname,
+		    vmx_nested_refused.vcpuid,
+		    vmx_nested_refused.activity, vmx_nested_refused.intr_state,
+		    vmx_nested_refused.pending_dbg);
+		sbuf_printf(&sb, "entry_intr_info=%#lx entry_ctls=%#lx "
+		    "sec_ctls=%#lx exit_qual=%#lx\n",
+		    vmx_nested_refused.entry_intr_info,
+		    vmx_nested_refused.entry_ctls, vmx_nested_refused.sec_ctls,
+		    vmx_nested_refused.exit_qual);
+		sbuf_printf(&sb, "cr0=%#lx cr4=%#lx efer=%#lx rflags=%#lx "
+		    "rip=%#lx\n", vmx_nested_refused.cr0,
+		    vmx_nested_refused.cr4, vmx_nested_refused.efer,
+		    vmx_nested_refused.rflags, vmx_nested_refused.rip);
+		sbuf_printf(&sb, "cs sel=%#lx base=%#lx limit=%#lx ar=%#lx  "
+		    "ss ar=%#lx  tr sel=%#lx ar=%#lx\n",
+		    vmx_nested_refused.cs_sel, vmx_nested_refused.cs_base,
+		    vmx_nested_refused.cs_limit, vmx_nested_refused.cs_ar,
+		    vmx_nested_refused.ss_ar, vmx_nested_refused.tr_sel,
+		    vmx_nested_refused.tr_ar);
+		sbuf_printf(&sb, "link_ptr=%#lx\n",
+		    vmx_nested_refused.link_ptr);
+	}
+	error = sbuf_finish(&sb);
+	sbuf_delete(&sb);
+	if (error == 0 && req->newptr != NULL) {
+		/*
+		 * Any write re-arms the capture. Without this the record is
+		 * pinned for the life of the module, so a later session
+		 * debugging a different guest reads the first one's state and
+		 * has no way to tell.
+		 */
+		atomic_store_rel_int(&vmx_nested_refused.captured, 0);
+	}
+	return (error);
+}
+SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, refused_entry,
+    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_MPSAFE, NULL, 0,
+    vmx_nested_refused_sysctl, "A",
+    "vmcs02 state at the first L2 entry hardware refused; write to re-arm");
 
 /*
  * How often vmcs12 asked for a combination hardware refuses: an event to
@@ -542,6 +623,31 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	    PROCBASED2_VIRTUAL_INTERRUPT_DELIVERY |
 	    PROCBASED2_ENABLE_VPID);
 	val |= PROCBASED2_ENABLE_EPT;
+	/*
+	 * Run L2 as an unrestricted guest, whatever L1 is doing.
+	 *
+	 * These controls are copied from vmcs01, so vmcs02 inherited whether
+	 * L1 happened to have unrestricted guest enabled -- and bhyve turns it
+	 * on per-vCPU only while a guest needs it. L2's mode is not L1's: an
+	 * application processor begins in real mode with CR0.PE clear, which
+	 * without this control is not a state hardware will enter, and the
+	 * entry is refused with "invalid guest state" and no indication of
+	 * which check failed.
+	 *
+	 * That is the intermittent multi-vCPU failure. It needs no fixing on a
+	 * single-vCPU guest because the boot processor is already in protected
+	 * mode by the time L2 runs, and it comes and goes with more vCPUs
+	 * because it depends on catching an AP before its first mode switch.
+	 *
+	 * Gated on the capability the module probed at init. Nested support is
+	 * currently only advertised on hardware that has this control, so the
+	 * test always passes today -- but writing an unsupported secondary
+	 * control would make every L2 entry fail with invalid guest state,
+	 * which is precisely the fault being removed here, and that is too
+	 * sharp an edge to leave resting on another probe staying as it is.
+	 */
+	if (cap_unrestricted_guest)
+		val |= PROCBASED2_UNRESTRICTED_GUEST;
 	vmwrite(VMCS_SEC_PROC_BASED_CTLS, val);
 	vmwrite(VMCS_VPID, 0);
 
@@ -890,6 +996,46 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 	ns = vmx_nested_state(vcpu);
 	qual = vmcs_read(VMCS_EXIT_QUALIFICATION);
 	vmx_l2_exit_hist[reason & 0x7f]++;
+
+	/*
+	 * Hardware refused the state we built. vmcs02 is still current here,
+	 * so the offered values can be read straight back; take the first one
+	 * and leave it alone thereafter, so the record describes a single
+	 * coherent refusal rather than a blend of several.
+	 */
+	if (reason == VMX_REASON_INVALID_GUEST_STATE &&
+	    atomic_cmpset_int(&vmx_nested_refused.captured, 0, 1) != 0) {
+		vmx_nested_refused.vcpuid = vcpu->vcpuid;
+		strlcpy(vmx_nested_refused.vmname, vm_name(vcpu->vmx->vm),
+		    sizeof(vmx_nested_refused.vmname));
+		vmx_nested_refused.exit_qual = qual;
+		vmx_nested_refused.activity = vmcs_read(VMCS_GUEST_ACTIVITY);
+		vmx_nested_refused.intr_state =
+		    vmcs_read(VMCS_GUEST_INTERRUPTIBILITY);
+		vmx_nested_refused.pending_dbg =
+		    vmcs_read(VMCS_GUEST_PENDING_DBG_EXCEPTIONS);
+		vmx_nested_refused.entry_intr_info =
+		    vmcs_read(VMCS_ENTRY_INTR_INFO);
+		vmx_nested_refused.entry_ctls = vmcs_read(VMCS_ENTRY_CTLS);
+		vmx_nested_refused.sec_ctls =
+		    vmcs_read(VMCS_SEC_PROC_BASED_CTLS);
+		vmx_nested_refused.cr0 = vmcs_read(VMCS_GUEST_CR0);
+		vmx_nested_refused.cr4 = vmcs_read(VMCS_GUEST_CR4);
+		vmx_nested_refused.efer = vmcs_read(VMCS_GUEST_IA32_EFER);
+		vmx_nested_refused.rflags = vmcs_read(VMCS_GUEST_RFLAGS);
+		vmx_nested_refused.rip = vmcs_read(VMCS_GUEST_RIP);
+		vmx_nested_refused.cs_sel = vmcs_read(VMCS_GUEST_CS_SELECTOR);
+		vmx_nested_refused.cs_base = vmcs_read(VMCS_GUEST_CS_BASE);
+		vmx_nested_refused.cs_limit = vmcs_read(VMCS_GUEST_CS_LIMIT);
+		vmx_nested_refused.cs_ar =
+		    vmcs_read(VMCS_GUEST_CS_ACCESS_RIGHTS);
+		vmx_nested_refused.ss_ar =
+		    vmcs_read(VMCS_GUEST_SS_ACCESS_RIGHTS);
+		vmx_nested_refused.tr_sel = vmcs_read(VMCS_GUEST_TR_SELECTOR);
+		vmx_nested_refused.tr_ar =
+		    vmcs_read(VMCS_GUEST_TR_ACCESS_RIGHTS);
+		vmx_nested_refused.link_ptr = vmcs_read(VMCS_LINK_POINTER);
+	}
 
 	switch (reason) {
 	case EXIT_REASON_HLT:

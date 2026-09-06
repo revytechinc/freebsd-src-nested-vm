@@ -126,6 +126,8 @@ enum {
 	GUEST_MSR_NUM		/* must be the last enumeration */
 };
 
+extern int cap_unrestricted_guest;
+
 struct vmx_vcpu {
 	struct vmx	*vmx;
 	struct vcpu	*vcpu;
