@@ -1,9 +1,19 @@
 #!/bin/sh
 # Report what this particular machine can and cannot do, before you try.
 echo "host   : $(hostname -s)"
+echo "arch   : $(uname -m)"
 echo "cpu    : $(sysctl -n hw.model)"
 echo "cores  : $(sysctl -n hw.ncpu)   ram: $(( $(sysctl -n hw.physmem) / 1073741824 )) GB"
 echo "kernel : $(uname -r)  (osreldate $(sysctl -n kern.osreldate))"
+if [ "$(uname -m)" != "amd64" ]; then
+	echo
+	echo "This kit is amd64: the guests it boots are amd64 disk images, and"
+	echo "the path it boots them by is the amd64 one. Scripts 1 to 4 will not"
+	echo "run here, whatever the checks below say."
+	command -v bhyveload >/dev/null 2>&1 ||
+		echo "(bhyveload, which the demos use to load a guest, is not here.)"
+	echo
+fi
 if ! kldstat -q -m vmmdev 2>/dev/null && ! kldstat 2>/dev/null | grep -q vmm; then
 	echo "vmm    : not loaded  ->  doas kldload vmm"
 else
