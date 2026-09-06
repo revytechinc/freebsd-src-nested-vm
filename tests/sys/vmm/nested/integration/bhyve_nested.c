@@ -29,7 +29,9 @@
 /*
  * Wave 0 / Task 0d — nested-virt register-virtualization plan.
  *
- * Thin wrapper that exercises libvmmapi's VMMAPI_OPEN_CREATE_NESTED flag.
+ * Thin wrapper that creates a VM through libvmmapi and checks it can host a
+ * nested guest. There is no per-VM nested flag any more -- nesting is
+ * host-wide via hw.vmm.nested.enable -- so this exercises the default path.
  * The caller cleans up via `bhyvectl --vm=<name> --destroy`.
  */
 
@@ -79,10 +81,16 @@ main(int argc, char **argv)
 	}
 	vmname = argv[optind];
 
-	flags = VMMAPI_OPEN_CREATE | VMMAPI_OPEN_CREATE_NESTED;
+	/*
+	 * There is no per-VM nested opt-in any more: nesting is host-wide,
+	 * governed by hw.vmm.nested.enable, and a VM takes its state from
+	 * that switch when it is created. VMMAPI_OPEN_CREATE_NESTED was
+	 * removed with the -N flag it existed to carry.
+	 */
+	flags = VMMAPI_OPEN_CREATE;
 	if (verbose)
 		fprintf(stderr,
-		    "bhyve_nested: vm_openf(\"%s\", CREATE|NESTED)\n",
+		    "bhyve_nested: vm_openf(\"%s\", CREATE)\n",
 		    vmname);
 
 	ctx = vm_openf(vmname, flags);
@@ -97,7 +105,7 @@ main(int argc, char **argv)
 		return (1);
 	}
 
-	printf("bhyve_nested: opened '%s' with VMMAPI_OPEN_CREATE_NESTED\n",
+	printf("bhyve_nested: opened '%s'\n",
 	    vmname);
 	if (verbose)
 		printf("bhyve_nested: ctx=%p\n", (void *)ctx);

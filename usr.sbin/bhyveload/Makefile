@@ -6,7 +6,7 @@ PACKAGE=	bhyve
 LIBADD=	vmmapi
 
 CFLAGS+=-I${SRCTOP}/stand/userboot
-# In-tree vmmapi.h for VMMAPI_OPEN_CREATE_NESTED.
+# In-tree vmmapi.h, which may be ahead of the installed one.
 CFLAGS+=-I${SRCTOP}/lib/libvmmapi
 
 .include <bsd.prog.mk>

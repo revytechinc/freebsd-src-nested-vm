@@ -40,8 +40,17 @@ PACKAGE=	tests
 
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/fuzz
 
-ATF_TESTS_SH+=	fuzz_all
+# fuzz_all.c is the atf-c test kyua runs. fuzz_all.sh was ALSO declared as an
+# ATF test of the same name, so both resolved to one target -- and since the
+# wrapper looks for its harness at ${ATF_TESTS_DIR}/fuzz_all, it would have
+# found itself. Install the wrapper as a plain script instead: kyua runs the C
+# tests, and the wrapper stays available to run by hand.
 ATF_TESTS_C+=	fuzz_all
+${PACKAGE}FILES+=	fuzz_all.sh
+
+# fuzz_all.c calls vm_get_register/vm_set_capability, so it has to link
+# libvmmapi. Never noticed because this directory was not built.
+LIBADD+=	vmmapi pthread
 
 WARNS?=		6
 

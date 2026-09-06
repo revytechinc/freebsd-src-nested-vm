@@ -123,7 +123,9 @@ knob:
   runs.
 * There is **no per-VM opt-in any more**. `bhyve -N` and `bhyveload -N` are
   still accepted for backwards compatibility but are no-ops, as is the
-  `VMMCTL_CREATE_NESTED` / `VMMAPI_OPEN_CREATE_NESTED` flag.
+  `VMMCTL_CREATE_NESTED` ioctl bit, which the kernel still tolerates from an
+  older binary. The userland `VMMAPI_OPEN_CREATE_NESTED` constant was removed
+  along with the `-N` flag it existed to carry.
 * `vm->nested_enabled` still exists in `struct vm`, but it is now just a
   *latch* of the sysctl taken at VM-creation time. That keeps the per-vCPU
   nested-state allocation consistent for the life of a VM.
