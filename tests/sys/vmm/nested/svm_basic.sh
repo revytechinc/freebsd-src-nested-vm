@@ -17,11 +17,11 @@
 # VMRUN/VMRESUME loop.  This test exists to catch userland KBI
 # regressions for wave 1's VMMCTL_CREATE_NESTED addition.
 #
-# The userland-side constant VMMAPI_OPEN_CREATE_NESTED lives in
-# lib/libvmmapi/vmmapi.h and must remain combinable with
-# VMMAPI_OPEN_CREATE via vm_openf(3); a wave-3 test will exercise
-# the actual ioctl.  Until then, this smoke test guards the sysctl
-# surface that gates the nested-create path.
+# There is no per-VM nested opt-in any more: the userland constant
+# VMMAPI_OPEN_CREATE_NESTED was removed with the -N flag it existed to
+# carry, and nesting is host-wide via hw.vmm.nested.enable.  The kernel
+# still tolerates the old VMMCTL_CREATE_NESTED ioctl bit so an older
+# binary keeps working.  This smoke test guards the sysctl surface.
 #
 # Reference: KVM selftests at tools/testing/selftests/kvm/x86_64/svm_*
 # are DESIGN REFERENCE ONLY (GPL); this test is original BSD code.

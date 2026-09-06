@@ -19,25 +19,17 @@
 #   - runs abisnap.sh --self-check (always)
 #   - if the dump helper is built, also runs abisnap.sh --check
 
+
 PACKAGE=	tests
-
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/abisnap
-
 BINDIR=		${TESTSDIR}
 
+# abisnap.sh is the ATF test; ATF_TESTS_SH installs the script itself, so it
+# must not also be listed in FILES. The Makefile also used to declare
+# PROG=abisnap_dump from abisnap_dump.c, which does not exist in the tree --
+# invisible until this directory was wired into the build.
 ATF_TESTS_SH+=	abisnap
 
-${PACKAGE}FILES+=	abisnap.sh
 ${PACKAGE}FILES+=	golden_abisnap.txt
 
-# The L0 dump helper.  Built from sys/amd64/vmm/test/abisnap_dump.c
-# (added in a follow-up wave) and installed into the test dir so
-# the script can find it via $DUMP_BIN.
-PROG=		abisnap_dump
-MAN=
-SRCS+=		abisnap_dump.c
-DPADD+=		${LIBVMMAPI}
-LDADD+=		-lvmmapi
-WARNS?=		6
-
-.include <bsd.prog.mk>
+.include <bsd.test.mk>

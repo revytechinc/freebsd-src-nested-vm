@@ -1,10 +1,14 @@
+# This directory ships its preflight scripts as FILES, with
+# run_preflight_tests.sh as the driver, and declares no ATF test. It used to
+# declare ATF_TESTS_SH+= preflight_integrity, but preflight_integrity.sh is
+# not in the tree -- so kyua had nothing to run either way. The stale
+# reference only became visible once this directory was wired into the build.
 PACKAGE=	tests
 
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/hw/preflight
 
 BINDIR=		${TESTSDIR}
 
-ATF_TESTS_SH+=	preflight_integrity
 
 ${PACKAGE}FILES+=	preflight_unit_help.sh \
 			preflight_unit_classify.sh \
