@@ -465,7 +465,19 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	}
 
 	val = vmcs_read(VMCS_PRI_PROC_BASED_CTLS);
-	val &= ~(uint64_t)PROCBASED_USE_TPR_SHADOW;
+	/*
+	 * The window-exiting controls inherited here are vmcs01's, and vmcs01's
+	 * are L0's own: L0 arms them when it has an event pending for L1 while
+	 * L1 is not yet interruptible. They describe L1's interruptibility, not
+	 * L2's. Carried into vmcs02 they arm a window exit for a guest nobody
+	 * asked them for, and the resulting exit is indistinguishable from one
+	 * L1 requested -- reflecting it panics an L1 whose own bookkeeping has
+	 * no matching request. Drop them and take only what VMCS12 asks for
+	 * below; vmcs01 keeps its copy, so L0's request still fires the next
+	 * time L1 itself runs.
+	 */
+	val &= ~(uint64_t)(PROCBASED_USE_TPR_SHADOW |
+	    PROCBASED_INT_WINDOW_EXITING | PROCBASED_NMI_WINDOW_EXITING);
 	val |= PROCBASED_SECONDARY_CONTROLS;
 	/*
 	 * Propagate L1's interrupt/NMI-window-exiting request from VMCS12.
@@ -537,6 +549,8 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	}
 
 	vmx_l2_entries++;
+	/* Start L2's slice; the budget in vmx_nested_l1_starved() runs from here. */
+	ns->l2_slice_tsc = rdtsc();
 	ns->in_l2 = true;
 	/*
 	 * Mark this (L1) vcpu a nested host so vm_handle_hlt() bounds its idle
@@ -747,6 +761,65 @@ vmx_nested_carry_idtv(struct vmx_vcpu *vcpu)
 }
 
 /*
+ * Has L2 held the CPU for longer than its slice?
+ *
+ * vmcs02 arms the VMX-preemption timer to hand the CPU back to L1 about every
+ * millisecond, but that timer only counts down while L2 executes. Exits that L0
+ * services and resumes L2 from -- host external interrupts above all -- restart
+ * it, and they arrive far more often than the timer period, so it never reaches
+ * zero. L1 is then never scheduled: it cannot advance its device models, cannot
+ * run its block backend and cannot inject anything into L2, so L2 stalls with
+ * its own hypervisor starved underneath it. Measured on 8th-gen Intel: 2700
+ * external-interrupt exits a second against 8 timer exits in the guest's life.
+ *
+ * So enforce the same budget in software, where no exit can reset it.
+ */
+static bool
+vmx_nested_l1_starved(struct vmx_nested_state *ns)
+{
+	uint64_t budget, delta, f, now;
+
+	if (ns == NULL || ns->l2_slice_tsc == 0)
+		return (false);
+	f = tsc_freq ? tsc_freq : 2600000000UL;
+	budget = f / 1000;
+	now = rdtsc();
+	delta = now - ns->l2_slice_tsc;
+	/*
+	 * A vcpu migrated to a package whose TSC is not synchronised with the
+	 * one that latched the slice can read backwards, which in unsigned
+	 * arithmetic looks enormous. Treat an implausible delta as a bad sample
+	 * rather than a spent slice, and restart the slice here.
+	 */
+	if (delta > 1000 * budget) {
+		ns->l2_slice_tsc = now;
+		return (false);
+	}
+	return (delta >= budget);
+}
+
+/*
+ * Hand the CPU back to L1 with a synthetic external-interrupt exit, which L1
+ * answers by injecting whatever it has pending for L2 and resuming it.
+ */
+static void
+vmx_nested_yield_to_l1(struct vmx_vcpu *vcpu, struct vmx_nested_state *ns)
+{
+
+	vmx_nested_reflect_l2_exit(vcpu, EXIT_REASON_EXT_INTR, 0, 0);
+	/*
+	 * The exit is manufactured, so the interruption information vmcs12 has
+	 * just been given describes a host interrupt that is no business of
+	 * L1's. bhyve as L1 ignores the field, but a different guest hypervisor
+	 * may read it to identify a vector: leave it invalid, not stale.
+	 */
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_EXIT_INTR_INFO, 0);
+	vmcs12_write_field(vcpu->nvmcs12, VMCS_EXIT_INTR_ERRCODE, 0);
+	if (ns != NULL)
+		ns->l2_slice_tsc = rdtsc();
+}
+
+/*
  * Decide what to do with an L2 exit taken on vmcs02 (current VMCS).
  * Returns 1 to resume L2, 0 to reflect to L1 (done here) and resume L1.
  */
@@ -754,8 +827,10 @@ int
 vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
     struct vm_exit *vmexit)
 {
+	struct vmx_nested_state *ns;
 	uint64_t qual;
 
+	ns = vmx_nested_state(vcpu);
 	qual = vmcs_read(VMCS_EXIT_QUALIFICATION);
 	vmx_l2_exit_hist[reason & 0x7f]++;
 
@@ -781,13 +856,8 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 		vmx_nested_reflect_l2_exit(vcpu, EXIT_REASON_HLT, qual, 0);
 		return (0);
 	case EXIT_REASON_VMX_PREEMPT:
-		/*
-		 * L0's periodic yield fired. Give L1 a turn: reflect a spurious
-		 * external interrupt (invalid VMCS_EXIT_INTR_INFO), which L1
-		 * handles by injecting any pending L2 interrupts (its vlapic
-		 * timer tick) and resuming L2.
-		 */
-		vmx_nested_reflect_l2_exit(vcpu, EXIT_REASON_EXT_INTR, 0, 0);
+		/* L0's periodic yield fired: give L1 a turn. */
+		vmx_nested_yield_to_l1(vcpu, ns);
 		return (0);
 	case EXIT_REASON_EPT_FAULT:
 		/*
@@ -829,22 +899,50 @@ vmx_nested_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 		if ((intr_info & VMCS_INTR_VALID) != 0 &&
 		    (intr_info & VMCS_INTR_T_MASK) == VMCS_INTR_T_HWINTR)
 			vmx_trigger_hostintr(intr_info & 0xff);
+		if (vmx_nested_l1_starved(ns)) {
+			/* L2 has had its slice; let L1 run. */
+			vmx_nested_yield_to_l1(vcpu, ns);
+			return (0);
+		}
 		vmx_nested_carry_idtv(vcpu);	/* preserve in-flight L2 event */
 		return (1);
 	}
 	case EXIT_REASON_NMI_WINDOW:
-	case EXIT_REASON_INTR_WINDOW:
+	case EXIT_REASON_INTR_WINDOW: {
+		uint64_t v12ctls, want;
+
 		/*
-		 * L2 became interruptible and vmcs02 carried the window-exiting
-		 * control L1 requested (propagated from VMCS12 in
-		 * build_vmcs02). Reflect the window exit to L1 so its
+		 * L2 became interruptible. Reflect the window exit to L1 so its
 		 * hypervisor clears the control and injects the pending event
 		 * through VMCS12 ENTRY_INTR_INFO on the next entry. Handling it
 		 * at L0 (return 1) would swallow the one signal L1 uses to
-		 * inject, which is why L2 never received interrupts.
+		 * inject, which is why L2 received no interrupts.
+		 *
+		 * Reflect it only if L1 actually armed that window in VMCS12.
+		 * An exit from a control L1 never requested is not L1's to
+		 * handle: its window-clearing path asserts on bookkeeping that
+		 * recorded no such request, so reflecting one panics L1 -- a
+		 * guest-triggerable host crash, since L1 is a guest. Clear the
+		 * stray control out of vmcs02 and resume L2 instead.
 		 */
+		want = reason == EXIT_REASON_INTR_WINDOW ?
+		    PROCBASED_INT_WINDOW_EXITING : PROCBASED_NMI_WINDOW_EXITING;
+		v12ctls = 0;
+		if (vmcs12_read_field(vcpu->nvmcs12, VMCS_PRI_PROC_BASED_CTLS,
+		    &v12ctls) != 0) {
+			VMX_CTR1(vcpu, "nested: VMCS12 proc-based ctls "
+			    "unreadable at window exit %u", reason);
+			v12ctls = 0;
+		}
+		if ((v12ctls & want) == 0) {
+			vmcs_write(VMCS_PRI_PROC_BASED_CTLS,
+			    vmcs_read(VMCS_PRI_PROC_BASED_CTLS) & ~want);
+			vmx_nested_carry_idtv(vcpu);
+			return (1);
+		}
 		vmx_nested_reflect_l2_exit(vcpu, reason, qual, 0);
 		return (0);
+	}
 	default:
 		/* Everything else goes up to L1's hypervisor. */
 		vmx_nested_reflect_l2_exit(vcpu, reason, qual, 0);
