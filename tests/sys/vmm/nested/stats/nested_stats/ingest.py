@@ -63,6 +63,20 @@ def _num(text: Optional[str]) -> Optional[float]:
         return None
 
 
+def _int(text: Optional[str]) -> Optional[int]:
+    """int() that returns None instead of raising.
+
+    The `key=value` regex matches any non-space run, so `nested=yes` parses
+    happily and only fails at conversion.  A bare int() there would abort the
+    whole ingest on one malformed line, which is exactly the behaviour this
+    module promises not to have.
+    """
+    try:
+        return int(text)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 class Parser:
     """Base class.  `matches` decides on the filename; `parse` yields runs."""
 
@@ -108,7 +122,8 @@ class CoreCeiling(Parser):
                 vmm=kv["vmm"],
                 suite=self.suite,
                 outcome=_OUTCOMES.get(kv["result"].upper(), "FAIL"),
-                dims={"vcpus": int(kv["vcpus"])} if kv.get("vcpus", "").isdigit() else {},
+                dims=({"vcpus": _int(kv.get("vcpus"))}
+                      if _int(kv.get("vcpus")) is not None else {}),
                 measurements=(
                     [{"metric": "boot_secs", "value_num": secs, "unit": "s"}]
                     if secs is not None else []
@@ -141,8 +156,9 @@ class RepeatSweep(Parser):
                 continue
             dims = {"variant": variant}
             for k in ("run", "vcpus", "iter"):
-                if kv.get(k, "").isdigit():
-                    dims[k] = int(kv[k])
+                v = _int(kv.get(k))
+                if v is not None:
+                    dims[k] = v
             yield ParsedRun(
                 ts_utc=None,
                 host=None,
@@ -179,11 +195,19 @@ class PerfAB(Parser):
             if "nested" not in kv:
                 yield ParsedRun(_error=f"no nested=: {line!r}", line=n)
                 continue
-            dims = {"nested": int(kv["nested"])}
+            nested = _int(kv["nested"])
+            if nested is None:
+                yield ParsedRun(_error=f"nested= is not a number: {line!r}", line=n)
+                continue
+            dims = {"nested": nested}
             meas = []
             if "block" in kv:
-                dims["block"] = int(kv["block"])
-                boots = int(kv.get("boots", "0") or 0)
+                block = _int(kv["block"])
+                if block is None:
+                    yield ParsedRun(_error=f"block= is not a number: {line!r}", line=n)
+                    continue
+                dims["block"] = block
+                boots = _int(kv.get("boots")) or 0
                 total = _num(kv.get("total_secs"))
                 if total is not None:
                     meas.append({"metric": "block_total_secs",
@@ -194,7 +218,11 @@ class PerfAB(Parser):
                                      "value_num": total / boots, "unit": "s",
                                      "notes": "derived: total_secs / boots"})
             elif "iter" in kv:
-                dims["iter"] = int(kv["iter"])
+                it = _int(kv["iter"])
+                if it is None:
+                    yield ParsedRun(_error=f"iter= is not a number: {line!r}", line=n)
+                    continue
+                dims["iter"] = it
                 bs = _num(kv.get("boot_secs"))
                 if bs is not None:
                     meas.append({"metric": "boot_secs", "value_num": bs, "unit": "s",
@@ -359,7 +387,15 @@ def ingest_file(
 
     host = host or _host_from_name(os.path.basename(path))
 
-    for rec in parser.parse(path, lines):
+    try:
+        parsed = list(parser.parse(path, lines))
+    except Exception as exc:
+        # A parser is not permitted to take the batch down with it.
+        res["errors"].append("%s raised %s: %s"
+                             % (type(parser).__name__, type(exc).__name__, exc))
+        return res
+
+    for rec in parsed:
         if rec.get("_error"):
             res["errors"].append("line %s: %s" % (rec.get("line"), rec["_error"]))
             continue
@@ -425,6 +461,14 @@ def _host_from_name(basename: str) -> Optional[str]:
 
 
 def _infer_build(writer: Writer, host: str, ts: str) -> Optional[tuple[str, str]]:
+    """The build this machine was last recorded running at or before `ts`.
+
+    Strictly *earlier*, never later.  Falling back to a newer build when no
+    earlier one is known would file an old measurement under a vmm.ko the
+    machine was demonstrably not running when the measurement was taken, and
+    every chart that groups by build would then quietly mix two eras.  There
+    is no honest guess here, so the caller refuses the line instead.
+    """
     row = writer.conn.execute(
         "SELECT b.vmm_sha256, r.ts_utc FROM run r "
         "JOIN host h ON h.host_id = r.host_id "
@@ -435,13 +479,4 @@ def _infer_build(writer: Writer, host: str, ts: str) -> Optional[tuple[str, str]
     ).fetchone()
     if row:
         return row["vmm_sha256"], row["ts_utc"]
-    row = writer.conn.execute(
-        "SELECT b.vmm_sha256, r.ts_utc FROM run r "
-        "JOIN host h ON h.host_id = r.host_id "
-        "JOIN build b ON b.build_id = r.build_id "
-        "WHERE h.name = ? ORDER BY r.ts_utc ASC LIMIT 1",
-        (host,),
-    ).fetchone()
-    if row:
-        return row["vmm_sha256"], row["ts_utc"] + " (later, not earlier)"
     return None

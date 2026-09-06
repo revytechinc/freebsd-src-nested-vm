@@ -89,21 +89,26 @@ def classify(path: str, kind: str, hint: str, sha256: Optional[str],
     if kind == "file" and lower.endswith(".ko"):
         sha = (sha256 or "").strip().lower()
         rec = _match_build(sha, known_builds)
-        if rec is None:
-            published = known_builds.get("__published__")
+        if rec is not None and rec["status"] in ("published", "candidate"):
             return Classified(
-                classification="kernel-module", safe_to_remove=1,
-                sha256=sha or None,
-                superseded_by=published["build_id"] if published else None,
-                reason="its sha256 matches no published or candidate build, so "
-                       "it is an experiment that has served its purpose"
-                       + (" (superseded by %s)" % published["vmm_sha256"][:16]
-                          if published else ""))
+                classification="kernel-module", safe_to_remove=0,
+                sha256=sha, build_id=rec["build_id"],
+                reason="sha256 matches the %s build %s; keep it"
+                       % (rec["status"], rec["vmm_sha256"][:16]))
+        published = known_builds.get("__published__")
+        if rec is not None:
+            why = ("its sha256 matches the %s build %s, which is neither "
+                   "published nor a candidate" % (rec["status"],
+                                                  rec["vmm_sha256"][:16]))
+        else:
+            why = ("its sha256 matches no published or candidate build, so it "
+                   "is an experiment that has served its purpose")
         return Classified(
-            classification="kernel-module", safe_to_remove=0,
-            sha256=sha, build_id=rec["build_id"],
-            reason="sha256 matches the %s build %s; keep it"
-                   % (rec["status"], rec["vmm_sha256"][:16]))
+            classification="kernel-module", safe_to_remove=1,
+            sha256=sha or None, build_id=rec["build_id"] if rec else None,
+            superseded_by=published["build_id"] if published else None,
+            reason=why + (" (superseded by %s)" % published["vmm_sha256"][:16]
+                          if published else ""))
 
     # 3. Crash residue.
     if kind == "file" and _CORE_DUMP.search(base):
@@ -155,12 +160,22 @@ def classify(path: str, kind: str, hint: str, sha256: Optional[str],
 
 
 def _match_build(sha: str, known: dict) -> Optional[dict]:
+    """The build a module's hash belongs to, or None.
+
+    Deciding what that means is the caller's job.  A prefix hit is only
+    accepted when one sha is genuinely a prefix of the other, so a
+    16-character coincidence cannot promote a stray module to "published".
+    """
     if not sha:
         return None
-    rec = known.get(sha) or known.get(sha[:16])
-    if rec and rec.get("status") in ("published", "candidate"):
-        return rec
-    return rec if rec else None
+    rec = known.get(sha)
+    if rec is None:
+        rec = known.get(sha[:16])
+        if rec is not None:
+            stored = rec["vmm_sha256"]
+            if not (stored.startswith(sha) or sha.startswith(stored)):
+                return None
+    return rec
 
 
 def known_builds(writer: Writer) -> dict:

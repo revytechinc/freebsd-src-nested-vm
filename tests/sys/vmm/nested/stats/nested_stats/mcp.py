@@ -285,10 +285,57 @@ class Server:
             return None
         return {"jsonrpc": "2.0", "id": mid, "result": result}
 
+    #: Largest single JSON-RPC message accepted.  `load_inventory` carries a
+    #: whole machine's scan inline, so the cap has to be generous -- but
+    #: unbounded is not generous, it is a way to be killed by one bad client.
+    MAX_LINE = 16 * 1024 * 1024
+
+    def _lines(self, stdin):
+        """Yield whole lines, or None for one that ran past MAX_LINE.
+
+        An oversized line is drained and discarded rather than accumulated, so
+        the session survives it and reports a parse error instead of dying.
+        """
+        buf = ""
+        overlong = False
+        while True:
+            chunk = stdin.read(65536)
+            if not chunk:
+                break
+            buf += chunk
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                if overlong:
+                    overlong = False
+                    yield None
+                elif len(line) > self.MAX_LINE:
+                    # A complete but oversized line is rejected too, not just
+                    # one that outran the buffer: whether the terminator has
+                    # arrived yet is an accident of read timing, and a cap
+                    # that depends on that is not a cap.
+                    yield None
+                else:
+                    yield line
+            if len(buf) > self.MAX_LINE:
+                buf = ""
+                overlong = True
+        if buf and not overlong:
+            yield buf
+        elif overlong:
+            yield None
+
     def serve(self, stdin=None, stdout=None) -> int:
         stdin = stdin or sys.stdin
         stdout = stdout or sys.stdout
-        for line in stdin:
+        for line in self._lines(stdin):
+            if line is None:
+                stdout.write(json.dumps({
+                    "jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32700,
+                              "message": "message exceeded %d bytes"
+                                         % self.MAX_LINE}}) + "\n")
+                stdout.flush()
+                continue
             line = line.strip()
             if not line:
                 continue
