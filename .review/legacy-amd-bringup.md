@@ -36,7 +36,7 @@ Order matters; see the `bectl-safe-deploy` skill.
    package-owned. A hand-placed copy is how a demo host ended up with a file
    nothing owned.
 5. `kldload vmm`, then confirm `hw.vmm.nested.enable=1` and
-   `hw.vmm.nested.svm=1`. A `0` means the preflight gate refused the CPU —
+   `hw.vmm.nested.svm` is non-zero. A `0` means the preflight gate refused the CPU —
    which is the answer from step 1, arriving late.
 
 ## 3. Images, then the run
