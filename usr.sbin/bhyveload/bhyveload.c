@@ -750,7 +750,7 @@ usage(void)
 {
 
 	fprintf(stderr,
-	    "usage: %s [-NS][-c <console-device>] [-d <disk-path>] [-e <name=value>]\n"
+	    "usage: %s [-S][-c <console-device>] [-d <disk-path>] [-e <name=value>]\n"
 	    "       %*s [-h <host-path>] [-m memsize[K|k|M|m|G|g|T|t]] <vmname>\n",
 	    progname,
 	    (int)strlen(progname), "");
@@ -804,7 +804,7 @@ main(int argc, char** argv)
 {
 	void (*func)(struct loader_callbacks *, void *, int, int);
 	uint64_t mem_size;
-	int opt, error, memflags, need_reinit, openflags;
+	int opt, error, memflags, need_reinit;
 
 	progname = basename(argv[0]);
 
@@ -814,8 +814,7 @@ main(int argc, char** argv)
 	consin_fd = STDIN_FILENO;
 	consout_fd = STDOUT_FILENO;
 
-	openflags = VMMAPI_OPEN_CREATE;
-	while ((opt = getopt(argc, argv, "CNSc:d:e:h:l:m:")) != -1) {
+	while ((opt = getopt(argc, argv, "CSc:d:e:h:l:m:")) != -1) {
 		switch (opt) {
 		case 'c':
 			error = altcons_open(optarg);
@@ -859,17 +858,6 @@ main(int argc, char** argv)
 		case 'S':
 			memflags |= VM_MEM_F_WIRED;
 			break;
-		case 'N':
-			/*
-			 * Deprecated no-op.  Nested virtualization is on by
-			 * default and is controlled host-wide by the
-			 * hw.vmm.nested.enable sysctl; there is no per-VM
-			 * opt-in any more.  Still accepted (and still passed
-			 * down as VMMCTL_CREATE_NESTED, which the kernel
-			 * ignores) so that existing scripts keep working.
-			 */
-			openflags |= VMMAPI_OPEN_CREATE_NESTED;
-			break;
 		case '?':
 			usage();
 		}
@@ -884,20 +872,15 @@ main(int argc, char** argv)
 	vmname = argv[0];
 
 	/*
-	 * Reuse an existing VM (it will be reinitialized below), otherwise
-	 * create it with the requested creation flags.
+	 * Create the VM, or reinitialize it if it already exists.  Both in one
+	 * call: vm_openf() reinitializes exactly when it did not create, so a
+	 * VM that appears between a separate probe and create is still reset
+	 * before the loader writes a kernel into it.
 	 */
 	need_reinit = 0;
-	ctx = vm_open(vmname);
-	if (ctx != NULL) {
-		need_reinit = 1;
-	} else {
-		if (errno != ENOENT)
-			err(1, "vm_open");
-		ctx = vm_openf(vmname, openflags);
-		if (ctx == NULL)
-			err(1, "vm_create");
-	}
+	ctx = vm_openf(vmname, VMMAPI_OPEN_CREATE | VMMAPI_OPEN_REINIT);
+	if (ctx == NULL)
+		err(1, "vm_openf: %s", vmname);
 
 	/*
 	 * If we weren't given an explicit loader to use, we need to support the
