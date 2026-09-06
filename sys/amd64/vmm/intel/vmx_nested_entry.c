@@ -111,6 +111,39 @@ SYSCTL_PROC(_hw_vmm_nested, OID_AUTO, l2stats,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
     vmx_l2_stats_sysctl, "A", "L2 exit-reason histogram and inject counters");
 
+/*
+ * Why an L2 entry was refused.
+ *
+ * L1 sees "VM-entry failure due to invalid guest state" for two quite
+ * different reasons: hardware rejected vmcs02, or L0 never got as far as
+ * asking hardware and synthesized that exit itself. They are indistinguishable
+ * from inside the guest, which sent an investigation of an intermittent
+ * multi-vCPU failure looking at guest-state consistency for hours when the
+ * entry may never have been attempted. Count the synthetic paths so the next
+ * question is answered by reading a sysctl rather than by inference.
+ */
+u_long vmx_nested_entryfail_nol2;	/* L2 execution not enabled */
+u_long vmx_nested_entryfail_build;	/* vmcs02 build failed */
+u_long vmx_nested_entryfail_ept02;	/* ...because the EPT shadow would not init */
+SYSCTL_ULONG(_hw_vmm_nested, OID_AUTO, entryfail_nol2, CTLFLAG_RD,
+    &vmx_nested_entryfail_nol2, 0, "L2 entries refused: L2 execution disabled");
+SYSCTL_ULONG(_hw_vmm_nested, OID_AUTO, entryfail_build, CTLFLAG_RD,
+    &vmx_nested_entryfail_build, 0,
+    "L2 entries refused: vmcs02 build failed (total, any reason)");
+SYSCTL_ULONG(_hw_vmm_nested, OID_AUTO, entryfail_ept02, CTLFLAG_RD,
+    &vmx_nested_entryfail_ept02, 0,
+    "of entryfail_build, those that failed on EPT shadow init");
+
+/*
+ * How often vmcs12 asked for a combination hardware refuses: an event to
+ * inject while the guest is not in the active state. See the increment site
+ * for why this is counted rather than corrected.
+ */
+u_long vmx_nested_inject_nonactive;
+SYSCTL_ULONG(_hw_vmm_nested, OID_AUTO, inject_nonactive, CTLFLAG_RD,
+    &vmx_nested_inject_nonactive, 0,
+    "L2 entries where vmcs12 combined a pending injection with a non-active guest");
+
 
 /* Host-state fields copied verbatim vmcs01 -> vmcs02. */
 static const uint32_t vmcs02_host_fields[] = {
@@ -313,11 +346,14 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	uint64_t ctrlv[nitems(vmcs02_ctrl_fields)];
 	uint64_t val, cr0, cr4, tsc01, v12ctls;
 	unsigned i;
+	bool injecting;
 
 	ns = vmx_nested_state(vcpu);
 	v12 = vcpu->nvmcs12;
-	if (ns->ept02 == NULL && vmx_nested_ept02_init(vcpu) != 0)
+	if (ns->ept02 == NULL && vmx_nested_ept02_init(vcpu) != 0) {
+		atomic_add_long(&vmx_nested_entryfail_ept02, 1);
 		return (-1);
+	}
 	if (ns->vmcs02 == NULL) {
 		ns->vmcs02 = malloc_aligned(sizeof(struct vmcs), PAGE_SIZE,
 		    M_VMX_NESTED, M_WAITOK | M_ZERO);
@@ -534,8 +570,10 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 		vmwrite(VMCS_TSC_OFFSET, tsc01 + val);
 
 	/* Event L1 queued for injection into L2, if any. */
+	injecting = false;
 	if (vmcs12_read_field(v12, VMCS_ENTRY_INTR_INFO, &val) == 0 &&
 	    (val & VMCS_INTR_VALID) != 0) {
+		injecting = true;
 		vmx_l2_injects++;
 		vmx_l2_injvec[val & 0xff]++;
 		vmwrite(VMCS_ENTRY_INTR_INFO, val);
@@ -547,6 +585,25 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	} else {
 		vmwrite(VMCS_ENTRY_INTR_INFO, 0);
 	}
+
+	/*
+	 * Watch for a combination hardware refuses: an event to inject while
+	 * the guest is not in the active state. L1 could produce it while
+	 * starting an application processor -- leaving the AP halted or
+	 * waiting for its startup IPI and queueing the event that wakes it --
+	 * and it was the leading explanation for a nested guest with three or
+	 * more vCPUs failing to enter perhaps four times in ten on Intel.
+	 *
+	 * It is not the explanation. Reconciling the state was written,
+	 * measured across failing runs, and this counter never left zero, so
+	 * the reconciliation was removed rather than shipped as a fix for
+	 * something it does not fix. The counter stays: it costs an increment
+	 * on a path nothing currently takes, and it is what would tell us the
+	 * day a different L1 does produce the combination.
+	 */
+	if (injecting &&
+	    vmcs12_read_field(v12, VMCS_GUEST_ACTIVITY, &val) == 0 && val != 0)
+		atomic_add_long(&vmx_nested_inject_nonactive, 1);
 
 	vmx_l2_entries++;
 	/* Start L2's slice; the budget in vmx_nested_l1_starved() runs from here. */

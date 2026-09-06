@@ -1,7 +1,7 @@
 Nested virtualization - hands-on
 ================================
 
-Five scripts. Nothing here is locked down; this is your own account, so read
+Six scripts. Nothing here is locked down; this is your own account, so read
 or change anything you like.
 
   0-what-can-this-host-do.sh      what this machine is, and whether it is ready
@@ -10,6 +10,8 @@ or change anything you like.
   3-run-nested-demo-all-cores.sh  demo 1, but every guest gets every core
   4-find-the-core-ceiling.sh      demo 1 at 1, 2, 3 ... cores, to find where
                                   it stops working (long; hours on a big host)
+  5-many-nested-at-once.sh        several stacks side by side, each a guest
+                                  booting a guest inside itself
 
 Demo 1 answers "does it work" and gets out of the way: it boots a guest,
 that guest boots a guest inside itself, and the inner one prints
@@ -43,6 +45,20 @@ rather than after - so if a wide guest takes the machine down, the last line of
 the log names the width that did it. Start it again after the reboot and it
 picks up where it left off, marks that width HOST-PANIC, and stops rather than
 proving the same thing twice.
+
+Scripts 1 to 4 all go DOWN — one guest, inside one guest. Script 5 goes
+ACROSS: it starts several of those stacks at the same time. That is a
+different question, and it fails differently. Depth exercises the address
+translation and the exit reflection; width exercises everything shared
+between vCPU threads on the host, which is where contention shows up.
+
+    sh 5-many-nested-at-once.sh           four stacks
+    sh 5-many-nested-at-once.sh -n 8      eight
+    sh 5-many-nested-at-once.sh -n auto   as many as this host has room for
+
+It works out what the machine can hold — memory, disk for each private image
+copy, cores — and refuses to start more than that. A host driven into swap
+measures the swap device, not the hypervisor.
 
 Any width you like, on either demo:
 
