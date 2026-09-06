@@ -1,0 +1,101 @@
+#!/bin/sh
+
+# Open with the shared banner: it greets the room and states, every single
+# time, that this is new unaudited kernel code.
+/usr/local/libexec/cloudbsd-demo/demo-banner || true
+#
+# run-stepthrough -- privileged launcher for the CloudBSD nested-virtualization
+#                    STEP-THROUGH ("matryoshka") demo.
+#
+# Boots Layer 1 with its console on the caller's terminal.  Each run gets its
+# own private copy of the Layer-1 disk, so the demo is repeatable: whatever the
+# presenter does inside the guest is discarded when it powers off.
+#
+# Installed root:wheel 0755 and invoked by the demo account through a doas(1)
+# rule that permits ONLY this exact path.  The only argument accepted is a vCPU
+# count, re-parsed here rather than forwarded, and the environment is rebuilt
+# with env -i -- see run-auto-demo for the rationale.
+#
+set -u
+umask 022
+
+SELFDIR=/usr/local/libexec/cloudbsd-demo
+BOOT="${SELFDIR}/stepthrough-boot.sh"
+MASTER=/usr/local/share/cloudbsd-demo/stepthrough/images/layer1.raw
+RUNDIR=/var/db/cloudbsd-demo/run
+RUN="${RUNDIR}/stepthrough-l1-$$.raw"
+VMNAME="cloudbsd-demo-l1-$$"
+BHYVECTL=/usr/sbin/bhyvectl
+
+# vCPUs per layer.  Asking for more than one is asking for the nested-SMP path
+# on purpose, so an explicit -c also lifts the driver's safety cap; the driver
+# still prints what it is doing before it does it.
+CORES=1
+ALLOW_SMP=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-c|--cpus)
+		[ $# -ge 2 ] || { echo "run-stepthrough: -c needs a value" >&2; exit 1; }
+		CORES=$2; ALLOW_SMP=1; shift ;;
+	--all-cores)
+		CORES=all; ALLOW_SMP=1 ;;
+	*)
+		echo "run-stepthrough: usage: run-stepthrough [-c N|all]" >&2; exit 1 ;;
+	esac
+	shift
+done
+case "${CORES}" in
+all)		CORES=$(sysctl -n hw.ncpu) ;;
+''|*[!0-9]*)	echo "run-stepthrough: -c takes a number or \"all\"" >&2; exit 1 ;;
+esac
+[ "${CORES}" -ge 1 ] 2>/dev/null || { echo "run-stepthrough: -c must be >= 1" >&2; exit 1; }
+
+# Layer 1 gets half the host's RAM, capped at 12 GB.  The previous flat 12 GB
+# asked for most of a 15 GB machine and left nothing for the layers below it.
+MEMGB=$(( $(sysctl -n hw.physmem) / 1073741824 / 2 ))
+[ "${MEMGB}" -gt 12 ] && MEMGB=12
+[ "${MEMGB}" -lt 2 ] && MEMGB=2
+MEM="${MEMGB}G"
+
+. "${SELFDIR}/watchdog-common"
+
+TERM_IN=${TERM:-xterm}
+case "${TERM_IN}" in
+	*[!A-Za-z0-9._-]*) TERM_IN=xterm ;;
+esac
+
+[ -x "${BOOT}" ]   || { echo "run-stepthrough: missing driver ${BOOT}" >&2; exit 1; }
+[ -f "${MASTER}" ] || { echo "run-stepthrough: missing Layer-1 image ${MASTER}" >&2; exit 1; }
+
+mkdir -p "${RUNDIR}" || exit 1
+
+teardown() {
+	"${BHYVECTL}" --vm="${VMNAME}" --destroy >/dev/null 2>&1 || true
+	rm -f "${RUN}" 2>/dev/null || true
+}
+trap teardown EXIT INT TERM HUP
+
+printf '\nPreparing a fresh Layer-1 disk (private copy, so every run starts clean)...\n'
+if ! cp "${MASTER}" "${RUN}"; then
+	echo "run-stepthrough: could not stage the Layer-1 disk in ${RUNDIR}" >&2
+	exit 1
+fi
+printf 'Ready.\n'
+
+WDPID=$(start_watchdog "$$" "${VMNAME}")
+
+# Foreground on purpose: the guest console must inherit this terminal's stdin.
+/usr/bin/env -i \
+	PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin \
+	HOME=/root \
+	TERM="${TERM_IN}" \
+	IMG="${RUN}" \
+	VM="${VMNAME}" \
+	MEM="${MEM}" \
+	CORES="${CORES}" \
+	ALLOW_SMP="${ALLOW_SMP}" \
+	/bin/sh "${BOOT}"
+rc=$?
+
+kill "${WDPID}" >/dev/null 2>&1 || true
+exit "${rc}"

@@ -1,0 +1,45 @@
+#!/bin/sh
+#
+# demo-banner — the greeting every nested-virt demo opens with.
+#
+# Colour only when stdout is a terminal that can show it: piped into a log or
+# run under a dumb terminal this degrades to plain text rather than spraying
+# escape sequences into the capture.
+#
+# The warning is not decoration. This is new, unaudited hypervisor code and the
+# banner says so every single time, on stage or otherwise.
+
+W=62                                   # inner width of the box
+
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM}" != dumb ]; then
+	E=$(printf '\033')
+	B="${E}[1m"; D="${E}[0m"
+	BLU="${E}[38;5;39m"; ORG="${E}[38;5;208m"
+	RED="${E}[38;5;203m"; GRY="${E}[38;5;245m"; WHT="${E}[38;5;231m"
+else
+	B=''; D=''; BLU=''; ORG=''; RED=''; GRY=''; WHT=''
+fi
+
+# One box row: pad the visible text to the inner width, then colour it, so the
+# escape sequences never count toward the alignment. Keep the row text ASCII --
+# printf pads by bytes, so a multi-byte character silently eats a column.
+row() {
+	_c=$1; shift
+	printf '%s│%s%s%-*s%s%s│%s\n' "${BLU}" "${D}" "${_c}" "${W}" " $*" "${D}" "${BLU}" "${D}"
+}
+rule() { printf '%s%s%s\n' "${BLU}" "$1" "${D}"; }
+
+echo
+rule "┌$(printf '─%.0s' $(seq 1 ${W}))┐"
+row  "${B}${WHT}" "bhyve  --  NESTED VIRTUALIZATION"
+row  "${GRY}"     "a guest that is itself a working hypervisor"
+row  ""           ""
+row  "${B}${ORG}" "hello, bhyvecon"
+row  ""           ""
+row  "${GRY}"     "L0 host  ->  L1 guest  ->  L2 guest inside the guest"
+row  "${GRY}"     "one vmm.ko  --  Intel VT-x and AMD-V alike"
+row  ""           ""
+row  "${B}${RED}" "EXPERIMENTAL - new, unaudited kernel code."
+row  "${RED}"     "Not for production equipment."
+rule "└$(printf '─%.0s' $(seq 1 ${W}))┘"
+echo
