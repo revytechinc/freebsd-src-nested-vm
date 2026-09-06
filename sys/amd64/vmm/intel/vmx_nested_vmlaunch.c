@@ -87,9 +87,14 @@ vmx_nested_vmentry(struct vmx_vcpu *vcpu, bool launch)
 			return (1);	/* in_l2 set; next vmx_run runs L2 */
 		}
 		VMX_CTR0(vcpu, "nested entry: vmcs02 build failed");
+		atomic_add_long(&vmx_nested_entryfail_build, 1);
+		VMX_CTR1(vcpu, "nested %s: vmcs02 build failed, reporting "
+		    "entry failure", launch ? "VMLAUNCH" : "VMRESUME");
+	} else {
+		atomic_add_long(&vmx_nested_entryfail_nol2, 1);
+		VMX_CTR1(vcpu, "nested %s: no L2 support, reporting entry "
+		    "failure", launch ? "VMLAUNCH" : "VMRESUME");
 	}
-	VMX_CTR1(vcpu, "nested %s: no L2 support, reporting entry failure",
-	    launch ? "VMLAUNCH" : "VMRESUME");
 	/*
 	 * This is a synthetic VM-entry-failure exit, not a reflected L2 exit,
 	 * so there is no vmcs02 exit information to copy. Present clean
