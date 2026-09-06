@@ -40,3 +40,6 @@ tags
 .ccls-cache
 sys/*/compile
 /src.conf
+
+# Internal operational handoff — fleet topology, host roles, paths. Never publish.
+.review/HANDOFF.md
