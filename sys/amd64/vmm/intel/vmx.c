@@ -175,6 +175,14 @@ vmx_nested_active(struct vmx *vmx)
 static uint32_t pinbased_ctls, procbased_ctls, procbased_ctls2;
 static uint32_t exit_ctls, entry_ctls;
 
+/*
+ * Whether this part can save the VMX-preemption timer's residual on VM exit.
+ * Not one of the cap_* knobs below -- those are guest-visible capabilities with
+ * a sysctl each; this one is asked by the nested path so L2's slice survives
+ * the exits L0 services on its behalf. See vmx_nested_build_vmcs02().
+ */
+int	vmx_cap_save_preempt_timer;
+
 uint64_t vmx_cr0_ones_mask, vmx_cr0_zeros_mask;
 SYSCTL_ULONG(_hw_vmm_vmx, OID_AUTO, cr0_ones_mask, CTLFLAG_RD,
 	     &vmx_cr0_ones_mask, 0, NULL);
@@ -840,6 +848,11 @@ vmx_modinit(int ipinum)
 					 MSR_VMX_TRUE_PROCBASED_CTLS,
 					 PROCBASED_PAUSE_EXITING, 0,
 					 &tmp) == 0);
+
+	vmx_cap_save_preempt_timer = (vmx_set_ctlreg(MSR_VMX_EXIT_CTLS,
+					MSR_VMX_TRUE_EXIT_CTLS,
+					VM_EXIT_SAVE_PREEMPTION_TIMER, 0,
+					&tmp) == 0);
 
 	cap_wbinvd_exit = (vmx_set_ctlreg(MSR_VMX_PROCBASED_CTLS2,
 					MSR_VMX_PROCBASED_CTLS2,

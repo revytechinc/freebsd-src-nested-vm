@@ -566,11 +566,36 @@ vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
 	 * L2's pending interrupts. Without this, once L2's memory is mapped it
 	 * spins in a wait loop that never exits, L1 never runs, and the timer
 	 * tick is never delivered (a nested device-emulation livelock).
-	 * "save VMX-preemption timer value" is cleared so the field re-arms to
-	 * the same value on every entry. Aim for roughly 1 ms.
+	 * Aim for roughly 1 ms.
+	 *
+	 * The timer decrements only while L2 executes, so on its own it bounds
+	 * L2's execution, not the wall-clock latency L1's device models care
+	 * about. Where the part can save the residual on exit, set that control
+	 * so the budget survives the exits L0 services on L2's behalf instead
+	 * of restarting on every entry -- which is what stopped it firing at
+	 * all, 8 times in the life of a guest against 2700 exits a second. That
+	 * bound then holds on every path that resumes L2, including any added
+	 * later, which the wall-clock check in vmx_nested_l1_starved() cannot
+	 * promise because it is consulted only where someone remembered to.
+	 *
+	 * The two are kept together on purpose: hardware bounds how long L2
+	 * runs, the wall clock bounds how long L1 waits. Neither measures the
+	 * other's quantity.
+	 *
+	 * With the control set, hardware overwrites the field with the residual
+	 * on each exit, and L0's deferred-EPT path re-enters L2 without
+	 * rebuilding vmcs02, so it runs on what is left rather than a fresh
+	 * millisecond. That is deliberate: re-arming there would hand L2 a full
+	 * slice per EPT fault and an EPT-heavy phase would never yield. A
+	 * residual that reaches zero costs one immediate timer exit, which
+	 * reflects to L1 and rebuilds -- a single extra exit, not a storm.
 	 */
-	vmwrite(VMCS_EXIT_CTLS,
-	    vmcs_read(VMCS_EXIT_CTLS) & ~(uint64_t)VM_EXIT_SAVE_PREEMPTION_TIMER);
+	val = vmcs_read(VMCS_EXIT_CTLS);
+	if (vmx_cap_save_preempt_timer)
+		val |= VM_EXIT_SAVE_PREEMPTION_TIMER;
+	else
+		val &= ~(uint64_t)VM_EXIT_SAVE_PREEMPTION_TIMER;
+	vmwrite(VMCS_EXIT_CTLS, val);
 	{
 		uint64_t misc = rdmsr(0x485);	/* IA32_VMX_MISC */
 		uint32_t shift = (uint32_t)(misc & 0x1f);
@@ -978,6 +1003,15 @@ vmx_nested_yield_to_l1(struct vmx_vcpu *vcpu, struct vmx_nested_state *ns)
 	 */
 	vmcs12_write_field(vcpu->nvmcs12, VMCS_EXIT_INTR_INFO, 0);
 	vmcs12_write_field(vcpu->nvmcs12, VMCS_EXIT_INTR_ERRCODE, 0);
+	/*
+	 * Restart the slice here as well as at the next vmcs02 build. Today
+	 * that is belt and braces -- L1 cannot re-enter L2 without rebuilding,
+	 * since both VMLAUNCH and VMRESUME go through
+	 * vmx_nested_build_vmcs02() -- but L0's own deferred-EPT path already
+	 * re-enters L2 without a rebuild, and a start time left stale would put
+	 * every later host interrupt past the budget, forcing a hand-back on
+	 * each one instead of at the intended rate.
+	 */
 	if (ns != NULL)
 		ns->l2_slice_tsc = rdtsc();
 }
