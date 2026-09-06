@@ -180,6 +180,12 @@ struct vmx {
 };
 
 extern bool vmx_have_msr_tsc_aux;
+/*
+ * Whether this part can save the VMX-preemption timer's residual on VM exit.
+ * The nested path needs it so L2's slice survives the exits L0 services on
+ * L2's behalf; see vmx_nested_build_vmcs02().
+ */
+extern int vmx_cap_save_preempt_timer;
 
 #define	VMX_CTR0(vcpu, format)						\
 	VCPU_CTR0((vcpu)->vmx->vm, (vcpu)->vcpuid, format)
