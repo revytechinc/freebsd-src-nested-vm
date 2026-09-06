@@ -98,7 +98,11 @@ rejects_unknown_option_head()
 rejects_unknown_option_body()
 {
 	# -Z is not, and should not become, a bhyveload option.
-	atf_check -s exit:1 -e match:"illegal option" -o empty \
+	# Deliberately not matching getopt(3)'s wording: that string is libc's,
+	# not bhyveload's, and would break this case for a reason unrelated to
+	# what it protects. The invariant is that the option is refused and
+	# nothing is created.
+	atf_check -s exit:1 -e not-empty -o empty \
 	    "$BHYVELOAD" -Z "$(vmname unknownopt)"
 	# getopt rejects -Z before anything is created; assert that.
 	if [ -e "/dev/vmm/$(vmname unknownopt)" ]; then
@@ -108,6 +112,29 @@ rejects_unknown_option_body()
 rejects_unknown_option_cleanup()
 {
 	destroy_vm "$(vmname unknownopt)"
+}
+
+# CloudBSD-specific: -N was a per-VM nested-virtualization opt-in that this
+# tree removed, because nesting is host-wide via hw.vmm.nested.enable and the
+# flag only ever existed in our own builds. It must stay removed -- a silent
+# reintroduction would put a meaningless bit back into the VM creation flags.
+# This case has no counterpart upstream, where -N never existed.
+atf_test_case rejects_removed_n_flag cleanup
+rejects_removed_n_flag_head()
+{
+	atf_set "descr" "-N is gone and is rejected like any other unknown option"
+}
+rejects_removed_n_flag_body()
+{
+	atf_check -s exit:1 -e not-empty -o empty \
+	    "$BHYVELOAD" -N "$(vmname removedn)"
+	if [ -e "/dev/vmm/$(vmname removedn)" ]; then
+		atf_fail "-N created a VM; the flag is supposed to be gone"
+	fi
+}
+rejects_removed_n_flag_cleanup()
+{
+	destroy_vm "$(vmname removedn)"
 }
 
 atf_test_case rejects_bad_memsize cleanup
@@ -238,6 +265,7 @@ atf_init_test_cases()
 	atf_add_test_case usage_without_arguments
 	atf_add_test_case rejects_unknown_option
 	atf_add_test_case rejects_bad_memsize
+	atf_add_test_case rejects_removed_n_flag
 	atf_add_test_case rejects_missing_disk
 	atf_add_test_case creates_vm
 	atf_add_test_case reloads_existing_vm
