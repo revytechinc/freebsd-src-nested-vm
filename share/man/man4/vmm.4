@@ -125,6 +125,41 @@ In general, PCI passthrough cannot be used when running
 as an unprivileged user or in a jail, as this feature requires write
 access to
 .Pa /dev/pci .
+.Sh NESTED VIRTUALIZATION
+On amd64, hardware-assisted virtualization is exposed to guests, so that a
+guest can itself run
+.Xr bhyve 8
+and host its own virtual machines.
+It is enabled by default on hardware that supports it.
+There is no per-virtual-machine flag.
+.Pp
+Two read-only sysctls report whether this machine's CPU qualifies.
+Each is a boolean, and only the one matching the CPU vendor is meaningful:
+.Bl -tag -width "hw.vmm.nested.svm" -compact
+.It Va hw.vmm.nested.vmx
+1 on an Intel CPU that supports it.
+.It Va hw.vmm.nested.svm
+1 on an AMD CPU that supports it.
+.El
+.Pp
+If the sysctls are absent, this kernel has no nested virtualization support.
+.Pp
+.Va hw.vmm.nested.enable
+turns the feature off:
+.Bd -literal -offset indent
+sysctl hw.vmm.nested.enable=0
+.Ed
+.Pp
+A virtual machine takes its nested-capable state from this switch when it is
+created and keeps it for its lifetime, so turning the switch off does not
+affect virtual machines that are already running.
+On a machine whose CPU does not qualify the switch reads 0 and cannot be
+turned on: writing 1 fails with
+.Er EOPNOTSUPP .
+.Pp
+See
+.Xr vmm_nested 9
+for what is emulated and for the bring-up diagnostics.
 .Sh LOADER TUNABLES
 Tunables can be set at the
 .Xr loader 8
@@ -134,6 +169,13 @@ prompt before booting the kernel or stored in
 .It Va hw.vmm.maxcpu
 Maximum number of virtual CPUs.
 The default is the number of physical CPUs in the system.
+.It Va hw.vmm.nested.enable
+Enable nested virtualization on amd64; see
+.Sx NESTED VIRTUALIZATION .
+The default is 1.
+It is applied after the CPU probe runs, and is forced to 0 if this
+machine's CPU does not qualify, so the sysctl of the same name reads 0 on
+such a machine whatever the tunable was set to.
 .El
 .Sh FILES
 .Bl -tag -width /dev/vmm.io/* -compact
@@ -182,7 +224,8 @@ back:
 .Xr bhyveload 8 ,
 .Xr devctl 8 ,
 .Xr jail 8 ,
-.Xr kldload 8
+.Xr kldload 8 ,
+.Xr vmm_nested 9
 .Sh HISTORY
 .Nm vmm.ko
 first appeared in
