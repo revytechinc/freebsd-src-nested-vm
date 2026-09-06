@@ -88,6 +88,13 @@ MEM=${MEM:-4G}
 # above that exercises nested SMP, which is the part still being stabilised.
 CORES=${CORES:-1}
 
+# Seconds for the inner guest to spin on arithmetic before powering off, or 0.
+# The ordinary demo is dominated by EPT faults, so L2 never executes long enough
+# to say whether its slice is bounded; a stretch with no I/O and no new pages is
+# what makes the VMX-preemption timer observable at all.
+L2SPIN=${L2SPIN:-0}
+case "$L2SPIN" in ''|*[!0-9]*) L2SPIN=0 ;; esac
+
 # How long (seconds) to wait for the inner L2 guest to reach its marker.
 TIMEOUT=${TIMEOUT:-480}
 
@@ -145,6 +152,7 @@ Environment knobs:
   WORKDIR              Cache + scratch dir           (default: $WORKDIR)
   MEM                  L1 guest memory               (default: $MEM)
   CORES                vCPUs per guest, or "all"     (default: $CORES)
+  L2SPIN               seconds for L2 to spin        (default: $L2SPIN)
   TIMEOUT              Seconds to wait for L2 marker  (default: $TIMEOUT)
   NESTED_DEMO_URL      Image URL                     (default: $NESTED_DEMO_URL)
   NESTED_DEMO_SHA256   Expected sha256 of the .xz    (or SKIP)
@@ -358,7 +366,8 @@ info "Loading L1 kernel..."
 # image that does not read it simply boots L2 with one vCPU.
 "$BHYVELOAD" -c stdio -m "$MEM" -d "$RUNRAW" \
 	-e console=comconsole -e autoboot_delay=1 \
-	-e nested_demo_l2_cpus="$CORES" "$VM" \
+	-e nested_demo_l2_cpus="$CORES" \
+	-e nested_demo_l2_spin="$L2SPIN" "$VM" \
 	>"$WORKDIR/${NS}-load-$$.log" 2>&1 </dev/null \
 	|| { cat "$WORKDIR/${NS}-load-$$.log" >&2; die "bhyveload failed."; }
 
