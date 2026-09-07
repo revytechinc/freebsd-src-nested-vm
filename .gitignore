@@ -43,3 +43,8 @@ sys/*/compile
 
 # Internal operational handoff — fleet topology, host roles, paths. Never publish.
 .review/HANDOFF.md
+
+# Agent skills synced in from revytechinc/skills by its sync.sh.
+# These are absolute symlinks into a developer home directory; this
+# repository is public and they are not part of the source tree.
+.claude/
