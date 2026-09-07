@@ -146,14 +146,22 @@ vm_install_base() {
 	hostname="$(echo $(uname -o) | tr '[:upper:]' '[:lower:]')"
 	echo "hostname=\"${hostname}\"" >> ${DESTDIR}/etc/rc.conf
 	metalog_add_data ./etc/rc.conf
+	# Both consoles, on every image, for the same reason as the installer
+	# media: we do not know where one of these is booted, and the first boot
+	# is the one most likely to need watching.
+	echo "boot_multicons=\"YES\"" >> ${DESTDIR}/boot/loader.conf
+	echo "console=\"vidconsole,comconsole\"" >> ${DESTDIR}/boot/loader.conf
+	echo "comconsole_speed=\"115200\"" >> ${DESTDIR}/boot/loader.conf
 	if [ "${VMFS}" = zfs ]; then
 		echo "zfs_enable=\"YES\"" >> ${DESTDIR}/etc/rc.conf
 		echo "zpool_reguid=\"zroot\"" >> ${DESTDIR}/etc/rc.conf
 		echo "zpool_upgrade=\"zroot\"" >> ${DESTDIR}/etc/rc.conf
 		echo "kern.geom.label.disk_ident.enable=0" >> ${DESTDIR}/boot/loader.conf
 		echo "zfs_load=YES" >> ${DESTDIR}/boot/loader.conf
-		metalog_add_data ./boot/loader.conf
 	fi
+	# Once, outside the branch: loader.conf is now written for UFS images too,
+	# and the same path must not be added to METALOG twice.
+	metalog_add_data ./boot/loader.conf
 
 	return 0
 }
