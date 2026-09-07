@@ -45,6 +45,13 @@ LINE_REBOOT_WAIT="kern.panic_reboot_wait_time=5"
 # Reboot is not enough if the box is wedged. Power-cycle so firmware
 # re-inits devices. A hang with no panic still needs watchdog/IPMI.
 LINE_POWERCYCLE="kern.powercycle_on_panic=1"
+# A BREAK on the serial console drops the kernel into the debugger and stops
+# the machine there.  These hosts are headless and driven over serial, and
+# nmdm consoles carry guest output all day, so a stray break -- or line noise
+# -- is a halted host nobody asked for.  The whole point of the settings above
+# is that a failure reboots rather than waits for a human; this is the same
+# rule applied to the other way in.
+LINE_ALTBREAK="debug.kdb.alt_break_to_debugger=0"
 
 log() {
 	printf 'disable-panic-debugger.sh: %s\n' "$*"
@@ -135,6 +142,7 @@ main() {
 	ensure_sysctl_line "$SYSCTL_CONF" "$LINE_DEBUGGER"
 	ensure_sysctl_line "$SYSCTL_CONF" "$LINE_REBOOT_WAIT"
 	ensure_sysctl_line "$SYSCTL_CONF" "$LINE_POWERCYCLE"
+	ensure_sysctl_line "$SYSCTL_CONF" "$LINE_ALTBREAK"
 
 	# Persist is not enough: a host that already booted with DDB on
 	# (freedev002) will sit in the debugger on the *next* panic until
