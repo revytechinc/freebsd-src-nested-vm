@@ -288,6 +288,10 @@ disc1:
 	echo kernels_autodetect=\"NO\" >> ${.TARGET}/boot/loader.conf
 	echo loader_brand=\"install\" >> ${.TARGET}/boot/loader.conf
 	echo loader_menu_multi_user_prompt=\"Installer\" >> ${.TARGET}/boot/loader.conf
+# Serial and video both, since we cannot know where this media is booted
+	echo boot_multicons=\"YES\" >> ${.TARGET}/boot/loader.conf
+	echo console=\"vidconsole,comconsole\" >> ${.TARGET}/boot/loader.conf
+	echo comconsole_speed=\"115200\" >> ${.TARGET}/boot/loader.conf
 	cp ${.CURDIR}/rc.local ${.TARGET}/etc
 	echo "./etc/resolv.conf type=link uname=root gname=wheel mode=0644 link=/tmp/bsdinstall_etc/resolv.conf" >> ${.TARGET}/METALOG
 	echo "./etc/rc.conf type=file uname=root gname=wheel mode=0644" >> ${.TARGET}/METALOG
@@ -332,6 +336,10 @@ bootonly:
 	echo kernels_autodetect=\"NO\" >> ${.TARGET}/boot/loader.conf
 	echo loader_brand=\"install\" >> ${.TARGET}/boot/loader.conf
 	echo loader_menu_multi_user_prompt=\"Installer\" >> ${.TARGET}/boot/loader.conf
+# Serial and video both, since we cannot know where this media is booted
+	echo boot_multicons=\"YES\" >> ${.TARGET}/boot/loader.conf
+	echo console=\"vidconsole,comconsole\" >> ${.TARGET}/boot/loader.conf
+	echo comconsole_speed=\"115200\" >> ${.TARGET}/boot/loader.conf
 	cp ${.CURDIR}/rc.local ${.TARGET}/etc
 	echo "./etc/resolv.conf type=link uname=root gname=wheel mode=0644 link=/tmp/bsdinstall_etc/resolv.conf" >> ${.TARGET}/METALOG
 	echo "./etc/rc.conf type=file uname=root gname=wheel mode=0644" >> ${.TARGET}/METALOG
@@ -391,6 +399,10 @@ dvd:
 	echo kernels_autodetect=\"NO\" >> ${.TARGET}/boot/loader.conf
 	echo loader_brand=\"install\" >> ${.TARGET}/boot/loader.conf
 	echo loader_menu_multi_user_prompt=\"Installer\" >> ${.TARGET}/boot/loader.conf
+# Serial and video both, since we cannot know where this media is booted
+	echo boot_multicons=\"YES\" >> ${.TARGET}/boot/loader.conf
+	echo console=\"vidconsole,comconsole\" >> ${.TARGET}/boot/loader.conf
+	echo comconsole_speed=\"115200\" >> ${.TARGET}/boot/loader.conf
 	cp ${.CURDIR}/rc.local ${.TARGET}/etc
 	echo "./etc/resolv.conf type=link uname=root gname=wheel mode=0644 link=/tmp/bsdinstall_etc/resolv.conf" >> ${.TARGET}/METALOG
 	echo "./etc/rc.conf type=file uname=root gname=wheel mode=0644" >> ${.TARGET}/METALOG
