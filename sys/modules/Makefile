@@ -429,6 +429,7 @@ SUBDIR=	\
 	${_vmd} \
 	${_vmm} \
 	${_vmware} \
+	${_vmx_nested_test} \
 	vr \
 	vte \
 	${_wbwd} \
@@ -909,6 +910,11 @@ _hwt=		hwt
 .if ${MK_BHYVE} != "no" || defined(ALL_MODULES)
 .if ${KERN_OPTS:MSMP}
 _vmm=		vmm
+# In-kernel unit tests for the nested-VMX helpers. Intel-specific, so amd64
+# only, and pointless without the vmm module whose symbols it links against.
+.if ${MACHINE_CPUARCH} == "amd64"
+_vmx_nested_test=	vmx_nested_test
+.endif
 .endif
 .endif
 .endif
