@@ -86,51 +86,53 @@ fi
 mkdir -p "$(dirname "${WATCHDOG_BIN}")"
 cat > "${WATCHDOG_BIN}" <<'WATCHDOG'
 #!/bin/sh
-# Reboot this host if it has been unable to reach ANY of its network
-# neighbours for a sustained period.  Installed by enable-fail-watchdog.sh.
+# Reboot this host if its OWN network link is dead.  Installed by
+# enable-fail-watchdog.sh; runs from cron once a minute.
 #
-# Runs from cron once a minute and keeps its count in a state file, so a
-# single failed probe does nothing; only an unbroken run of them acts.
+# The question deliberately asked here is "is this host broken?", not "can this
+# host reach anything?".  They are not the same question, and confusing them is
+# what took five machines off the fleet:
+#
+#   * No carrier on every interface is a LOCAL fault -- a NIC that did not
+#     re-attach, a driver that did not load, a cable someone pulled from this
+#     machine.  A reboot can plausibly fix it, and nothing else will.
+#
+#   * Carrier up but nothing reachable is SOMEONE ELSE'S outage -- a switch, a
+#     gateway, a power event upstream.  Rebooting cannot help, and rebooting
+#     every host that notices turns one outage into a fleet-wide one.
+#
+# Reachability is therefore logged but never decides.  A liveness check built
+# on reaching shared infrastructure is correlated across the whole fleet by
+# construction: every neighbour is on the same segment, the same switch and the
+# same power, so one cause fails them all together and "require every target to
+# fail" buys nothing at all.  Carrier is per-host, which is the property this
+# needs.
 set -u
 
-# The consecutive-failure count is per-boot, so /var/run is right for it.
 STATE=/var/run/nested-net-watchdog.count
-# The reboot count must NOT be, because /var/run is cleared on boot: a host
-# whose network is genuinely dead -- a failed NIC, a pulled cable -- would
-# come back, count up, and reboot again every FAIL_MINUTES for ever.  Keep it
-# somewhere that survives, and give up after MAX_REBOOTS.  A host sitting up
-# and unreachable needs a person either way; rebooting it hourly for days
-# only destroys the evidence of why.
+# Not /var/run: that is cleared on boot, so a host with a genuinely dead NIC
+# would come back, count up, and reboot again for ever.
 REBOOTS=/var/db/nested-net-watchdog.reboots
 MAX_REBOOTS=3
 FAIL_MINUTES=__FAIL_MINUTES__
 
-# Resolved on every run, never cached: a host that legitimately changed
-# gateway must not keep probing the old one.
-targets=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')
-# Any other host on the local segment counts as a second opinion, so the
-# gateway alone cannot condemn the machine.
-targets="$targets $(arp -an 2>/dev/null |
-    awk '{gsub(/[()]/, "", $2); print $2}' | grep -v '^$' | head -4)"
-
-reachable=0
-for t in $targets; do
-	[ -n "$t" ] || continue
-	if ping -c 1 -t 3 "$t" >/dev/null 2>&1; then
-		reachable=1
+# Physical links only.  The virtual interfaces this project creates by the
+# dozen -- bridges, taps, epairs for nested guests -- can report carrier while
+# the machine has no path off the box at all.
+carrier=0
+for _if in $(ifconfig -l 2>/dev/null); do
+	case "$_if" in
+	lo*|pflog*|pfsync*|bridge*|tap*|vmnet*|epair*|gif*|tun*|wg*) continue ;;
+	esac
+	if ifconfig "$_if" 2>/dev/null | grep -q "status: active"; then
+		carrier=1
 		break
 	fi
 done
 
-# No targets at all means nothing to conclude from -- an empty ARP table on a
-# freshly booted host is not evidence that the network is gone.
-if [ -z "$(echo "$targets" | tr -d ' ')" ]; then
-	rm -f "$STATE"
-	exit 0
-fi
-
-if [ "$reachable" = "1" ]; then
-	# Network is fine, so any past reboots did their job: start afresh.
+if [ "$carrier" = "1" ]; then
+	# This host's link is fine.  Anything unreachable is upstream and not
+	# ours to fix by rebooting.
 	rm -f "$STATE" "$REBOOTS"
 	exit 0
 fi
@@ -138,22 +140,35 @@ fi
 count=$(cat "$STATE" 2>/dev/null || echo 0)
 count=$((count + 1))
 echo "$count" > "$STATE"
-logger -t nested-net-watchdog "no network neighbour reachable ($count/$FAIL_MINUTES)"
+
+# Logged as context for whoever reads the console afterwards; it does not
+# affect the decision.
+gw=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')
+if [ -n "$gw" ] && ping -c 1 -t 3 "$gw" >/dev/null 2>&1; then
+	reach="gateway still answering"
+else
+	reach="gateway unreachable too"
+fi
+logger -t nested-net-watchdog \
+    "no carrier on any physical interface ($count/$FAIL_MINUTES); $reach"
 
 if [ "$count" -ge "$FAIL_MINUTES" ]; then
 	tries=$(cat "$REBOOTS" 2>/dev/null || echo 0)
 	if [ "$tries" -ge "$MAX_REBOOTS" ]; then
 		logger -t nested-net-watchdog \
-		    "unreachable, but already rebooted ${tries} times: giving up"
+		    "still no carrier after ${tries} reboots: giving up, needs a human"
 		rm -f "$STATE"
 		exit 0
 	fi
 	echo $((tries + 1)) > "$REBOOTS"
 	logger -t nested-net-watchdog \
-	    "unreachable for ${FAIL_MINUTES}m, rebooting (attempt $((tries + 1))/${MAX_REBOOTS})"
+	    "no carrier for ${FAIL_MINUTES}m, rebooting (attempt $((tries + 1))/${MAX_REBOOTS})"
 	rm -f "$STATE"
-	# Userland reboot: works regardless of how the kernel is built, unlike
-	# the kernel watchdog, which enters the debugger on a KDB kernel.
+	# -q on purpose: this host has already lost its network, so there is
+	# nothing to flush that a clean rc.shutdown would save, and a wedged
+	# subsystem must not be able to block the reboot that recovers it.
+	# Userland reboot works whatever the kernel was built with; the kernel
+	# watchdog does not.
 	reboot -q
 fi
 exit 0
@@ -172,6 +187,15 @@ cat > "${CRON_FILE}" <<CRON
 */1 * * * * root /usr/local/sbin/nested-net-watchdog
 CRON
 log "installed ${CRON_FILE}"
+
+if [ -z "$ROOT" ] && command -v service >/dev/null 2>&1; then
+	if service cron status >/dev/null 2>&1; then
+		log "cron is running: the check will be invoked"
+	else
+		log "WARNING: cron is NOT running -- this check will never fire."
+		log "  Enable it (service cron start) or this host has no recovery."
+	fi
+fi
 
 # The kernel watchdog guards a genuinely wedged kernel, which a userland cron
 # job cannot.  But it is only worth arming if its timeout actually resets the
