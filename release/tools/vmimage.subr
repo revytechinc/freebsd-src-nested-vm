@@ -72,17 +72,27 @@ vm_base_packages_list() {
 	# Output a list of package sets equivalent to what we get from
 	# "installworld installkernel distribution", aka. the full base
 	# system.
-	echo FreeBSD-set-base
-	[ -z "${WITHOUT_DEBUG_FILES}" ] && echo FreeBSD-set-base-dbg
-	echo FreeBSD-set-kernels
-	[ -z "${WITHOUT_KERNEL_SYMBOLS}" ] && echo FreeBSD-set-kernels-dbg
+	#
+	# The prefix has to match what the packages were actually named. A build
+	# that renames them -- PKG_NAME_PREFIX in bsd.pkg.pre.mk -- otherwise
+	# asks for FreeBSD-set-base against a repository full of CloudBSD-set-*,
+	# and pkg answers "no packages available" for every set. That is not an
+	# error to pkg: install proceeds having installed nothing, the target
+	# reports success, and vm-release finishes in three seconds with no
+	# images and no failure anywhere to explain it.
+	local _pkgprefix
+	_pkgprefix=${PKG_NAME_PREFIX:-FreeBSD}
+	echo ${_pkgprefix}-set-base
+	[ -z "${WITHOUT_DEBUG_FILES}" ] && echo ${_pkgprefix}-set-base-dbg
+	echo ${_pkgprefix}-set-kernels
+	[ -z "${WITHOUT_KERNEL_SYMBOLS}" ] && echo ${_pkgprefix}-set-kernels-dbg
 	case ${TARGET_ARCH} in
 	amd64 | aarch64 | powerpc64)
-		echo FreeBSD-set-lib32
-		[ -z "${WITHOUT_DEBUG_FILES}" ] && echo FreeBSD-set-lib32-dbg
+		echo ${_pkgprefix}-set-lib32
+		[ -z "${WITHOUT_DEBUG_FILES}" ] && echo ${_pkgprefix}-set-lib32-dbg
 	esac
-	[ -n "${WITH_SRC}" ] && echo FreeBSD-set-src
-	echo FreeBSD-set-tests
+	[ -n "${WITH_SRC}" ] && echo ${_pkgprefix}-set-src
+	echo ${_pkgprefix}-set-tests
 	# Also install pkg, since systems with a packaged base system should
 	# have the tools to upgrade themselves.
 	echo pkg
@@ -106,6 +116,15 @@ vm_install_base() {
 		$pkg_cmd update
 		selected=$(vm_base_packages_list | vm_extra_filter_base_packages)
 		$pkg_cmd install -U -r FreeBSD-base $selected
+		# pkg exits 0 having installed NOTHING when no package matches the
+		# names it was given -- a prefix mismatch produces "no packages
+		# available" for every set, and the build then reports success and
+		# finishes in seconds with an empty image. Assert that the base
+		# system is actually present, so that class of failure becomes a
+		# build error rather than an artifact nobody can boot.
+		if [ ! -x "${DESTDIR}/bin/sh" ]; then
+			err "\n\nInstalled no base system into ${DESTDIR}: pkg matched none of:\n${selected}\nCheck that PKG_NAME_PREFIX (${_pkgprefix:-FreeBSD}) matches the names in the repository."
+		fi
 		metalog_add_data ./var/db/pkg/local.sqlite
 		mkdir -p ${DESTDIR}/usr/local/etc/pkg/repos
 		echo 'FreeBSD-base: { enabled: yes }' > ${DESTDIR}/usr/local/etc/pkg/repos/FreeBSD.conf

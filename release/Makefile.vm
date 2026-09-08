@@ -146,6 +146,7 @@ cw-${_CW:tl}-${_FS}-${_FMT}: ${QEMUTGT} ${PKGBASE_REPO_DIR}
 		PKG_REPO_NAME=${PKG_REPO_NAME:UFreeBSD-ports} \
 		PKG_INSTALL_EPOCH=${PKG_INSTALL_EPOCH:U${GITEPOCH}} \
 		NOPKGBASE=${NOPKGBASE} \
+		PKG_NAME_PREFIX=${PKG_NAME_PREFIX} \
 		PKGBASE_REPO_DIR=${.OBJDIR}/pkgbase-repo-dir \
 		${.CURDIR}/scripts/mk-vmimage.sh \
 		-C ${.CURDIR}/tools/vmimage.subr -d ${.OBJDIR}/${.TARGET} \
@@ -205,6 +206,7 @@ vm-image:	${QEMUTGT} ${PKGBASE_REPO_DIR}
 		PKG_REPO_NAME=${PKG_REPO_NAME:UFreeBSD-ports} \
 		PKG_INSTALL_EPOCH=${PKG_INSTALL_EPOCH:U${GITEPOCH}} \
 		NOPKGBASE=${NOPKGBASE} \
+		PKG_NAME_PREFIX=${PKG_NAME_PREFIX} \
 		PKGBASE_REPO_DIR=${.OBJDIR}/pkgbase-repo-dir \
 		${.CURDIR}/scripts/mk-vmimage.sh \
 		-C ${.CURDIR}/tools/vmimage.subr \
