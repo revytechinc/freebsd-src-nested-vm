@@ -74,6 +74,9 @@ mkdir -p "$WORKDIR"
 
 cleanup() {
 	[ -n "${READER_PID:-}" ] && kill "$READER_PID" 2>/dev/null || true
+	# Waits on a carrier that never arrives if bhyve failed to start, and a
+	# matrix sweep would otherwise leave one of these behind per artifact.
+	[ -n "${STTY_PID:-}" ] && kill "$STTY_PID" 2>/dev/null || true
 	bhyvectl --vm="$VMNAME" --destroy >/dev/null 2>&1 || true
 	# The console is the artifact worth keeping; the multi-gigabyte working
 	# copy is not.  KEEP_RAW=1 preserves it for post-mortem.
@@ -131,8 +134,17 @@ CONSOLE=$WORKDIR/${VMNAME}.console
 # guest printed.
 cat "${NMDM}B" > "$CONSOLE" &
 READER_PID=$!
-sleep 1
-stty -f "${NMDM}B" raw -echo clocal 2>/dev/null || true
+# Both of these BLOCK in open(2) until the A side has carrier, and carrier
+# only appears when bhyve opens it below.  The reader is backgrounded, so its
+# blocking is harmless; running stty in the foreground here is not -- it waits
+# for a carrier that this script has not started yet and never returns, so
+# bhyve is never reached, the console stays empty, and the run reports "no
+# marker" for a guest that was never launched.  Background it, exactly as
+# boot_artifact.sh already does, and let bhyve bring the line up.
+# No fixed delay: the blocking open IS the synchronisation point, so this
+# applies the moment bhyve brings the line up rather than at a guessed time.
+( stty -f "${NMDM}B" raw -echo clocal 2>/dev/null ) &
+STTY_PID=$!
 
 log "booting $(basename "$ARTIFACT") as L1"
 bhyve -c 2 -m 4G -A -H -P \
