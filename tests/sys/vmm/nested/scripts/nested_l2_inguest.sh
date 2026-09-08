@@ -39,16 +39,37 @@ fi
 say "host: $(uname -v | cut -c1-60)"
 say "nested sysctl: $(sysctl -n hw.vmm.nested.enable 2>/dev/null || echo absent)"
 
-[ -f "$FIXTURE" ] || {
+# A character device is as valid as a regular file here: the harness attaches
+# the fixture to this guest as a second virtio-blk disk rather than shipping it
+# inside the image, so what arrives is /dev/vtbd1, and -f alone rejected it.
+if [ ! -f "$FIXTURE" ] && [ ! -c "$FIXTURE" ]; then
 	say "no L2 fixture at $FIXTURE"
-	say "build one with build_l2_image.sh and place it there"
+	say "expected a disk image, or the device the harness attached"
 	exit 1
-}
+fi
 
+# Copied rather than booted in place, whether it came as a file or a device:
+# the inner guest writes to its disk, and the harness attaches the fixture
+# read-only precisely so one machine in the matrix cannot corrupt it for the
+# next.
 WORK=/tmp/${L2NAME}.img
 cp "$FIXTURE" "$WORK" || { say "cannot stage the fixture"; exit 1; }
 
 say "booting the inner guest"
+# bhyveload(8), not a UEFI bootrom.  The bootrom lives in the edk2-bhyve PORT,
+# and this runs inside a release image that has no ports installed at all --
+# asking for one gets "no bootrom was configured" and no inner guest.  The
+# loader is in base, ships with bhyve itself, and boots this fixture fine.
+# stdin from /dev/null so the loader menu autoboots instead of waiting on the
+# serial console the harness is driving.
+if ! bhyveload -m 1G -d "$WORK" "$L2NAME" >> "$L2LOG" 2>&1 < /dev/null; then
+	say "bhyveload could not load a kernel from the fixture; last lines:"
+	tail -10 "$L2LOG" 2>/dev/null
+	bhyvectl --vm="$L2NAME" --destroy >/dev/null 2>&1
+	rm -f "$WORK"
+	exit 1
+fi
+
 # Console to a file rather than a second nmdm: this is already running on a
 # serial console driven by the harness, and opening another reader here is how
 # console output gets silently swallowed.

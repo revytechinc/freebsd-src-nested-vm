@@ -38,38 +38,34 @@ set -eu
 # The warning is not decoration -- this is new, unaudited kernel code, and it
 # says so every time it runs.
 # ---------------------------------------------------------------------------
+# The banner is one program, ${SELFDIR}/demo-banner, not a copy of it here.
+# This driver used to carry its own second implementation of the same box, so
+# run-auto-demo -- which prints the shared one before invoking this -- greeted
+# the room twice, in two subtly different styles.
+#
+# DEMO_BANNER_SHOWN is set by a launcher that has already printed it. Running
+# this driver directly leaves it unset, and the banner still appears, because
+# the EXPERIMENTAL warning has to be seen every time and not only when someone
+# came in through a launcher.
+SELFDIR=${SELFDIR:-$(dirname "$0")}
+
 demo_banner() {
-	_w=62
-	if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM}" != dumb ]; then
-		_e=$(printf '\033')
-		_b="${_e}[1m"; _d="${_e}[0m"
-		_blu="${_e}[38;5;39m"; _org="${_e}[38;5;208m"
-		_red="${_e}[38;5;203m"; _gry="${_e}[38;5;245m"; _wht="${_e}[38;5;231m"
-	else
-		_b=''; _d=''; _blu=''; _org=''; _red=''; _gry=''; _wht=''
-	fi
-	# Keep row text ASCII: printf pads by bytes, so a multi-byte character
-	# would silently eat a column and break the box.
-	_row() {
-		_c=$1; shift
-		printf '%s|%s%s%-*s%s%s|%s\n' "${_blu}" "${_d}" "${_c}" "${_w}" " $*" \
-		    "${_d}" "${_blu}" "${_d}"
-	}
-	_rule=$(printf '%*s' "${_w}" '' | tr ' ' '-')
+	[ "${DEMO_BANNER_SHOWN:-0}" = 1 ] && return 0
+	for _b in "${SELFDIR}/demo-banner" \
+	    /usr/local/libexec/cloudbsd-demo/demo-banner; do
+		# The banner is cosmetic and this driver runs under set -e: a
+		# banner that somehow exits non-zero must not take a live demo
+		# down with it.
+		[ -x "${_b}" ] && { "${_b}" || true; return 0; }
+	done
+	# Not installed -- running straight from a source tree. Do not
+	# reintroduce a second copy of the box; just make sure the warning
+	# that matters is still impossible to miss.
 	echo
-	printf '%s+%s+%s\n' "${_blu}" "${_rule}" "${_d}"
-	_row "${_b}${_wht}" "bhyve  --  NESTED VIRTUALIZATION"
-	_row "${_gry}"      "a guest that is itself a working hypervisor"
-	_row ""             ""
-	_row "${_b}${_org}" "hello, bhyvecon"
-	_row ""             ""
-	_row "${_gry}"      "L0 host  ->  L1 guest  ->  L2 guest inside the guest"
-	_row "${_gry}"      "one vmm.ko  --  Intel VT-x and AMD-V alike"
-	_row ""             ""
-	_row "${_b}${_red}" "EXPERIMENTAL - new, unaudited kernel code."
-	_row "${_red}"      "Not for production equipment."
-	printf '%s+%s+%s\n' "${_blu}" "${_rule}" "${_d}"
+	echo "bhyve -- NESTED VIRTUALIZATION   (hello, bhyvecon)"
+	echo "EXPERIMENTAL - new, unaudited kernel code. Not for production."
 	echo
+	return 0
 }
 demo_banner
 
