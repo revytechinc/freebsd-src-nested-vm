@@ -90,6 +90,37 @@ uint64_t vmx_l2_injvec[256];	/* histogram of injected vectors */
 uint64_t vmx_l2_swallow;	/* undelivered injections requeued via IDT-vectoring */
 uint64_t vmx_l2_swallow_vec[256]; /* histogram of requeued (swallowed) vectors */
 uint64_t vmx_l2_idtv_reinject;	/* in-flight L2 events recovered on L2 resume */
+/*
+ * Shadow-EPT fault split: was this GPA already mapped in ept02?
+ *
+ * A cumulative count of EPT violations cannot distinguish "populating the
+ * working set once" from "faulting the same pages over and over", and those
+ * two have completely different causes. On a pre-Haswell part -- no hardware
+ * EPT accessed/dirty bits, so the pmap emulates them by stripping permissions
+ * -- one L2 boot took roughly forty violations per 4KB page and never reached
+ * multi-user, where newer parts take about four and finish. Forty per page is
+ * the working set being faulted back in dozens of times, not a warm-up cost,
+ * and nothing already counted could tell the difference.
+ *
+ * refault dominating and still climbing after the guest is populated means
+ * something keeps invalidating or downgrading entries we have already made.
+ * fill dominating means the shadow is being torn down and rebuilt.
+ */
+uint64_t vmx_l2_ept02_fill;	/* fault on a GPA ept02 did not map */
+uint64_t vmx_l2_ept02_refault;	/* fault on a GPA ept02 ALREADY mapped */
+/*
+ * Off by default, because the classification is not free: it walks ept02 for
+ * every shadow-EPT violation. On precisely the workload it exists to explain
+ * -- tens of faults per page -- that walk runs tens of times per page and
+ * inflates the per-fault cost being characterised, so a latency measured with
+ * it enabled is not comparable to one without. Turn it on to answer the
+ * question, then turn it off before measuring anything else.
+ */
+static int vmx_nested_ept02_classify = 0;
+SYSCTL_INT(_hw_vmm_nested, OID_AUTO, ept02_classify, CTLFLAG_RWTUN,
+    &vmx_nested_ept02_classify, 0,
+    "Count shadow-EPT faults as first-touch vs re-fault (adds a page-table "
+    "walk per fault; off by default)");
 static int
 vmx_l2_stats_sysctl(SYSCTL_HANDLER_ARGS)
 {
@@ -100,6 +131,9 @@ vmx_l2_stats_sysctl(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "entries=%lu injects=%lu swallow=%lu idtv_reinject=%lu\n",
 	    (unsigned long)vmx_l2_entries, (unsigned long)vmx_l2_injects,
 	    (unsigned long)vmx_l2_swallow, (unsigned long)vmx_l2_idtv_reinject);
+	sbuf_printf(&sb, "ept02_fill=%lu ept02_refault=%lu\n",
+	    (unsigned long)vmx_l2_ept02_fill,
+	    (unsigned long)vmx_l2_ept02_refault);
 	for (i = 0; i < 128; i++)
 		if (vmx_l2_exit_hist[i] != 0)
 			sbuf_printf(&sb, "reason %d = %lu\n", i,
@@ -401,6 +435,24 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 	}
 	m = cookie;
 	prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
+
+	/*
+	 * Classify before entering: a GPA ept02 already maps is a re-fault, and
+	 * the ratio of those to first touches is what separates "populating the
+	 * working set once" from "faulting the same pages repeatedly".
+	 *
+	 * pmap_extract() returns 0 both for an unmapped GPA and for one mapped
+	 * to physical page 0. That ambiguity is accepted rather than worked
+	 * around: the allocator does not hand out page 0, so the case does not
+	 * arise, and the alternative costs another lookup on a path that is
+	 * already paying for one.
+	 */
+	if (vmx_nested_ept02_classify) {
+		if (pmap_extract(ns->ept02, l2_gpa & ~PAGE_MASK) != 0)
+			atomic_add_long(&vmx_l2_ept02_refault, 1);
+		else
+			atomic_add_long(&vmx_l2_ept02_fill, 1);
+	}
 
 	vm_page_busy_acquire(m, 0);
 	error = pmap_enter(ns->ept02, l2_gpa & ~PAGE_MASK, m, prot, prot, 0);
