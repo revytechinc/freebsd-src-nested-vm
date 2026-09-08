@@ -328,8 +328,34 @@ wait_for_new "$MARK" "$SHELL_PROMPT" 120 || die "no shell prompt after the reboo
 
 # Per-step marker again: unique, so it cannot match the pre-reboot half of the
 # file, and assembled in the guest, so it cannot match its own echo.
+# Exactly what the install page tells a reader to do after rebooting. If this
+# fails the instructions are wrong, whatever the cause turns out to be.
 guest_step "sysctl -n hw.vmm.nested.enable >/dev/null 2>&1" 60 ||
     die "could not read the nested sysctl after the reboot"
+AS_DOCUMENTED=no
+step_ok && AS_DOCUMENTED=yes
+
+# If it failed, find out WHICH failure it is before reporting one. The sysctl
+# only exists once vmm(4) is loaded, so "nesting is broken" and "the module is
+# not loaded" look identical from the outside and have completely different
+# fixes.
+if [ "$AS_DOCUMENTED" = no ]; then
+	log "the documented check found no nested sysctl; loading vmm and retrying"
+	guest_step "kldload vmm >/dev/null 2>&1; sysctl -n hw.vmm.nested.enable >/dev/null 2>&1" 90 ||
+	    die "the guest stopped answering while loading vmm"
+	if step_ok; then
+		log "FAIL: nesting works, but only after loading vmm by hand."
+		log "      The published instructions say to reboot and read"
+		log "      hw.vmm.nested.enable, and on a fresh install that sysctl"
+		log "      does not exist yet -- nothing arranges for vmm to load."
+		log "      The kernel is right; the instructions are incomplete."
+		log "console: $CONSOLE"
+		exit 1
+	fi
+	log "console tail:"; tail -30 "$CONSOLE" | sed 's/^/  /'
+	die "installed and rebooted, and nesting is unavailable even with vmm
+loaded by hand -- this is the kernel, not the instructions"
+fi
 
 if step_ok; then
 	log "PASS: a stock FreeBSD installed the published packages and came back
