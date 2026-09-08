@@ -36,6 +36,11 @@ PROGRAM="${0##*/}"
 ARTIFACT=${1:?usage: $PROGRAM <artifact> [workdir]}
 WORKDIR=${2:-/var/tmp/verify-media}
 MARKER=NV_L2_BOOTED_OK
+# Printed by L1 when the in-guest script is not executable.  Running it
+# through sh(1) lets this harness verify images built before that mode was
+# fixed, but on its own sh ignores the execute bit, so a regression that
+# shipped the script unexecutable again would pass the gate in silence.
+NOTEXEC=NV_INGUEST_NOT_EXECUTABLE
 # An installer ISO stops at its menu and never reaches a shell, so it needs
 # the slower scripted-install path rather than this one.
 BOOT_TIMEOUT=${BOOT_TIMEOUT:-900}
@@ -175,11 +180,32 @@ else
 		send ""
 	fi
 	if wait_for "$SHELL_PROMPT" 60; then
-		send "$INGUEST"
+		# The getty echoes the command line back onto the same console we
+		# grep, so a marker written literally here would match its own
+		# echo and report every image as broken.  Build it in the guest
+		# from a variable instead: the echoed command shows ${x}_..., only
+		# the output carries the whole word.  Expansion is load-bearing
+		# and cannot be tidied away, where quote-splitting looks cosmetic
+		# and would silently become a permanent false warning.
+		send "x=NV_INGUEST; test -x $INGUEST || echo \${x}_NOT_EXECUTABLE"
+		# Through sh, not directly, so images predating the mode fix can
+		# still be verified.  The test above is what keeps that from
+		# hiding a fresh regression.
+		send "sh $INGUEST"
 		wait_for "$MARKER" "$INNER_TIMEOUT" && found=1
 	else
 		log "no shell prompt after login"
 	fi
+fi
+
+# Reported whichever way the run ends.  Inside the pass branch it would be
+# lost exactly when it is most useful: on a FAIL, the wrong mode is the first
+# thing worth ruling out, and it is the one clue the console tail may not show.
+if grep -q "$NOTEXEC" "$CONSOLE" 2>/dev/null; then
+	log "WARNING: $INGUEST is not executable inside this image."
+	log "         It was run through sh, so this is not on its own a"
+	log "         failure, but the image ships its tests package with the"
+	log "         wrong mode and anything exec'ing that script will fail."
 fi
 
 if [ "$found" = "1" ]; then
