@@ -12,7 +12,9 @@
 # the thing a stranger actually receives:
 #
 #   verify_stock_install.sh   a stock, unmodified FreeBSD follows the published
-#                             instructions and comes up nesting
+#                             instructions and comes up nesting -- run once per
+#                             route, because the site publishes three of them
+#                             and they are different instructions
 #   verify_upgrade.sh         the release that was on the site yesterday moves
 #                             to the one on it today
 #   check_artifacts.sh        every copy of a shipped file agrees with the tree
@@ -46,7 +48,17 @@
 #       can reach that one, which is not true of every test host. No default:
 #       this script ships in a public tree and must not name anyone's
 #       infrastructure.
-#   gate  one or more of: artifacts stock upgrade   (default: all three)
+#   gate  one or more of: artifacts stock stock-manual stock-be upgrade
+#         (default: all of them)
+#
+# The three stock gates share one working directory on purpose: they all start
+# from the same verified FreeBSD image, and giving each its own would fetch and
+# verify the same 700MB three times. Sharing is safe because no run can boot
+# what a previous one left behind: the disk each gate boots is decompressed
+# fresh from the manifest-checked archive under a name carrying that run's own
+# pid, so a disk abandoned by an interrupted run is never picked up, only left
+# taking up space. The word "stock" would mean nothing otherwise -- the second
+# gate would be starting from a machine the first one had installed into.
 #
 # Exit 0 only if every gate that ran passed.
 
@@ -67,7 +79,7 @@ while getopts p:P: o; do
 	esac
 done
 shift $((OPTIND - 1))
-GATES=${*:-"artifacts stock upgrade"}
+GATES=${*:-"artifacts stock stock-manual stock-be upgrade"}
 
 log() { printf '%s: %s\n' "$PROGRAM" "$*"; }
 
@@ -158,6 +170,26 @@ run_gate() {
 	return 1
 }
 
+# One published install route, run by name.
+#
+# The route is passed to the script's environment for that command only, so no
+# gate leaves INSTALL_METHOD set behind it -- neither for the gates that follow
+# nor for whatever the operator had in their own environment. All three share
+# WORK/stock; see the note above for why that is safe.
+run_stock_gate() {
+	_gate=$1
+	_method=$2
+	_glog="$WORK/$_gate.log"
+	log "running the $_gate gate (the $_method route)"
+	if env INSTALL_METHOD="$_method" sh "$HERE/verify_stock_install.sh" \
+	    "$WORK/stock" > "$_glog" 2>&1; then
+		log "$_gate: PASS"
+		return 0
+	fi
+	log "$_gate: FAIL"
+	return 1
+}
+
 FAILED=""
 RAN=""
 
@@ -183,10 +215,31 @@ for g in $GATES; do
 		    -u "${SITE_URL:-https://nested.cloudbsd.cat}" "$@" ||
 		    FAILED="$FAILED artifacts"
 		;;
+	# One gate per published route. They are not three phrasings of one
+	# instruction: the installer script, the numbered steps and the boot
+	# environment install by different mechanisms and fail in different
+	# ways, and each of the three has already been published broken at some
+	# point while the others worked.
+	#
+	# The route is named explicitly for every one of them, the installer
+	# route included. Leaving that one to verify_stock_install.sh's default
+	# would let an INSTALL_METHOD inherited from the environment silently
+	# decide which route the gate called "stock" actually ran, and the
+	# summary would name a route that was never taken.
 	stock)
 		RAN="$RAN stock"
-		run_gate stock "$HERE/verify_stock_install.sh" "$WORK/stock" ||
-		    FAILED="$FAILED stock"
+		run_stock_gate stock installer || FAILED="$FAILED stock"
+		;;
+	stock-manual)
+		RAN="$RAN stock-manual"
+		run_stock_gate stock-manual manual || FAILED="$FAILED stock-manual"
+		;;
+	# This one also tests the promise the route makes -- that a kernel which
+	# does not come up reverts by itself -- so it reboots the guest four
+	# times and takes correspondingly longer than the other two.
+	stock-be)
+		RAN="$RAN stock-be"
+		run_stock_gate stock-be be || FAILED="$FAILED stock-be"
 		;;
 	upgrade)
 		# An explicit -p that cannot be staged is a failure, never a
@@ -238,7 +291,9 @@ for g in $GATES; do
 		run_gate upgrade "$HERE/verify_upgrade.sh" "$PREV" "$WORK/upgrade" ||
 		    FAILED="$FAILED upgrade"
 		;;
-	*)	log "unknown gate: $g"; exit 2 ;;
+	*)	log "unknown gate: $g"
+		log "expected: artifacts stock stock-manual stock-be upgrade"
+		exit 2 ;;
 	esac
 done
 
@@ -246,8 +301,8 @@ echo
 echo "================ published gates on $(hostname -s) ================"
 for g in $RAN; do
 	case " $FAILED " in
-	*" $g "*) printf "  %-10s FAIL   %s\n" "$g" "$WORK/$g.log" ;;
-	*)        printf "  %-10s PASS   %s\n" "$g" "$WORK/$g.log" ;;
+	*" $g "*) printf "  %-13s FAIL   %s\n" "$g" "$WORK/$g.log" ;;
+	*)        printf "  %-13s PASS   %s\n" "$g" "$WORK/$g.log" ;;
 	esac
 done
 
