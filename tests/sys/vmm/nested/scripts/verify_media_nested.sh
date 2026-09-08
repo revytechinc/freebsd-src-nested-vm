@@ -46,6 +46,13 @@ NOTEXEC=NV_INGUEST_NOT_EXECUTABLE
 BOOT_TIMEOUT=${BOOT_TIMEOUT:-900}
 # Time allowed for the inner guest once L1 has a shell.
 INNER_TIMEOUT=${INNER_TIMEOUT:-900}
+# Forwarded to the in-guest script as its own budget. The default suits a
+# modern part; the oldest machine in the fleet takes roughly ten times the
+# EPT violations for the same guest, so it needs a great deal longer and a
+# short budget there reports a guest that was visibly still booting as a
+# failure. Raising this for slow hardware is a parameter of the run, not a
+# lowered bar -- the marker still has to appear.
+L2_TIMEOUT=${L2_TIMEOUT:-600}
 # Matched against the console to know the shell is ready.  Kept loose because
 # the prompt differs between an installed system and mfsBSD.
 SHELL_PROMPT=${SHELL_PROMPT:-'[#$] $'}
@@ -262,7 +269,7 @@ else
 		# image built before the in-guest script learned to accept a
 		# device will refuse this and say so plainly, which is the right
 		# answer: that image cannot run this gate.
-		send "FIXTURE=$L2_FIXTURE_DEV sh $INGUEST"
+		send "FIXTURE=$L2_FIXTURE_DEV L2_TIMEOUT=$L2_TIMEOUT sh $INGUEST"
 		wait_for "$MARKER" "$INNER_TIMEOUT" && found=1
 	else
 		log "no shell prompt after login"
