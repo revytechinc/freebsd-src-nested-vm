@@ -89,6 +89,7 @@ WDPID=$(start_watchdog "$$" "${VMNAME}")
 	PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin \
 	HOME=/root \
 	TERM="${TERM_IN}" \
+	DEMO_BANNER_SHOWN=1 \
 	IMG="${RUN}" \
 	VM="${VMNAME}" \
 	MEM="${MEM}" \
