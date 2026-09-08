@@ -15,6 +15,15 @@
 #                             instructions and comes up nesting
 #   verify_upgrade.sh         the release that was on the site yesterday moves
 #                             to the one on it today
+#   check_artifacts.sh        every copy of a shipped file agrees with the tree
+#
+# The last one runs first and cheaply. A release whose published demo script is
+# older than the source tree will pass both of the other gates and still hand a
+# reader something that does not work -- which is not hypothetical: the demo
+# one-liner spent some time requiring a sysctl value that had stopped being
+# reported, while the tree and most of the fleet were correct. Comparing the
+# copies takes seconds and is the difference between finding that here and
+# finding it when somebody runs it.
 #
 # Both must run AFTER publishing, because both fetch from the live site. That
 # is what makes them worth having and also what makes them easy to forget --
@@ -37,7 +46,7 @@
 #       can reach that one, which is not true of every test host. No default:
 #       this script ships in a public tree and must not name anyone's
 #       infrastructure.
-#   gate  one or more of: stock upgrade   (default: both)
+#   gate  one or more of: artifacts stock upgrade   (default: all three)
 #
 # Exit 0 only if every gate that ran passed.
 
@@ -58,7 +67,7 @@ while getopts p:P: o; do
 	esac
 done
 shift $((OPTIND - 1))
-GATES=${*:-"stock upgrade"}
+GATES=${*:-"artifacts stock upgrade"}
 
 log() { printf '%s: %s\n' "$PROGRAM" "$*"; }
 
@@ -161,6 +170,19 @@ done
 
 for g in $GATES; do
 	case "$g" in
+	artifacts)
+		RAN="$RAN artifacts"
+		# Fast, and first: no point proving an installer works if the
+		# script beside it on the site is a different one from the tree.
+		if [ -n "${ARTIFACT_HOSTS:-}" ]; then
+			set -- -H "$ARTIFACT_HOSTS"
+		else
+			set --
+		fi
+		run_gate artifacts "$HERE/check_artifacts.sh" \
+		    -u "${SITE_URL:-https://nested.cloudbsd.cat}" "$@" ||
+		    FAILED="$FAILED artifacts"
+		;;
 	stock)
 		RAN="$RAN stock"
 		run_gate stock "$HERE/verify_stock_install.sh" "$WORK/stock" ||
