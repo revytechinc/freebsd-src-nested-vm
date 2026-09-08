@@ -53,6 +53,18 @@ SHELL_PROMPT=${SHELL_PROMPT:-'[#$] $'}
 # built from this tree already carry it -- which is the point of the harness
 # living in the tree rather than being hand-placed.
 INGUEST=${INGUEST:-/usr/tests/sys/vmm/nested/scripts/nested_l2_inguest.sh}
+# The inner guest needs a disk to boot, and that disk is NOT shipped inside the
+# release image.  It is ~150MB of mfsBSD, it cannot be produced during a
+# release build (it fetches a distribution and clones a third-party
+# repository), and putting it in the base tests package would put it on every
+# FreeBSD installation that never runs this.  So it lives on the HOST running
+# this harness and is handed to L1 as a second disk, read-only -- L1 is the
+# artifact under test and must not be able to modify the fixture that the next
+# machine in the matrix will use.
+L2_FIXTURE=${L2_FIXTURE:-/usr/tests/sys/vmm/nested/fixtures/l2_freebsd.img}
+# Where that disk appears inside L1: the artifact's own root is vtbd0, so the
+# second virtio-blk device is vtbd1.
+L2_FIXTURE_DEV=${L2_FIXTURE_DEV:-/dev/vtbd1}
 VMNAME="verifymedia$$"
 NMDM=/dev/nmdm${VMNAME}
 
@@ -69,6 +81,12 @@ if ! kldstat -q -m nmdm; then
 	kldload nmdm 2>/dev/null ||
 	    die "nmdm is not loaded and could not be loaded; no console to drive"
 fi
+
+[ -f "$L2_FIXTURE" ] || die "no inner-guest disk at $L2_FIXTURE.
+	This is the disk L2 boots from. It is deliberately not shipped inside
+	the release image; build one with build_l2_image.sh and put it there,
+	or point L2_FIXTURE at an existing one. Failing now rather than after
+	copying the artifact and booting a guest that cannot pass."
 
 mkdir -p "$WORKDIR"
 
@@ -146,10 +164,12 @@ READER_PID=$!
 ( stty -f "${NMDM}B" raw -echo clocal 2>/dev/null ) &
 STTY_PID=$!
 
+log "inner-guest disk: $L2_FIXTURE -> $L2_FIXTURE_DEV in L1 (read-only)"
 log "booting $(basename "$ARTIFACT") as L1"
 bhyve -c 2 -m 4G -A -H -P \
 	-s 0,hostbridge \
 	-s 2,virtio-blk,"$RAW" \
+	-s 3,virtio-blk,"$L2_FIXTURE",ro \
 	-s 31,lpc \
 	-l com1,"${NMDM}A" \
 	-l bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd \
@@ -203,7 +223,14 @@ else
 		# Through sh, not directly, so images predating the mode fix can
 		# still be verified.  The test above is what keeps that from
 		# hiding a fresh regression.
-		send "sh $INGUEST"
+		# Hand over the device itself.  Staging it to a file inside L1
+		# first would mean the ~150MB fixture is copied twice in a 4G
+		# guest -- once by us, once by the in-guest script, which copies
+		# it anyway because the inner guest writes to its disk.  An
+		# image built before the in-guest script learned to accept a
+		# device will refuse this and say so plainly, which is the right
+		# answer: that image cannot run this gate.
+		send "FIXTURE=$L2_FIXTURE_DEV sh $INGUEST"
 		wait_for "$MARKER" "$INNER_TIMEOUT" && found=1
 	else
 		log "no shell prompt after login"
