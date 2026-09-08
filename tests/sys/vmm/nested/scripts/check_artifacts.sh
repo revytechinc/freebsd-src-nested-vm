@@ -26,15 +26,24 @@
 # being found again by somebody it inconveniences.
 #
 # Usage:
-#   check_artifacts.sh [-s srctree] [-u base-url] [-H "host host ..."]
+#   check_artifacts.sh [-s srctree] [-u base-url] [-l] [-H "host host ..."]
 #
 #   -s  source tree to treat as authoritative (default: derived from $0)
 #   -u  site base URL to check published copies against
+#   -l  check the copies installed on THIS machine, without ssh
 #   -H  space-separated hosts to check installed copies on, over ssh
 #
-# With no -u and no -H it checks what it can reach and says what it skipped.
-# Exit 0 only if every copy of every artifact that could be read agreed, and
-# nothing that was asked for was missing.
+# Prefer -l. The -H form is a loop over hostnames inside a script, and it has
+# the failure this kind of loop always has: a host that is down is skipped, and
+# the run reports green for a machine it never asked. Run this on each host
+# instead -- the cloudbsd-test agent does exactly that, and its fan-out reports
+# an unreachable machine as a result rather than as an omission. -H remains for
+# a workstation with no agent, and for the cross-fleet vmm.ko comparison, which
+# genuinely cannot be answered from one machine.
+#
+# With no -u, no -l and no -H it checks what it can reach and says what it
+# skipped. Exit 0 only if every copy of every artifact that could be read
+# agreed, and nothing that was asked for was missing.
 
 set -u
 
@@ -43,22 +52,47 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 SRCTREE=${SRCTREE:-$(cd "$HERE/../../../../.." 2>/dev/null && pwd)}
 BASEURL=${BASEURL:-}
 HOSTS=${HOSTS:-}
+LOCAL=${LOCAL:-no}
 SSH="ssh -4 -o BatchMode=yes -o ConnectTimeout=15"
 
-while getopts s:u:H: o; do
+while getopts s:u:lH: o; do
 	case "$o" in
 	s)	SRCTREE=$OPTARG ;;
 	u)	BASEURL=$OPTARG ;;
+	l)	LOCAL=yes ;;
 	H)	HOSTS=$OPTARG ;;
-	*)	echo "usage: $PROGRAM [-s srctree] [-u base-url] [-H \"host ...\"]" >&2
+	*)	echo "usage: $PROGRAM [-s srctree] [-u base-url] [-l] [-H \"host ...\"]" >&2
 		exit 2 ;;
 	esac
 done
 
 log()  { printf '%s: %s\n' "$PROGRAM" "$*"; }
+# What to call this machine in the output. Computed once: it is printed on
+# every local line, and a name that changes mid-report reads as two machines.
+SELF=$(hostname -s 2>/dev/null) || SELF=""
+[ -n "$SELF" ] || SELF="this host"
 fail=0
 checked=0
 skipped=0
+# Which kinds of copy went unchecked. A bare count tells a reader that
+# something was skipped without telling them what, which is the half of the
+# message that would let them fix it.
+# One kind per line: every entry contains spaces, so a space-separated list
+# cannot be walked back apart afterwards.
+skipped_kinds=""
+
+note_skip() {
+	skipped=$((skipped + 1))
+	case "
+$skipped_kinds
+" in
+	*"
+$1
+"*)	return ;;
+	esac
+	skipped_kinds="${skipped_kinds}${skipped_kinds:+
+}$1"
+}
 
 # sha of a local file, or empty. Empty is never treated as a match: two unread
 # files must not agree with each other, which is the failure mode a naive
@@ -161,7 +195,7 @@ compare() {
 		_loc=${spec#*=}
 		case "$_where" in
 		url)
-			[ -n "$BASEURL" ] || { skipped=$((skipped + 1)); continue; }
+			[ -n "$BASEURL" ] || { note_skip "the published copies (-u)"; continue; }
 			# It is the yardstick in fallback mode; measuring it
 			# against itself would report a reassuring "ok" that
 			# means nothing.
@@ -174,7 +208,33 @@ compare() {
 			_label="$BASEURL/$_loc"
 			;;
 		host)
-			[ -n "$HOSTS" ] || { skipped=$((skipped + 1)); continue; }
+			# The copy installed on THIS machine, read directly.
+			#
+			# This is the case that matters now: every host runs this for
+			# itself and the answers are collected by whatever asked them
+			# all. The ssh loop below cannot report a machine that did not
+			# answer -- it just has one fewer line -- which is how a check
+			# comes to pass for a host it never reached.
+			if [ "$LOCAL" = yes ]; then
+				checked=$((checked + 1))
+				if _got=$(sum_local "$_loc"); then
+					if [ "$_got" = "$_want" ]; then
+						printf '   %-46s %s  ok\n' \
+						    "$SELF:$(basename "$_loc")" "$(echo "$_got" | cut -c1-16)"
+					else
+						printf '   %-46s %s  DIFFERS\n' \
+						    "$SELF:$(basename "$_loc")" "$(echo "$_got" | cut -c1-16)"
+						fail=$((fail + 1))
+					fi
+				else
+					printf '   %-46s %s\n' "$SELF:$_loc" "UNREADABLE"
+					fail=$((fail + 1))
+				fi
+			fi
+			if [ -z "$HOSTS" ]; then
+				[ "$LOCAL" = yes ] || note_skip "the installed copies (-l or -H)"
+				continue
+			fi
 			for _h in $HOSTS; do
 				checked=$((checked + 1))
 				_got=$(sum_host "$_h" "$_loc") || {
@@ -238,13 +298,32 @@ if [ -n "$HOSTS" ]; then
 			fail=$((fail + 1))
 		fi
 	done
+elif [ "$LOCAL" = yes ]; then
+	# One machine cannot compare a fleet. Report what this host is running
+	# and leave the comparison to whoever collected the answers -- which is
+	# where it belongs, because that is the only place that knows which
+	# machines were asked and which never replied.
+	printf '\n== vmm.ko on this host\n'
+	_s=$(sum_local /boot/kernel/vmm.ko) || _s=""
+	if [ -n "$_s" ]; then
+		printf '   %-46s %s  (reported, not compared)\n' "$SELF" "$(echo "$_s" | cut -c1-16)"
+	else
+		# Not merely noted. A test host that cannot read its own hypervisor
+		# module is not running the build anything here claims to measure,
+		# and letting the run exit 0 on the strength of the other checks is
+		# how that goes unnoticed.
+		printf '   %-46s %s\n' "$SELF:/boot/kernel/vmm.ko" "UNREADABLE"
+		checked=$((checked + 1))
+		fail=$((fail + 1))
+	fi
 else
-	skipped=$((skipped + 1))
+	note_skip "vmm.ko across the fleet (-H, or one run per host)"
 fi
 
 printf '\n'
 if [ "$skipped" -gt 0 ]; then
-	log "$skipped check(s) skipped: pass -u for the published copies and -H for the installed ones"
+	log "$skipped check(s) skipped, namely:"
+	printf '%s\n' "$skipped_kinds" | sed "s|^|$PROGRAM:   |"
 fi
 if [ "$fail" -gt 0 ]; then
 	log "FAIL: $fail of $checked copies disagree or could not be read"
@@ -258,8 +337,9 @@ fi
 # to remove from everything else.
 if [ "$checked" -eq 0 ]; then
 	log "NOTHING CHECKED: no second copy of anything was compared."
-	log "  Pass -u <base-url> for the published copies, -H \"host ...\" for the"
-	log "  installed ones, or both. Refusing to report a pass for no comparison."
+	log "  Pass -u <base-url> for the published copies, -l for the ones installed"
+	log "  here, -H \"host ...\" for the ones on other machines, or several."
+	log "  Refusing to report a pass for no comparison."
 	exit 2
 fi
 log "PASS: $checked copies checked, all agree"
