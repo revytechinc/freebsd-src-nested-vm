@@ -46,6 +46,26 @@ UPGRADE_TIMEOUT=${UPGRADE_TIMEOUT:-1800}
 SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-$((BOOT_TIMEOUT / 4))}
 SHELL_PROMPT=${SHELL_PROMPT:-'[#$] $'}
 
+# How to move the machine forward. The site publishes two routes and they make
+# different claims:
+#
+#   installer  the install page: re-run the one-command installer. It lifts the
+#              pkg lock, installs the set in one transaction, and re-locks.
+#   pkg        the download page's "Staying current": pkg update && pkg upgrade,
+#              on the grounds that the base system updates like ports do.
+#
+# The install page also says a plain pkg upgrade will NOT move you, because the
+# first install locks CloudBSD-bhyve so a routine base upgrade cannot revert the
+# hypervisor. Both pages cannot be right for the same reader, so both routes are
+# testable here and the answer is measured rather than argued.
+UPGRADE_METHOD=${UPGRADE_METHOD:-installer}
+case "$UPGRADE_METHOD" in
+installer|pkg)	;;
+*)		echo "$PROGRAM: unknown UPGRADE_METHOD: $UPGRADE_METHOD" >&2
+		echo "$PROGRAM: expected 'installer' or 'pkg'" >&2
+		exit 2 ;;
+esac
+
 log() { printf '%s: %s\n' "$PROGRAM" "$*"; }
 die() { log "FAIL: $*"; exit 1; }
 
@@ -183,14 +203,26 @@ log "starting version: ${BEFORE:-unknown}"
 # So the probe insists on a shebang and a plausible size before anything is
 # executed. The install step below still runs the published command verbatim;
 # this only decides whether it is worth running.
-guest_step "dhclient vtnet0 >/dev/null 2>&1; fetch -qo /tmp/probe.sh $INSTALLER_URL && head -1 /tmp/probe.sh | grep -q '^#!' && [ \$(wc -c < /tmp/probe.sh) -gt 1000 ]" 240 ||
-    die "the guest never answered the fetch of $INSTALLER_URL"
-step_ok || die "the guest did not get a usable installer from $INSTALLER_URL.
+# The pkg route never touches the installer, so its availability is only a
+# precondition for the installer route. Checking it unconditionally would report
+# a site outage as a failure of the pkg upgrade path, which is a different
+# claim about a different thing.
+if [ "$UPGRADE_METHOD" = pkg ]; then
+	guest_step "dhclient vtnet0 >/dev/null 2>&1" 240 ||
+	    die "the guest never answered while bringing up the network"
+	step_ok || die "the guest could not configure a network, so no upgrade
+route could be attempted"
+	log "guest has a network"
+else
+	guest_step "dhclient vtnet0 >/dev/null 2>&1; fetch -qo /tmp/probe.sh $INSTALLER_URL && head -1 /tmp/probe.sh | grep -q '^#!' && [ \$(wc -c < /tmp/probe.sh) -gt 1000 ]" 240 ||
+	    die "the guest never answered the fetch of $INSTALLER_URL"
+	step_ok || die "the guest did not get a usable installer from $INSTALLER_URL.
 Either it could not reach the site, or what came back is not a script -- this
 site answers 200 with its index page for a URL it does not have, so a reachable
 URL is not evidence the installer is there"
+	log "guest reached the published site"
+fi
 
-log "running the published installer as an upgrade"
 # Run the command the site actually publishes, pipe and all. Fetching to a file
 # and running that is a different command: piping leaves the script's stdin
 # attached to the pipe rather than a terminal, so anything it ran that read
@@ -203,7 +235,61 @@ log "running the published installer as an upgrade"
 # fails first if the site cannot be reached at all, and the assertions after
 # the reboot are mandatory, so an installer that did nothing cannot reach a
 # PASS regardless of what the pipeline reported.
-guest_step "fetch -qo - $INSTALLER_URL | sh" "$UPGRADE_TIMEOUT" || {
+case "$UPGRADE_METHOD" in
+installer)	UPGRADE_CMD="fetch -qo - $INSTALLER_URL | sh" ;;
+pkg)		# IGNORE_OSVERSION is not optional here, and that is the finding.
+		# The bare "pkg update && pkg upgrade" the download page prints
+		# stops on an interactive prompt -- "Newer FreeBSD version for
+		# package ...  Ignore the mismatch and continue? [y/N]" -- which
+		# -y does NOT answer, because it is a separate confirmation from
+		# the install plan. Observed on the console: the command sat on
+		# that prompt until the run was abandoned. A reader following the
+		# page either waits forever or presses Enter and takes the
+		# default N, which is a refused upgrade.
+		#
+		# The prompt comes from "pkg update", not "pkg upgrade": it is
+		# raised while processing the FreeBSD-ports-kmods catalogue. So
+		# the flag belongs on BOTH commands. Putting it only on the
+		# upgrade -- the obvious place, and what was tried first --
+		# leaves the published instruction hanging on its first command.
+		#
+		# It has to be the environment variable, not pkg -o. The -o form
+		# was tried and the prompt still appeared: the run sat on it for
+		# the full 1800s timeout. IGNORE_OSVERSION is read from the
+		# environment for this check, and pkg -o sets configuration knobs,
+		# which is not the same thing -- the option is accepted and has no
+		# effect on it. The installer that both other gates exercise
+		# exports the variable, which is why those routes work.
+		UPGRADE_CMD="env IGNORE_OSVERSION=yes pkg update && env IGNORE_OSVERSION=yes pkg upgrade -y" ;;
+*)		die "unknown UPGRADE_METHOD: $UPGRADE_METHOD" ;;
+esac
+log "moving the machine forward by the $UPGRADE_METHOD route"
+
+# Record what pkg considers locked before the attempt. The lock is the whole
+# reason the two published routes disagree, so its state belongs in the log
+# rather than in anyone's recollection.
+LOCK_MARK=$(console_size)
+send "pkg lock -l"
+# Wait for pkg's own words, not for "any letter": the getty echoes the command
+# back before pkg has printed anything, so a pattern as loose as [a-zA-Z] is
+# satisfied by the echo and the capture below reads an empty region. That
+# reports "nothing is locked" on a machine whose locks were simply not read
+# yet -- and the lock state is the entire reason the two published upgrade
+# routes disagree, so a wrong reading here is worse than no reading.
+if ! wait_for_new "$LOCK_MARK" 'Currently locked|No packages are locked' 45; then
+	LOCK_READ=no
+else
+	LOCK_READ=yes
+fi
+LOCKED=$(tail -c "+$((LOCK_MARK + 1))" "$CONSOLE" | tr -d '\r' |
+    grep -o 'CloudBSD-[a-z0-9-]*' | sort -u | tr '\n' ' ')
+if [ "$LOCK_READ" = yes ]; then
+	log "locked before the upgrade: ${LOCKED:-none}"
+else
+	log "locked before the upgrade: COULD NOT READ (pkg did not answer in time)"
+fi
+
+guest_step "$UPGRADE_CMD" "$UPGRADE_TIMEOUT" || {
 	log "console tail:"; tail -30 "$CONSOLE" | sed 's/^/  /'
 	die "the upgrade did not finish within ${UPGRADE_TIMEOUT}s"
 }
