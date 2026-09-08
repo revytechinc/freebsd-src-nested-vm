@@ -12,6 +12,8 @@ PACKAGE=	tests
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/demo
 BINDIR=		${TESTSDIR}
 
+${PACKAGE}FILES+=	bench_guest.sh
+${PACKAGE}FILES+=	bench.sh
 ${PACKAGE}FILES+=	install_demo_kit.sh
 ${PACKAGE}FILES+=	patch_demo_image.sh
 ${PACKAGE}FILES+=	patch_l1_relay.sh
