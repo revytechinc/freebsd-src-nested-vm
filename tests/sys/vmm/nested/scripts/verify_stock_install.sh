@@ -38,6 +38,8 @@ PROGRAM="${0##*/}"
 WORKDIR=${1:-$HOME/stock-test}
 MIRROR=${MIRROR:-https://download.freebsd.org/snapshots/VM-IMAGES/16.0-CURRENT/amd64/Latest}
 INSTALLER_URL=${INSTALLER_URL:-https://nested.cloudbsd.cat/install.sh}
+PKG_REPO_URL=${PKG_REPO_URL:-https://nested.cloudbsd.cat/pkg/\${ABI}/latest}
+BHYVE_PKG_URL=${BHYVE_PKG_URL:-https://nested.cloudbsd.cat/pkg/FreeBSD:16:amd64/latest/CloudBSD-bhyve.pkg}
 BRIDGE=${BRIDGE:-ix0bridge}
 UEFI=${UEFI:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}
 VMNAME=stockinst$$
@@ -54,6 +56,26 @@ SHELL_PROMPT=${SHELL_PROMPT:-'[#$] $'}
 # The published journey includes getting back out again. Set to "no" to test
 # only the install half.
 TEST_REVERT=${TEST_REVERT:-yes}
+
+# Which published route to follow. The site prints two, and they are different
+# instructions with different failure modes -- the one-command installer, and a
+# step-by-step sequence for people who would rather see what is happening.
+#
+#   installer  fetch -qo - .../install.sh | sh
+#   manual     the numbered steps: add the repo, pkg update, install the kernel,
+#              pkg add bhyve, set vmm_load, lock bhyve
+#
+# The manual route is not a paraphrase of the installer. It installs TWO
+# packages where the installer installs four in one transaction, and the same
+# page elsewhere says naming all four together is what lets pkg resolve the file
+# ownership. Whether that matters is a question for a machine, not an argument.
+INSTALL_METHOD=${INSTALL_METHOD:-installer}
+case "$INSTALL_METHOD" in
+installer|manual)	;;
+*)			echo "$PROGRAM: unknown INSTALL_METHOD: $INSTALL_METHOD" >&2
+			echo "$PROGRAM: expected 'installer' or 'manual'" >&2
+			exit 2 ;;
+esac
 
 log() { printf '%s: %s\n' "$PROGRAM" "$*"; }
 die() { log "FAIL: $*"; exit 1; }
@@ -295,7 +317,7 @@ fi
 log "guest reached the published site"
 
 # ---- 4. follow the published instructions, exactly -------------------------
-log "running the published one-command installer"
+[ "$INSTALL_METHOD" = manual ] || log "running the published one-command installer"
 # Run the command the site actually publishes, pipe and all. Fetching to a file
 # and running that is a different command: piping leaves the script's stdin
 # attached to the pipe rather than a terminal, so anything it ran that read
@@ -308,15 +330,55 @@ log "running the published one-command installer"
 # fails first if the site cannot be reached at all, and the assertions after
 # the reboot are mandatory, so an installer that did nothing cannot reach a
 # PASS regardless of what the pipeline reported.
-guest_step "fetch -qo - $INSTALLER_URL | sh" "$INSTALL_TIMEOUT" || {
-	log "console tail:"; tail -30 "$CONSOLE" | sed 's/^/  /'
-	die "the installer did not finish within ${INSTALL_TIMEOUT}s"
+if [ "$INSTALL_METHOD" = manual ]; then
+	log "following the published step-by-step route instead of the installer"
+	# Each step is one published command, run in the published order, and each
+	# is checked on its own. Running them as one blob would report "the manual
+	# route failed" without saying which instruction a reader would have been
+	# standing on when it did.
+	manual_step() {
+		_what=$1; _cmd=$2; _secs=$3
+		guest_step "$_cmd" "$_secs" ||
+		    die "the guest stopped answering during: $_what"
+		if ! step_ok; then
+			log "console tail:"; tail -30 "$CONSOLE" | sed 's/^/  /'
+			die "the published manual route failed at: $_what
+The command was: $_cmd"
+		fi
+		log "  ok: $_what"
+	}
+
+	manual_step "step 1, add the CloudBSD repository" \
+	    "cat > /etc/pkg/CloudBSD.conf <<'CONF'
+CloudBSD: {
+  url: \"$PKG_REPO_URL\",
+  mirror_type: \"none\",
+  enabled: yes,
+  priority: 10
 }
-if ! step_ok; then
-	log "console tail:"; tail -30 "$CONSOLE" | sed 's/^/  /'
-	die "the published installer exited non-zero on a stock system"
+CONF" 60
+	manual_step "step 2, pkg update" \
+	    "env IGNORE_OSVERSION=yes pkg update" 600
+	manual_step "step 3, install the nested-virt kernel" \
+	    "env IGNORE_OSVERSION=yes pkg install -y CloudBSD-kernel-generic" "$INSTALL_TIMEOUT"
+	manual_step "step 4, add the bhyve package" \
+	    "pkg add -f $BHYVE_PKG_URL" "$INSTALL_TIMEOUT"
+	manual_step "step 5, load vmm at boot" \
+	    "echo 'vmm_load=\"YES\"' >> /boot/loader.conf" 60
+	manual_step "step 6, lock bhyve against a base upgrade" \
+	    "pkg lock -y CloudBSD-bhyve" 60
+	log "manual route completed"
+else
+	guest_step "fetch -qo - $INSTALLER_URL | sh" "$INSTALL_TIMEOUT" || {
+		log "console tail:"; tail -30 "$CONSOLE" | sed 's/^/  /'
+		die "the installer did not finish within ${INSTALL_TIMEOUT}s"
+	}
+	if ! step_ok; then
+		log "console tail:"; tail -30 "$CONSOLE" | sed 's/^/  /'
+		die "the published installer exited non-zero on a stock system"
+	fi
+	log "installer completed"
 fi
-log "installer completed"
 
 # ---- 5. the reboot is part of the instructions, so it is part of the test --
 log "rebooting onto the installed kernel"
