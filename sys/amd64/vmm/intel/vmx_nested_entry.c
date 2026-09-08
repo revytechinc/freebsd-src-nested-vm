@@ -467,8 +467,20 @@ vmx_nested_ept02_fault(struct vmx_vcpu *vcpu, uint64_t l2_gpa, uint64_t qual)
 }
 
 /*
- * Build VMCS02 for entry into L2. vmcs01 must be the current VMCS on
- * entry; on return vmcs02 is the current VMCS, ready for vmx_enter_guest.
+ * Build VMCS02 for entry into L2.
+ *
+ * NO VMCS is current on entry: this runs from vm_run()'s deferred nested-op
+ * path, after vmx_run() has VMCLEARed vmcs01 on the way out. The function
+ * makes vmcs01 current itself before reading it, and leaves vmcs02 current on
+ * return, ready for vmx_enter_guest.
+ *
+ * That matters because the allocations below can sleep, and sleeping is only
+ * safe while nothing is current -- which VMCS is loaded belongs to the
+ * physical CPU, not to the thread, so a thread that sleeps here and wakes on
+ * another CPU would find no current VMCS and every later VMREAD would fail.
+ * This comment previously said the opposite, that vmcs01 must be current on
+ * entry, and reading it that way makes the allocations look like a live bug.
+ * They are not; do not "fix" them on the strength of this comment alone.
  */
 int
 vmx_nested_build_vmcs02(struct vmx_vcpu *vcpu)
