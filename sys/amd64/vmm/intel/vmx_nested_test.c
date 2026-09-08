@@ -761,5 +761,17 @@ static moduledata_t vmx_nested_test_mod = {
 };
 
 MODULE_VERSION(vmx_nested_test, 1);
+/*
+ * The layout tests call into vmm.ko's VMCS12 accessors, so vmm must be loaded
+ * before this module and must be searched when this module's symbols are
+ * resolved. Without the dependency the kernel linker looks only at the kernel
+ * and at declared dependencies, finds none of vmcs12_at, vmcs12_lookup,
+ * vmcs12_read_field, vmcs12_write_field or vmcs12_fields_count, and refuses
+ * the module with "symbol vmcs12_fields_count undefined" -- naming whichever
+ * it happened to reach first and giving no hint that the cause is a missing
+ * dependency rather than a missing export. Exporting the symbols from vmm is
+ * necessary but not sufficient; both halves are needed.
+ */
+MODULE_DEPEND(vmx_nested_test, vmm, 1, 1, 1);
 DECLARE_MODULE(vmx_nested_test, vmx_nested_test_mod, SI_SUB_PSEUDO,
     SI_ORDER_ANY);
