@@ -51,6 +51,9 @@ SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-$((BOOT_TIMEOUT / 4))}
 INSTALL_TIMEOUT=${INSTALL_TIMEOUT:-1800}
 # A prompt, loose enough for the official image's shell.
 SHELL_PROMPT=${SHELL_PROMPT:-'[#$] $'}
+# The published journey includes getting back out again. Set to "no" to test
+# only the install half.
+TEST_REVERT=${TEST_REVERT:-yes}
 
 log() { printf '%s: %s\n' "$PROGRAM" "$*"; }
 die() { log "FAIL: $*"; exit 1; }
@@ -245,6 +248,30 @@ is not stock, and a pass here would mean nothing"
 fi
 log "confirmed stock: no nested support before the install"
 
+# ---- 3b. the escape route the page tells a reader to set up FIRST ----------
+#
+# The install page opens by telling the reader to take a boot environment named
+# preinstall before touching anything, and closes by telling them that
+# "bectl activate preinstall; reboot" is the whole way back. That is the most
+# safety-critical instruction on the site: it is read by someone whose machine
+# is already not doing what they wanted. Until now nothing tested it. The
+# evidence box under it described a different flow -- a one-shot activation
+# that reverts by itself -- and said in as many words that no revert command
+# was run.
+#
+# So the BE is taken here, in the published order, and the revert is exercised
+# at the end of this run.
+if [ "$TEST_REVERT" = yes ]; then
+	guest_step "bectl create preinstall" 120 ||
+	    die "the guest stopped answering while creating a boot environment"
+	if ! step_ok; then
+		log "console tail:"; tail -20 "$CONSOLE" | sed 's/^/  /'
+		die "'bectl create preinstall' failed on a stock ZFS-root system,
+which is the first instruction on the install page"
+	fi
+	log "took the preinstall boot environment, as the page instructs"
+fi
+
 # The guest needs to reach the repository. The official images DHCP by default.
 # Check what the URL returns, not merely that it answers. This site is a
 # single-page app behind a fallback: a missing or misdeployed installer comes
@@ -382,8 +409,99 @@ loaded by hand -- this is the kernel, not the instructions"
 fi
 
 if step_ok; then
-	log "PASS: a stock FreeBSD installed the published packages and came back
-with nesting available"
+	log "a stock FreeBSD installed the published packages and came back with
+nesting available"
+	if [ "$TEST_REVERT" != yes ]; then
+		log "PASS: install verified (revert not requested)"
+		log "console: $CONSOLE"
+		exit 0
+	fi
+
+	# ---- 6. the way back, exactly as published -------------------------
+	#
+	# Someone running this has already decided the experiment is over. If it
+	# does not work they are stranded on a kernel they did not want, which
+	# is a worse place to leave a reader than never having offered the
+	# route at all.
+	log "reverting with the published escape route"
+	guest_step "bectl activate preinstall" 120 ||
+	    die "the guest stopped answering while activating the preinstall
+boot environment"
+	if ! step_ok; then
+		log "console tail:"; tail -20 "$CONSOLE" | sed 's/^/  /'
+		die "'bectl activate preinstall' failed -- the published way back
+does not work, and a reader who followed the install instructions has no
+one-command route off this kernel"
+	fi
+
+	MARK=$(console_size)
+	send "reboot"
+	( sleep "$SHUTDOWN_TIMEOUT"; kill -TERM "$BHYVE_PID" 2>/dev/null ) &
+	_watch=$!
+	wait "$BHYVE_PID"
+	_rc=$?
+	kill "$_watch" 2>/dev/null
+	case "$_rc" in
+	0)       log "guest reset as asked; starting it again" ;;
+	1)       die "after the revert the guest POWERED OFF instead of rebooting" ;;
+	2)       die "after the revert the guest HALTED instead of rebooting" ;;
+	143|137) die "the guest did not shut down within ${SHUTDOWN_TIMEOUT}s
+after being told to reboot into the preinstall boot environment" ;;
+	127)     die "lost track of the bhyve process, so the revert cannot be
+judged. This is a fault in the harness, not a verdict on the release" ;;
+	*)       die "bhyve exited $_rc after the revert reboot: a crash or triple
+fault booting the boot environment that is supposed to be the safe one" ;;
+	esac
+	start_guest
+
+	wait_for_new "$MARK" "login:" "$BOOT_TIMEOUT" ||
+	    die "the machine did not reach a login prompt after reverting -- the
+published escape route left it unbootable, which is the worst outcome this
+page can produce"
+	send "root"
+	if wait_for_new "$MARK" "Password:" 15; then send ""; fi
+	wait_for_new "$MARK" "$SHELL_PROMPT" 120 ||
+	    die "no shell prompt after reverting"
+	log "came back up after the revert"
+
+	# It has to be the ORIGINAL system, not merely a system. A revert that
+	# boots something is not a revert; the reader asked for the machine they
+	# had.
+	#
+	# Name what booted rather than inferring it. Asking bectl which boot
+	# environment is active is a direct answer to "did the published command
+	# do what it says"; the sysctl check below is a second, independent
+	# opinion. On its own the sysctl would be weak evidence -- it exists only
+	# while vmm(4) is loaded, so its absence is also what an unloaded module
+	# looks like, and a revert that did nothing would read the same as one
+	# that worked. Two checks that fail for different reasons are worth more
+	# than one that can be satisfied by accident.
+	guest_step "bectl list | grep -qE '^preinstall[[:space:]]+NR'" 60 ||
+	    die "the reverted guest stopped answering when asked which boot
+environment it is running"
+	if ! step_ok; then
+		log "console tail:"; tail -20 "$CONSOLE" | sed 's/^/  /'
+		die "after 'bectl activate preinstall' and a reboot, preinstall is
+not the active boot environment. The machine booted, but not into the system
+the reader asked for"
+	fi
+	log "confirmed: running the preinstall boot environment"
+
+	# Stock FreeBSD has no nested sysctl, which is exactly the check used
+	# before the install -- so the same probe that proved it was stock then
+	# proves it is stock again now.
+	guest_step "sysctl -n hw.vmm.nested.enable >/dev/null 2>&1" 60 ||
+	    die "the reverted guest stopped answering"
+	if step_ok; then
+		log "console tail:"; tail -20 "$CONSOLE" | sed 's/^/  /'
+		die "after reverting, the machine still reports a nested sysctl.
+It booted something, but not the system the reader started with"
+	fi
+	log "confirmed: back on the original system, with no nested support"
+
+	log "PASS: the published route works in both directions -- a stock
+FreeBSD installed the packages and came up nesting, and the published escape
+route put the original system back"
 	log "console: $CONSOLE"
 	exit 0
 fi
