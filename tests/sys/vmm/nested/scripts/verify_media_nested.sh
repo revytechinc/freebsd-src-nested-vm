@@ -65,6 +65,14 @@ L2_FIXTURE=${L2_FIXTURE:-/usr/tests/sys/vmm/nested/fixtures/l2_freebsd.img}
 # Where that disk appears inside L1: the artifact's own root is vtbd0, so the
 # second virtio-blk device is vtbd1.
 L2_FIXTURE_DEV=${L2_FIXTURE_DEV:-/dev/vtbd1}
+# The hypervisor this host is actually running.  A gate that does not check
+# this will happily test a release image on top of a DIFFERENT build's vmm and
+# report PASS, and the verdict column reads the same either way -- which is how
+# a whole seven-host round got spent against a stale kernel before anyone
+# noticed.  Set EXPECT_VMM_SHA to assert it; leave it unset and the identity is
+# still printed, so the result describes itself.
+EXPECT_VMM_SHA=${EXPECT_VMM_SHA:-}
+VMM_KO=${VMM_KO:-/boot/kernel/vmm.ko}
 VMNAME="verifymedia$$"
 NMDM=/dev/nmdm${VMNAME}
 
@@ -74,6 +82,28 @@ die() { log "FAIL: $*"; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "need root"
 [ -f "$ARTIFACT" ] || die "no such artifact: $ARTIFACT"
 kldstat -q -m vmm || die "vmm is not loaded on this host"
+
+# Identity of the hypervisor doing the nesting, checked before anything slow.
+log "host: $(hostname -s), $(sysctl -n hw.model 2>/dev/null)"
+if [ ! -f "$VMM_KO" ]; then
+	# kldstat succeeds whether vmm is a module or built into the kernel, so
+	# it does not catch this.  Reporting "unknown" and carrying on to a PASS
+	# would produce exactly the unidentified result this check exists to
+	# prevent.
+	log "no module at $VMM_KO -- cannot identify the hypervisor under test"
+	die "UNIDENTIFIED BUILD on $(hostname -s): set VMM_KO to the module this host actually runs"
+fi
+HOST_VMM_SHA=$(sha256 -q "$VMM_KO")
+log "L0 vmm.ko: $HOST_VMM_SHA"
+if [ -n "$EXPECT_VMM_SHA" ] && [ "$HOST_VMM_SHA" != "$EXPECT_VMM_SHA" ]; then
+	# One line per log entry: a round is read by scanning these, and an
+	# indented continuation does not match the format everything else uses.
+	log "expected:  $EXPECT_VMM_SHA"
+	log "this host runs a different hypervisor from the one under test, so any"
+	log "verdict from here would describe the wrong build. Deploy the expected"
+	log "kernel and re-run, or unset EXPECT_VMM_SHA if this is deliberate."
+	die "BUILD MISMATCH on $(hostname -s)"
+fi
 # nmdm is NOT loaded by default on these hosts.  Without it the reader's open
 # fails instantly, the console file stays empty, and the run burns the full
 # timeout before reporting "no marker" -- naming the wrong cause.
@@ -92,9 +122,6 @@ mkdir -p "$WORKDIR"
 
 cleanup() {
 	[ -n "${READER_PID:-}" ] && kill "$READER_PID" 2>/dev/null || true
-	# Waits on a carrier that never arrives if bhyve failed to start, and a
-	# matrix sweep would otherwise leave one of these behind per artifact.
-	[ -n "${STTY_PID:-}" ] && kill "$STTY_PID" 2>/dev/null || true
 	bhyvectl --vm="$VMNAME" --destroy >/dev/null 2>&1 || true
 	# The console is the artifact worth keeping; the multi-gigabyte working
 	# copy is not.  KEEP_RAW=1 preserves it for post-mortem.
@@ -150,19 +177,24 @@ CONSOLE=$WORKDIR/${VMNAME}.console
 # open -- a lone `stty -f` is otherwise the only opener, and the last close
 # resets termios and flushes the queue, silently discarding everything the
 # guest printed.
-cat "${NMDM}B" > "$CONSOLE" &
+# ONE open, held for the whole run, doing both jobs.
+#
+# The obvious shape -- a backgrounded `cat` plus a separate `stty -f` -- has a
+# race that is not fixable with a delay.  Both block in open(2) until the A
+# side has carrier, which only appears when bhyve opens it further down, so
+# they unblock together and the order is a coin flip.  If stty wins, it sets
+# termios and CLOSES, and that last close resets termios straight back to
+# cooked with ECHO before the reader ever gets in.  The guest's getty then
+# echoes into a line discipline fighting it, login never completes, and getty
+# respawns for ever: one run produced 777 login prompts and 1.19MB of console.
+#
+# Holding a single descriptor removes the race rather than narrowing it. stty
+# acts on that descriptor, cat reads from it, and nothing closes until the run
+# is over -- so there is no last close to undo the settings.
+( exec 3< "${NMDM}B" || exit 1
+  stty raw -echo clocal <&3 2>/dev/null || true
+  cat <&3 ) > "$CONSOLE" 2>/dev/null &
 READER_PID=$!
-# Both of these BLOCK in open(2) until the A side has carrier, and carrier
-# only appears when bhyve opens it below.  The reader is backgrounded, so its
-# blocking is harmless; running stty in the foreground here is not -- it waits
-# for a carrier that this script has not started yet and never returns, so
-# bhyve is never reached, the console stays empty, and the run reports "no
-# marker" for a guest that was never launched.  Background it, exactly as
-# boot_artifact.sh already does, and let bhyve bring the line up.
-# No fixed delay: the blocking open IS the synchronisation point, so this
-# applies the moment bhyve brings the line up rather than at a guessed time.
-( stty -f "${NMDM}B" raw -echo clocal 2>/dev/null ) &
-STTY_PID=$!
 
 log "inner-guest disk: $L2_FIXTURE -> $L2_FIXTURE_DEV in L1 (read-only)"
 log "booting $(basename "$ARTIFACT") as L1"
