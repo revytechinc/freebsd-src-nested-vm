@@ -38,7 +38,14 @@ PROGRAM="${0##*/}"
 WORKDIR=${1:-$HOME/stock-test}
 MIRROR=${MIRROR:-https://download.freebsd.org/snapshots/VM-IMAGES/16.0-CURRENT/amd64/Latest}
 INSTALLER_URL=${INSTALLER_URL:-https://nested.cloudbsd.cat/install.sh}
-PKG_REPO_URL=${PKG_REPO_URL:-https://nested.cloudbsd.cat/pkg/\${ABI}/latest}
+# NOT written as ${PKG_REPO_URL:-...${ABI}/latest}. Inside a :- default the
+# first unquoted } closes the expansion, so the brace after ABI ended it early
+# and the URL came out as .../pkg/${ABI/latest} -- which pkg dutifully requested
+# and the site answered 404. Single quotes keep ${ABI} literal for pkg to
+# expand itself.
+if [ -z "${PKG_REPO_URL:-}" ]; then
+	PKG_REPO_URL='https://nested.cloudbsd.cat/pkg/${ABI}/latest'
+fi
 BHYVE_PKG_URL=${BHYVE_PKG_URL:-https://nested.cloudbsd.cat/pkg/FreeBSD:16:amd64/latest/CloudBSD-bhyve.pkg}
 BRIDGE=${BRIDGE:-ix0bridge}
 UEFI=${UEFI:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}
@@ -348,24 +355,37 @@ The command was: $_cmd"
 		log "  ok: $_what"
 	}
 
+	# The page prints this as a heredoc. A heredoc cannot be sent here: every
+	# step goes to the guest as ONE line, so a multi-line command hangs
+	# waiting for input that never arrives -- which is what happened, and it
+	# reported as "the guest stopped answering" rather than as a harness
+	# fault. printf writes the identical file, and the file is what the
+	# instruction is actually for, so the content is asserted immediately
+	# afterwards rather than assumed.
 	manual_step "step 1, add the CloudBSD repository" \
-	    "cat > /etc/pkg/CloudBSD.conf <<'CONF'
-CloudBSD: {
-  url: \"$PKG_REPO_URL\",
-  mirror_type: \"none\",
-  enabled: yes,
-  priority: 10
-}
-CONF" 60
+	    "printf 'CloudBSD: {\\n  url: \"%s\",\\n  mirror_type: \"none\",\\n  enabled: yes,\\n  priority: 10\\n}\\n' '$PKG_REPO_URL' > /etc/pkg/CloudBSD.conf" 60
+	manual_step "step 1a, the repository file says what the page says" \
+	    "grep -q 'url: \"$PKG_REPO_URL\"' /etc/pkg/CloudBSD.conf && grep -q 'enabled: yes' /etc/pkg/CloudBSD.conf" 60
 	manual_step "step 2, pkg update" \
 	    "env IGNORE_OSVERSION=yes pkg update" 600
-	manual_step "step 3, install the nested-virt kernel" \
-	    "env IGNORE_OSVERSION=yes pkg install -y CloudBSD-kernel-generic" "$INSTALL_TIMEOUT"
-	manual_step "step 4, add the bhyve package" \
-	    "pkg add -f $BHYVE_PKG_URL" "$INSTALL_TIMEOUT"
-	manual_step "step 5, load vmm at boot" \
+	# One transaction, all four, by NAME from the repository configured above.
+	#
+	# The page printed `pkg add -f <url>/CloudBSD-bhyve.pkg`, and that URL has
+	# never existed: the repository stores packages under versioned filenames
+	# (CloudBSD-bhyve-16.0.20260908.deepnest12.pkg), so the unversioned address
+	# 404s. Publishing the versioned one would only move the problem -- it
+	# would be wrong again on the next release.
+	#
+	# Installing by name lets pkg resolve the version and the dependencies,
+	# which is also why all four are named together: the page's own
+	# troubleshooting section says that is what allows pkg to settle the file
+	# ownership between these packages and the FreeBSD ones they replace. The
+	# page said "two packages, nothing else changed"; two is not enough.
+	manual_step "step 3, install the nested-virt kernel and bhyve toolset" \
+	    "env IGNORE_OSVERSION=yes pkg install -y -f CloudBSD-kernel-generic CloudBSD-bhyve CloudBSD-lib9p CloudBSD-acpi" "$INSTALL_TIMEOUT"
+	manual_step "step 4, load vmm at boot" \
 	    "echo 'vmm_load=\"YES\"' >> /boot/loader.conf" 60
-	manual_step "step 6, lock bhyve against a base upgrade" \
+	manual_step "step 5, lock bhyve against a base upgrade" \
 	    "pkg lock -y CloudBSD-bhyve" 60
 	log "manual route completed"
 else
