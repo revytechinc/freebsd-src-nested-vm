@@ -100,7 +100,7 @@ wait
 
 # ---- summary: every host, pass and fail together --------------------------
 echo "================ round $ROUND ================"
-printf "%-12s %-12s %-34s %s\n" HOST VERDICT CPU CONSOLE
+printf "%-24s %-12s %-34s %s\n" HOST VERDICT CPU CONSOLE
 fails=0; total=0
 for h in "$@"; do
 	_r="$WORK/$h.result"
@@ -112,7 +112,7 @@ for h in "$@"; do
 	BOOTED) ;;
 	*) fails=$((fails + 1)) ;;
 	esac
-	printf "%-12s %-12s %-34s %s\n" "$h" "${v:-NO-RESULT}" "${m:-unknown}" "${c:-}"
+	printf "%-24s %-12s %-34s %s\n" "$h" "${v:-NO-RESULT}" "${m:-unknown}" "${c:-}"
 done
 echo
 echo "$((total - fails))/$total passed; results in $WORK"

@@ -28,4 +28,16 @@ ${PACKAGE}FILES+=	run_full_regression.sh
 ${PACKAGE}FILES+=	run_l2_smoke.sh
 ${PACKAGE}FILES+=	run_vm_boot_gate.sh
 
+# bsd.files.mk gives a FILES group SHAREMODE, and a 0444 script cannot be
+# executed -- not even by root, which needs at least one x bit set.  Nearly
+# everything here is a script that gets run, including one that runs INSIDE a
+# release image to start the inner guest, so shipping them unexecutable fails
+# the release gate at its last step and reports it as "the nested guest never
+# booted".  Set the mode for the whole group rather than per file: a per-file
+# list has to be kept in step with the list above by hand, and a script added
+# without its line reproduces exactly this bug.  The manual page is the one
+# member that is data, not a program.
+${PACKAGE}FILESMODE=	0555
+${PACKAGE}FILESMODE_disable-panic-debugger.8=	0444
+
 .include <bsd.test.mk>
