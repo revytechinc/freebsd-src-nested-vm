@@ -186,6 +186,38 @@ step_ok || die "the starting image does not have nesting available, so it is not
 a previously published release and nothing upgraded from it would mean anything"
 log "confirmed: starting from a release that already nests"
 
+# ---- the published image must not carry an internal repository -------------
+#
+# An internal package repository is for the fleet. It must never be configured
+# into a release image: whoever installs one of these is not us, cannot reach
+# the host, and would get a machine whose pkg update fails against a name that
+# does not resolve for them -- or, worse, one that does.
+#
+# This is checked against the artifact that was actually published, rather than
+# against a staging directory. A repo file on a build host is exactly the sort
+# of thing captured into an image built on that host, so the check has to look
+# at what shipped and not at what anyone intended to ship.
+#
+# The comparison happens IN THE GUEST, and only a verdict crosses the console.
+# The first version of this read URLs back off the console and matched them
+# here, which failed the very first run on "https://nested.cloudbsd.ca" -- the
+# real URL, wrapped by the terminal one character short of its last letter. A
+# gate that cries wolf gets switched off, so nothing here depends on how the
+# console happened to fold a line.
+#
+# The allowlist is deliberately an allowlist. Grepping for one internal hostname
+# passes the day somebody uses a different one.
+guest_step "bad=\$(grep -rhoE 'https?://[^\" ]+' /etc/pkg /usr/local/etc/pkg/repos 2>/dev/null | sort -u | grep -vE 'nested[.]cloudbsd[.]cat|pkg[.]FreeBSD[.]org|download[.]freebsd[.]org'); [ -z \"\$bad\" ] || { echo NOTPUBLIC=\$bad; false; }" 90 ||
+    die "the guest stopped answering while listing its configured repositories"
+if ! step_ok; then
+	log "console tail:"; tail -12 "$CONSOLE" | tr -d '\r' | sed 's/^/  /'
+	die "the published image is configured with a repository that is not one we
+publish from -- see NOTPUBLIC above. A release image must point only at public
+repositories: an internal repo reaches nobody who installs this, and shipping
+its address tells them it exists."
+fi
+log "no internal repository is configured in the published image"
+
 # Record where we are starting from, so "it upgraded" is checkable rather than
 # assumed.
 BEFORE_MARK=$(console_size)
