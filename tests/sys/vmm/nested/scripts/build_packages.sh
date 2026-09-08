@@ -93,6 +93,11 @@ log "libvmmapi + bhyve"
 # indirect way round and depends on precedence rules that are not worth
 # relying on.
 make -C "${SRCTOP}/lib/libvmmapi" -j"$JOBS" all
+# lib9p BEFORE bhyve, which links libprivate9p.so.1 against it. Built after,
+# the link fails with "ld.lld: unable to find library -lprivate9p" on any
+# objdir that has not had a full buildworld -- and it only ever worked because
+# earlier builds had one lying around.
+make -C "${SRCTOP}/lib/lib9p" -j"$JOBS" all
 make -C "${SRCTOP}/usr.sbin/bhyve" -j"$JOBS" all
 make -C "${SRCTOP}/usr.sbin/bhyvectl" -j"$JOBS" all
 make -C "${SRCTOP}/usr.sbin/bhyveload" -j"$JOBS" all
@@ -106,7 +111,7 @@ make -C "${SRCTOP}/usr.sbin/bhyveload" install DESTDIR="$STAGE/bhyve" -DWITHOUT_
 # bhyve links libprivate9p.so.1 (lib9p), which is newer than any published stock
 # base snapshot -- bundle it so the package installs standalone on a stock
 # FreeBSD 16. libuvmem.so.1 IS in stock base (FreeBSD-runtime), so leave that one.
-make -C "${SRCTOP}/lib/lib9p" -j"$JOBS" all
+# Built above, before bhyve linked against it.
 # Copy just the runtime shared object (not headers/man, which would need
 # staging dirs and aren't part of a base package) into the bhyve stage.
 _l9p_obj=$(make -C "${SRCTOP}/lib/lib9p" -V .OBJDIR)
