@@ -44,6 +44,10 @@ VMNAME=stockinst$$
 NMDM=/dev/nmdm${VMNAME}
 # Installing a kernel package over the network onto a cold guest is not fast.
 BOOT_TIMEOUT=${BOOT_TIMEOUT:-600}
+# Derived from the boot budget rather than fixed: the machines that needed a
+# larger budget to boot need one to shut down too, and a fixed bound would fail
+# them for rebooting normally but slowly.
+SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-$((BOOT_TIMEOUT / 4))}
 INSTALL_TIMEOUT=${INSTALL_TIMEOUT:-1800}
 # A prompt, loose enough for the official image's shell.
 SHELL_PROMPT=${SHELL_PROMPT:-'[#$] $'}
@@ -133,15 +137,26 @@ CONSOLE=$WORKDIR/${VMNAME}.console
   cat <&3 ) > "$CONSOLE" 2>/dev/null &
 READER_PID=$!
 
+# bhyve EXITS when the guest reboots -- status 0 means "the guest asked for a
+# reset", and the supervisor is expected to destroy the VM and start it again.
+# It is not a failure and it is not the guest disappearing. Treating that exit
+# as "the machine never came back" turned a perfectly good reboot into a
+# reported defect in the shipped release, which is why this is a function now
+# rather than a single launch.
+start_guest() {
+	bhyvectl --vm="$VMNAME" --destroy >/dev/null 2>&1 || true
+	bhyve -c 2 -m 4G -A -H -P \
+		-s 0,hostbridge \
+		-s 2,virtio-blk,"$RAW" \
+		-s 3,virtio-net,"$TAP" \
+		-s 31,lpc \
+		-l com1,"${NMDM}A" \
+		-l bootrom,"$UEFI" "$VMNAME" >/dev/null 2>&1 &
+	BHYVE_PID=$!
+}
+
 log "booting the stock image"
-bhyve -c 2 -m 4G -A -H -P \
-	-s 0,hostbridge \
-	-s 2,virtio-blk,"$RAW" \
-	-s 3,virtio-net,"$TAP" \
-	-s 31,lpc \
-	-l com1,"${NMDM}A" \
-	-l bootrom,"$UEFI" "$VMNAME" >/dev/null 2>&1 &
-BHYVE_PID=$!
+start_guest
 
 wait_for() {
 	_pat=$1
@@ -258,9 +273,53 @@ log "rebooting onto the installed kernel"
 # the first boot's login prompt and shell prompt are still in the file.
 MARK=$(console_size)
 send "reboot"
+
+# Wait for bhyve to exit, which is how a guest reboot presents to us -- and
+# READ ITS STATUS, because bhyve says which of several very different things
+# happened:
+#
+#   0  the guest asked for a reset. This is the reboot we told it to do.
+#   1  the guest powered off instead.
+#   2  the guest halted instead.
+#   3+ a triple fault or a crash.
+#
+# Only 0 means "restart it and carry on". Relaunching regardless would make an
+# installed kernel that triple-faults come back on its second boot and report
+# the whole run as a success -- hiding exactly the failure this test exists to
+# find.
+#
+# The watchdog bounds the wait without polling for a zombie: kill -0 succeeds
+# against a child that has exited and not yet been reaped, so it cannot tell
+# "still running" from "finished". wait(1) can.
+( sleep "$SHUTDOWN_TIMEOUT"; kill -TERM "$BHYVE_PID" 2>/dev/null ) &
+_watch=$!
+wait "$BHYVE_PID"
+_rc=$?
+kill "$_watch" 2>/dev/null
+
+case "$_rc" in
+0)
+	log "guest reset as asked; starting it again"
+	;;
+1)
+	die "after the install the guest POWERED OFF instead of rebooting"
+	;;
+2)
+	die "after the install the guest HALTED instead of rebooting"
+	;;
+143|137)
+	die "the guest did not shut down within ${SHUTDOWN_TIMEOUT}s of being told to reboot"
+	;;
+*)
+	die "bhyve exited $_rc after the reboot: that is a crash or triple fault,
+not a reset, and the installed kernel is the thing that changed"
+	;;
+esac
+start_guest
+
 wait_for_new "$MARK" "login:" "$BOOT_TIMEOUT" ||
-    die "did not come back after the install"
-log "came back up"
+    die "the installed system did not reach a login prompt after the reboot"
+log "came back up on the installed kernel"
 send "root"
 if wait_for_new "$MARK" "Password:" 15; then
 	send ""
