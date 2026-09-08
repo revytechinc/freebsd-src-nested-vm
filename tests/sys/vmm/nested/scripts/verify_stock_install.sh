@@ -554,6 +554,31 @@ if [ "$INSTALL_METHOD" = be ]; then
 	# failing the route here would be reporting a defect in an instruction
 	# the page told this reader not to run. What is worth knowing is what
 	# happens to somebody who runs it anyway, which is most people.
+	# pkg -r has to be reading the boot environment's own package database
+	# for any of the rest to mean what the page says it means. The boot
+	# environment was cloned moments ago, so the two databases have to agree
+	# right now; if they do not, pkg is writing records into a copy that the
+	# booted system will not be reading. Recorded rather than required,
+	# because the files still land in the right place either way, and what
+	# boots is decided by the files.
+	# Compared as SETS, not as counts. Two databases holding the same number
+	# of packages are not the same database, and one package added against
+	# one removed is exactly the shape of the mistake this is looking for.
+	#
+	# pkg query rather than pkg info, because info prints a description
+	# column whose padding is a property of the listing rather than of the
+	# database. Comparing that would report a difference that is not one.
+	guest_probe "comparing the boot environment's package database with the live one" \
+	    "pkg -r /mnt query -a %n-%v | sort > /tmp/be.pkgs && pkg query -a %n-%v | sort > /tmp/live.pkgs && cmp -s /tmp/be.pkgs /tmp/live.pkgs" 180
+	if step_ok; then
+		log "  the boot environment's package database is the one pkg -r reads"
+	else
+		log "  note: pkg -r /mnt and the live system do not list the same
+installed packages, moments after one was cloned from the other, so the boot
+environment's records are not the ones being updated. The files still land in
+the boot environment; its bookkeeping does not follow them."
+	fi
+
 	guest_probe "unlock bhyve inside the boot environment" \
 	    "pkg -r /mnt unlock -y CloudBSD-bhyve" 180
 	if step_ok; then
@@ -565,19 +590,29 @@ on a stock host, where the package is not installed. The page already tells
 that reader to skip it; this records that the note is load-bearing rather than
 tidy, and the route continues."
 	fi
-	# Printed on the page WITHOUT -y, unlike the same install in the
-	# step-by-step route above it, and unlike the pkg unlock beside it. It is
-	# run here exactly as printed: adding -y would test a command nobody was
-	# given, and quietly paper over the difference. If pkg stops on its
-	# "Proceed with this action?" question, that is the finding.
+	# The page printed this without -y, unlike the same install in the
+	# step-by-step route above it and unlike the pkg unlock beside it, and it
+	# was run here exactly as printed. pkg stopped on
+	#
+	#   Proceed with this action? [y/N]:
+	#
+	# and stayed there. A reader at a keyboard types y and never notices; a
+	# reader who pastes the block, and anything automated, waits forever. The
+	# page now prints -y, and this is that command.
 	pub_step "install the four packages into the boot environment" \
-	    "env IGNORE_OSVERSION=yes pkg -r /mnt install -f CloudBSD-kernel-generic CloudBSD-bhyve CloudBSD-lib9p CloudBSD-acpi" "$INSTALL_TIMEOUT"
+	    "env IGNORE_OSVERSION=yes pkg -r /mnt install -y -f CloudBSD-kernel-generic CloudBSD-bhyve CloudBSD-lib9p CloudBSD-acpi" "$INSTALL_TIMEOUT"
 	# The page says "-r targets it; the running system is not modified by
 	# this command". Checked rather than taken on trust: if that were wrong
 	# the reader would already be on the new kernel before ever choosing to
 	# boot it, and the one-shot activation would be protecting nothing.
 	pub_step "the install landed in the boot environment and left the running system alone" \
 	    "pkg -r /mnt info -e CloudBSD-kernel-generic && ! pkg info -e CloudBSD-kernel-generic" 180
+	# Package records are one kind of evidence; the kernel on disk is another,
+	# and it is the one that decides what boots. These two files were
+	# identical when the boot environment was created, so they must not be
+	# identical now.
+	pub_step "the boot environment holds a different kernel from the one running" \
+	    "! cmp -s /mnt/boot/kernel/kernel /boot/kernel/kernel" 180
 	pub_step "bectl umount nested" "bectl umount nested" 180
 	pub_step "bectl activate -t nested" "bectl activate -t nested" 60
 	# The page prints this listing and annotates both flags. Together they
