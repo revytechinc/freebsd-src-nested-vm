@@ -30,6 +30,7 @@ ${PACKAGE}FILES+=	run_vm_boot_gate.sh
 ${PACKAGE}FILES+=	verify_stock_install.sh
 ${PACKAGE}FILES+=	verify_upgrade.sh
 ${PACKAGE}FILES+=	run_published_gates.sh
+${PACKAGE}FILES+=	check_artifacts.sh
 
 # bsd.files.mk gives a FILES group SHAREMODE, and a 0444 script cannot be
 # executed -- not even by root, which needs at least one x bit set.  Nearly

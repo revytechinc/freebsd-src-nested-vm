@@ -37,6 +37,9 @@ PROGRAM="${0##*/}"
 PREV=${1:?usage: $PROGRAM <previous-release-image> [workdir]}
 WORKDIR=${2:-$HOME/upgrade-test}
 INSTALLER_URL=${INSTALLER_URL:-https://nested.cloudbsd.cat/install.sh}
+# A file pkg itself fetches from the repository the guest is configured with,
+# used to tell "no route to the packages" apart from "the route is broken".
+PKG_PROBE_URL=${PKG_PROBE_URL:-https://nested.cloudbsd.cat/pkg/FreeBSD:16:amd64/latest/meta.conf}
 BRIDGE=${BRIDGE:-ix0bridge}
 UEFI=${UEFI:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}
 VMNAME=upgrade$$
@@ -208,11 +211,21 @@ log "starting version: ${BEFORE:-unknown}"
 # a site outage as a failure of the pkg upgrade path, which is a different
 # claim about a different thing.
 if [ "$UPGRADE_METHOD" = pkg ]; then
-	guest_step "dhclient vtnet0 >/dev/null 2>&1" 240 ||
-	    die "the guest never answered while bringing up the network"
-	step_ok || die "the guest could not configure a network, so no upgrade
-route could be attempted"
-	log "guest has a network"
+	# dhclient's own exit status is not the check. The published image
+	# already configures the interface at boot, so running it again exits
+	# non-zero for the entirely uninteresting reason that the work was
+	# already done -- which is why the installer branch below discards it
+	# with a semicolon rather than an &&.
+	#
+	# What the pkg route actually needs is the package repository, so that
+	# is what is probed: a file pkg itself fetches, from the repository the
+	# guest is configured to use.
+	guest_step "dhclient vtnet0 >/dev/null 2>&1; fetch -qo /dev/null $PKG_PROBE_URL" 240 ||
+	    die "the guest never answered while probing the package repository"
+	step_ok || die "the guest could not reach the package repository at
+$PKG_PROBE_URL, so the pkg upgrade route could not be attempted -- this is a
+network or repository problem, not a verdict on the route"
+	log "guest can reach the package repository"
 else
 	guest_step "dhclient vtnet0 >/dev/null 2>&1; fetch -qo /tmp/probe.sh $INSTALLER_URL && head -1 /tmp/probe.sh | grep -q '^#!' && [ \$(wc -c < /tmp/probe.sh) -gt 1000 ]" 240 ||
 	    die "the guest never answered the fetch of $INSTALLER_URL"
