@@ -173,12 +173,37 @@ BEFORE=$(tail -c "+$((BEFORE_MARK + 1))" "$CONSOLE" | tr -d '\r' |
     grep -o 'CloudBSD-kernel-generic-[0-9A-Za-z._]*' | head -1)
 log "starting version: ${BEFORE:-unknown}"
 
-guest_step "dhclient vtnet0 >/dev/null 2>&1; fetch -qo /tmp/i.sh $INSTALLER_URL" 240 ||
+# Check what the URL returns, not merely that it answers. This site is a
+# single-page app behind a fallback: a missing or misdeployed installer comes
+# back as the index page with status 200, and fetch(1) calls that a success.
+# Feeding that to sh produces a spray of syntax errors attributed to the
+# installer, which is the wrong thing to go and look at -- the same trap
+# already cost a run here when a wrong URL was saved as a release image.
+#
+# So the probe insists on a shebang and a plausible size before anything is
+# executed. The install step below still runs the published command verbatim;
+# this only decides whether it is worth running.
+guest_step "dhclient vtnet0 >/dev/null 2>&1; fetch -qo /tmp/probe.sh $INSTALLER_URL && head -1 /tmp/probe.sh | grep -q '^#!' && [ \$(wc -c < /tmp/probe.sh) -gt 1000 ]" 240 ||
     die "the guest never answered the fetch of $INSTALLER_URL"
-step_ok || die "the guest could not reach $INSTALLER_URL"
+step_ok || die "the guest did not get a usable installer from $INSTALLER_URL.
+Either it could not reach the site, or what came back is not a script -- this
+site answers 200 with its index page for a URL it does not have, so a reachable
+URL is not evidence the installer is there"
 
 log "running the published installer as an upgrade"
-guest_step "sh /tmp/i.sh" "$UPGRADE_TIMEOUT" || {
+# Run the command the site actually publishes, pipe and all. Fetching to a file
+# and running that is a different command: piping leaves the script's stdin
+# attached to the pipe rather than a terminal, so anything it ran that read
+# stdin would behave differently here than in the form we had been testing.
+# Testing a convenient variant of the published instruction tests an
+# instruction nobody was given.
+#
+# The hazard of the pipe is that a failed fetch feeds sh an empty script, which
+# exits 0 -- a silent pass. Two things cover it: the reachability probe above
+# fails first if the site cannot be reached at all, and the assertions after
+# the reboot are mandatory, so an installer that did nothing cannot reach a
+# PASS regardless of what the pipeline reported.
+guest_step "fetch -qo - $INSTALLER_URL | sh" "$UPGRADE_TIMEOUT" || {
 	log "console tail:"; tail -30 "$CONSOLE" | sed 's/^/  /'
 	die "the upgrade did not finish within ${UPGRADE_TIMEOUT}s"
 }
