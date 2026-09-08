@@ -41,5 +41,14 @@ tags
 sys/*/compile
 /src.conf
 
-# Internal operational handoff — fleet topology, host roles, paths. Never publish.
-.review/HANDOFF.md
+# Internal operational notes — fleet topology, host roles, operator paths.
+# The WHOLE directory, not one file in it: naming a single file leaves the rest
+# untracked but not ignored, so a `git add -A` sweeps them into this public
+# repository. legacy-amd-bringup.md, which names internal hosts, reached a
+# public commit exactly that way.
+.review/
+
+# Agent skills synced in by revytechinc/skills sync.sh. Absolute symlinks into
+# a developer's home directory; not part of the source tree, and this
+# repository is public.
+.claude/
