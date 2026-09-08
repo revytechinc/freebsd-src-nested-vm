@@ -842,12 +842,45 @@ vmx_nested_reflect_l2_exit(struct vmx_vcpu *vcpu, uint32_t reason,
 	 * and VMRESUMEs L1 at its VM-exit handler.
 	 */
 	vmx_nested_reflect_copy(vcpu, reason, qual, gpa);
-	VMCLEAR(ns->vmcs02);		/* critical_exit balances the prologue's
-					 * VMPTRLD(vmcs02); vmcs02's launch state
-					 * is rebuilt by build_vmcs02 later. */
-	VMPTRLD(vcpu->vmcs);		/* vmcs01 current, keeps its launched
-					 * state; balanced by vmx_run's tail
-					 * VMCLEAR(vmcs) (in_l2 is now false). */
+	/*
+	 * Switch the current VMCS from vmcs02 back to vmcs01 WITHOUT letting
+	 * the critical section reach zero.
+	 *
+	 * VMCLEAR ends with critical_exit() and VMPTRLD begins with
+	 * critical_enter(), so the pair balances -- but doing them in this
+	 * order dips the nesting to zero in between, and vmx_run() is relying
+	 * on that nesting to keep the thread on this CPU for the whole loop.
+	 * In that window the thread can be preempted and migrated, and then:
+	 *
+	 *   - vmcs01's HOST_GS_BASE still points at the old CPU's PCPU, so the
+	 *     next VM exit restores the wrong per-CPU pointer, and
+	 *   - the SMR section vmx_pmap_activate() entered on the old CPU is
+	 *     exited on the new one, where it was never entered.
+	 *
+	 * The second is what was actually observed: a host panic with
+	 * "smr_exit() not in a smr section" from vmx_pmap_deactivate(), on a
+	 * machine whose pmap still recorded a different CPU as active.
+	 *
+	 * Holding one extra reference across the switch keeps the nesting at
+	 * one or more throughout and leaves the net count unchanged.
+	 *
+	 * This is the only switch that needs it. The other VMCLEAR-then-
+	 * VMPTRLD sequences in the nested code -- in vmx_nested_build_vmcs02()
+	 * and vmx_nested_op_l2_ept() -- run from vm_run()'s deferred path,
+	 * where no VMCS is current and the nesting is legitimately zero to
+	 * begin with, so there is nothing there for a migration to invalidate.
+	 * This one runs inside vmx_run()'s loop, which is holding the nesting
+	 * for its own reasons.
+	 */
+	critical_enter();
+	/*
+	 * vmcs02's launch state is rebuilt by build_vmcs02 later; vmcs01 keeps
+	 * its launched state and is balanced by vmx_run's tail VMCLEAR(vmcs),
+	 * in_l2 now being false.
+	 */
+	VMCLEAR(ns->vmcs02);
+	VMPTRLD(vcpu->vmcs);
+	critical_exit();
 	/*
 	 * vmcs01's HOST_GS_BASE/TR/GDTR are per-CPU and were last set for
 	 * whichever CPU L1 previously ran on (vmx_set_pcpu_defaults is skipped
