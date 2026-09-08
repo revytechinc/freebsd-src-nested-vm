@@ -294,4 +294,9 @@ fi
 
 log "console tail:"
 tail -30 "$CONSOLE" | sed 's/^/  /'
-die "no $MARKER within ${BOOT_TIMEOUT}s -- console kept at $CONSOLE"
+# Report the budget that was actually applied. This said BOOT_TIMEOUT while
+# waiting for INNER_TIMEOUT, so a run that had been given 45 minutes reported
+# failing after 20 -- and the number is the first thing anyone reasons from.
+die "no $MARKER: L1 booted within ${BOOT_TIMEOUT}s but the inner guest did not
+reach multi-user within ${INNER_TIMEOUT}s (inner budget ${L2_TIMEOUT}s).
+Console kept at $CONSOLE"
