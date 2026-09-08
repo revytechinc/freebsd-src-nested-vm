@@ -117,6 +117,13 @@ guest() { # <marker> <timeout> <command...>
 }
 
 # Reader first -- see the console rules in the nested-regression-matrix skill.
+#
+# Create the log before starting the reader. The reader creates it too, with
+# >>, but it is backgrounded, so anything that reads the file first races it --
+# and lines() does, immediately. The race is invisible on a re-run because the
+# previous run left the file behind; it only fails on a genuinely clean
+# working directory, which is the one case a benchmark should be run from.
+: > "${CONS}"
 ( cat "${B}" >> "${CONS}" ) &
 READER=$!
 
