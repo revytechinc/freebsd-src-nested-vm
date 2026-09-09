@@ -32,6 +32,12 @@ PROGRAM="${0##*/}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 SRCTOP=$(CDPATH= cd -- "${SCRIPT_DIR}/../../../../.." && pwd)
 JOBS=${NESTED_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}
+# A plain positive integer, nothing else. It reaches `-j` and, through the
+# environment, a generated shell script that runs as root.
+case "$JOBS" in
+""|*[!0-9]*) echo "$PROGRAM: NESTED_JOBS must be a positive integer: $JOBS" >&2; exit 2 ;;
+0) echo "$PROGRAM: NESTED_JOBS must be greater than zero" >&2; exit 2 ;;
+esac
 KERNCONF=${NESTED_KERNCONF:-GENERIC}
 # Match Makefile.inc1 REPODIR/${ABI}/${VERSION} + latest symlink.
 PKGDIR=${NESTED_PKGDIR:-${HOME}/nested-packages}
@@ -92,23 +98,80 @@ log "libvmmapi + bhyve"
 # WITH_/WITHOUT_ knobs by bsd.mkopt.mk, so setting the derived one is the
 # indirect way round and depends on precedence rules that are not worth
 # relying on.
-make -C "${SRCTOP}/lib/libvmmapi" -j"$JOBS" all
-make -C "${SRCTOP}/usr.sbin/bhyve" -j"$JOBS" all
-make -C "${SRCTOP}/usr.sbin/bhyvectl" -j"$JOBS" all
-make -C "${SRCTOP}/usr.sbin/bhyveload" -j"$JOBS" all
-make -C "${SRCTOP}/lib/libvmmapi" install DESTDIR="$STAGE/bhyve" -DWITHOUT_TESTS
-make -C "${SRCTOP}/usr.sbin/bhyve" install DESTDIR="$STAGE/bhyve" -DWITHOUT_TESTS
-make -C "${SRCTOP}/usr.sbin/bhyvectl" install DESTDIR="$STAGE/bhyve" -DWITHOUT_TESTS
+# Everything below runs inside `make buildenv`, the world's own build
+# environment, and NOT as a plain make in a subdirectory.
+#
+# A bare `make -C ${SRCTOP}/usr.sbin/bhyve all` compiles with the HOST's
+# compiler and the HOST's /usr/include, while `-I${SRCTOP}/sys` pulls headers
+# out of the source tree. That works only for as long as the two agree, and
+# they stop agreeing the moment the tree moves ahead of the world installed on
+# the builder. Merging 147 upstream commits did exactly that:
+#
+#   sys/sys/stdint.h:72: error: 'WCHAR_WIDTH' macro redefined
+#   /usr/include/x86/_stdint.h:210: note: previous definition is here
+#
+# and the release build stopped with 0 packages after four hours of work that
+# had already succeeded. buildenv supplies --sysroot and -B pointing at the
+# world this build just produced, so these compile against the tree they belong
+# to. It also keeps -ffile-prefix-map, which is the whole point of this release.
+#
+# One script rather than a chain of BUILDENV_SHELL invocations: each one is a
+# fresh environment, and the quoting needed to nest a multi-command pipeline
+# inside BUILDENV_SHELL is not reviewable.
+# One trap for both generated scripts. A second `trap ... EXIT` REPLACES the
+# first rather than adding to it, so two of them means the earlier file is only
+# cleaned up by the explicit rm on the success path and leaks on every failure
+# between the two.
+_be=""; _be9=""
+trap 'rm -f "$_be" "$_be9"' EXIT INT TERM
+_be=$(mktemp) || { log "ERROR: cannot create a temporary file"; exit 1; }
+# A QUOTED heredoc, and the values arrive through the environment.
+#
+# With an unquoted heredoc, $SRCTOP, $STAGE and $JOBS stop being make arguments
+# and become shell SOURCE in a file that then gets executed: a value carrying a
+# quote, a semicolon or a newline is a second command rather than a bad path.
+# The generated script is run as root during a release, so it is written the
+# way any other generated program should be -- with the data kept out of the
+# code.
+export NP_SRCTOP="$SRCTOP" NP_STAGE="$STAGE" NP_JOBS="$JOBS"
+cat > "$_be" <<'BUILDENV_EOF'
+#!/bin/sh
+# Generated; runs inside 'make buildenv'.
+set -eu
+make -C "${NP_SRCTOP}/lib/libvmmapi" -j"${NP_JOBS}" all
+make -C "${NP_SRCTOP}/usr.sbin/bhyve" -j"${NP_JOBS}" all
+make -C "${NP_SRCTOP}/usr.sbin/bhyvectl" -j"${NP_JOBS}" all
+make -C "${NP_SRCTOP}/usr.sbin/bhyveload" -j"${NP_JOBS}" all
+make -C "${NP_SRCTOP}/lib/libvmmapi" install DESTDIR="${NP_STAGE}/bhyve" -DWITHOUT_TESTS
+make -C "${NP_SRCTOP}/usr.sbin/bhyve" install DESTDIR="${NP_STAGE}/bhyve" -DWITHOUT_TESTS
+make -C "${NP_SRCTOP}/usr.sbin/bhyvectl" install DESTDIR="${NP_STAGE}/bhyve" -DWITHOUT_TESTS
 # Ship bhyveload too: it is what creates the VM, so an installed system needs
 # the matching one.
-make -C "${SRCTOP}/usr.sbin/bhyveload" install DESTDIR="$STAGE/bhyve" -DWITHOUT_TESTS
+make -C "${NP_SRCTOP}/usr.sbin/bhyveload" install DESTDIR="${NP_STAGE}/bhyve" -DWITHOUT_TESTS
+BUILDENV_EOF
+chmod 0700 "$_be"
+log "building the bhyve toolset inside the world build environment"
+make -C "$SRCTOP" buildenv BUILDENV_SHELL="$_be"
+rm -f "$_be"
 
 # bhyve links libprivate9p.so.1 (lib9p), which is newer than any published stock
 # base snapshot -- bundle it so the package installs standalone on a stock
 # FreeBSD 16. libuvmem.so.1 IS in stock base (FreeBSD-runtime), so leave that one.
-make -C "${SRCTOP}/lib/lib9p" -j"$JOBS" all
+# Same reason as above: inside buildenv, not as a bare subdirectory make.
+_be9=$(mktemp) || { log "ERROR: cannot create a temporary file"; exit 1; }
+cat > "$_be9" <<'BUILDENV9_EOF'
+#!/bin/sh
+set -eu
+make -C "${NP_SRCTOP}/lib/lib9p" -j"${NP_JOBS}" all
+BUILDENV9_EOF
+chmod 0700 "$_be9"
+make -C "$SRCTOP" buildenv BUILDENV_SHELL="$_be9"
+rm -f "$_be9"
 # Copy just the runtime shared object (not headers/man, which would need
 # staging dirs and aren't part of a base package) into the bhyve stage.
+#
+# -V reads a variable and builds nothing, so it is safe outside buildenv --
+# and it must stay outside, because BUILDENV_SHELL swallows stdout.
 _l9p_obj=$(make -C "${SRCTOP}/lib/lib9p" -V .OBJDIR)
 mkdir -p "$STAGE/bhyve/usr/lib"
 cp -a "${_l9p_obj}/libprivate9p.so.1" "$STAGE/bhyve/usr/lib/libprivate9p.so.1"
