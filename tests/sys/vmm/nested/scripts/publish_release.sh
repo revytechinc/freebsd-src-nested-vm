@@ -1,0 +1,437 @@
+#!/bin/sh
+#-
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 REVYTECH, Inc.
+#
+# publish_release.sh -- put a built release on the site: packages, media and the
+# generated manifest, in one action, with the previous release kept.
+#
+# Until now this step lived nowhere. The site bundle had a deploy script; media,
+# packages and the `latest` symlink were a person following a written procedure.
+# That procedure exists because TWO deploy scripts have damaged this system:
+#
+#   - one computed a bundle name from a build that had FAILED, got an empty
+#     variable, and its cleanup expanded to `find ... ! -name '' -delete`. That
+#     excludes nothing. It deleted every JS bundle in the webroot and the site
+#     went blank.
+#   - one ran `cd <dir>` without checking the status. The cd failed on a
+#     permission error, so the loop that followed executed in the operator's
+#     HOME directory and moved his git repositories, source trees and object
+#     directories out from under him.
+#
+# Every rule below is one of those, or the near miss that followed. They are
+# code here rather than a checklist somebody remembers to read.
+#
+# Usage:
+#   publish_release.sh -a <artifact-dir> -p <pkg-repo-dir> -v <version> [-n]
+#
+#   -a  directory holding the built media (ISOs, .img, .xz) and README.txt
+#   -p  the ABI directory of the built package repository (holds <version>/)
+#   -v  the release version, e.g. 16.0.20260908.deepnest13
+#   -n  dry run: print what WOULD happen and change nothing
+#
+# Environment:
+#   PUBLISH_HOST   host serving the site         (required, no default)
+#   PUBLISH_WWW    webroot on that host          (required, no default)
+#   PUBLISH_BASE   public URL for verification   (default https://nested.cloudbsd.cat)
+#
+# The first two have no defaults on purpose: this repository is public, and a
+# default naming the serving host and its path would publish the publish target
+# to everyone who clones it.
+set -eu
+
+PROGRAM="${0##*/}"
+SCRIPTDIR=$(cd "$(dirname "$0")" && pwd -P)
+
+ART=""
+PKG=""
+VERSION=""
+DRY=0
+
+while getopts a:p:v:n o; do
+	case "$o" in
+	a)	ART=$OPTARG ;;
+	p)	PKG=$OPTARG ;;
+	v)	VERSION=$OPTARG ;;
+	n)	DRY=1 ;;
+	*)	echo "usage: $PROGRAM -a <artifact-dir> -p <pkg-repo-dir> -v <version> [-n]" >&2
+		exit 2 ;;
+	esac
+done
+
+# No default host or path in this file. The repository is public, and a default
+# naming the serving host and its jail path publishes the publish target to
+# anyone who clones it. They come from the environment or the run fails.
+HOST=${PUBLISH_HOST:-}
+WWW=${PUBLISH_WWW:-}
+BASE=${PUBLISH_BASE:-https://nested.cloudbsd.cat}
+case "$BASE" in
+https://[0-9A-Za-z]*)	;;
+*)	echo "$PROGRAM: PUBLISH_BASE must be an https:// URL: $BASE" >&2; exit 2 ;;
+esac
+case "$BASE" in
+*[!0-9A-Za-z._:/-]*)
+	echo "$PROGRAM: PUBLISH_BASE contains characters that are not allowed: $BASE" >&2
+	exit 2 ;;
+esac
+ABI=${ABI:-FreeBSD:16:amd64}
+
+[ -n "$HOST" ] || { echo "$PROGRAM: set PUBLISH_HOST (no default: this file is public)" >&2; exit 2; }
+[ -n "$WWW" ]  || { echo "$PROGRAM: set PUBLISH_WWW (no default: this file is public)" >&2; exit 2; }
+
+# RULE 1: an empty variable must never reach a destructive command. Checked
+# before anything else, and checked for EVERY value that will be interpolated
+# into a path -- not just the ones that look dangerous.
+for _v in ART PKG VERSION HOST WWW BASE ABI; do
+	eval "_val=\${$_v:-}"
+	[ -n "$_val" ] || { echo "$PROGRAM: $_v is empty; refusing to touch the webroot" >&2; exit 2; }
+done
+
+# RULE 6: whitelist. The version is the only caller-supplied value that reaches
+# a path this script creates or removes, and those paths are interpolated into
+# commands the REMOTE shell re-parses, so it is constrained twice.
+#
+# Character class FIRST. A shape check alone is not enough: `*` in a case
+# pattern matches spaces and semicolons, so "16.0.20260908.deepnest13; rm -rf /"
+# satisfies 16.0.[0-9]*.deepnest[0-9]* and would have been carried into an ssh
+# command as a second statement. That is not hypothetical -- it is what the
+# first version of this file did, and the test below is what caught it.
+# A colon in HOST is not a character problem, it is a semantic one: rsync reads
+# host:path and splits on the FIRST colon, so "h:22" or an IPv6 literal sends
+# the transfer somewhere other than $WWW, and "h::mod" is daemon syntax.
+case "$HOST" in
+*:*)	echo "$PROGRAM: PUBLISH_HOST may not contain ':' -- rsync would read it as a path" >&2
+	echo "$PROGRAM: use an ssh_config Host alias for a non-default port" >&2
+	exit 2 ;;
+esac
+
+for _v in VERSION HOST ABI; do
+	eval "_val=\${$_v}"
+	case "$_val" in
+	*[!0-9A-Za-z._:-]*)
+		echo "$PROGRAM: $_v contains characters that are not allowed: $_val" >&2
+		exit 2 ;;
+	-*)	echo "$PROGRAM: $_v may not begin with '-'; ssh and rsync would read it as an option" >&2
+		exit 2 ;;
+	esac
+done
+# ABI is interpolated into paths that reach `rm -rf`, so its SHAPE is checked,
+# not merely its characters. A dot is legitimate in a version, which means the
+# character class alone accepts `..` -- and `$WWW/pkgbase/../$VERSION` escapes
+# into the webroot itself. That is a traversal into a recursive delete, reached
+# without a single disallowed character.
+case "$ABI" in
+[A-Za-z0-9]*:[0-9]*:[A-Za-z0-9_]*) ;;
+*)	echo "$PROGRAM: ABI is not of the form Name:version:arch: $ABI" >&2; exit 2 ;;
+esac
+
+# The webroot is a path, so it may contain slashes -- but not a quote, which
+# would end the quoting in the remote command, nor a shell metacharacter.
+case "$WWW" in
+*[!0-9A-Za-z._/-]*)
+	echo "$PROGRAM: PUBLISH_WWW contains characters that are not allowed: $WWW" >&2
+	exit 2 ;;
+/*)	;;
+*)	echo "$PROGRAM: PUBLISH_WWW must be an absolute path" >&2; exit 2 ;;
+esac
+
+# `..` anywhere, in any of them. Every one of these is interpolated into a path
+# that is created, moved or recursively removed on the serving host.
+for _v in VERSION HOST ABI WWW; do
+	eval "_val=\${$_v}"
+	case "/$_val/" in
+	*/../*)	echo "$PROGRAM: $_v contains a '..' component: $_val" >&2
+		echo "$PROGRAM: these values are interpolated into paths that get removed" >&2
+		exit 2 ;;
+	esac
+done
+# Then the shape, now that the value cannot contain a separator.
+case "$VERSION" in
+16.0.[0-9]*.deepnest[0-9]*|16.0.[0-9]*.release[0-9]*) ;;
+*)	echo "$PROGRAM: refusing an unrecognised version: $VERSION" >&2
+	echo "$PROGRAM: expected 16.0.<date>.deepnestN or .releaseN" >&2
+	exit 2 ;;
+esac
+
+say() { echo "==> $*"; }
+would() { if [ "$DRY" = 1 ]; then echo "WOULD: $*"; return 0; fi; return 1; }
+
+# RULE 7: one privileged invocation rather than doas sprinkled inside, so an
+# unprivileged predicate cannot silently report the wrong thing.
+remote() { ssh -o BatchMode=yes -- "$HOST" "$@"; }
+
+# RULE 4: assert the layout BEFORE changing anything.
+say "checking the local artifacts"
+# ART and PKG are rsync SOURCES. rsync reads a source containing a colon before
+# any slash as host:path -- the same split already blocked on PUBLISH_HOST -- so
+# a local directory named `evil:artifacts` would make the transfer PULL from a
+# remote host instead of reading the build output. Requiring an absolute path
+# removes the ambiguity: a leading slash means there is always a slash before
+# any colon. It also settles the find-predicate case, since a path beginning
+# with `/` cannot begin with `-`.
+for _v in ART PKG; do
+	eval "_val=\${$_v}"
+	case "$_val" in
+	/*)	;;
+	*)	echo "$PROGRAM: $_v must be an absolute path: $_val" >&2
+		echo "$PROGRAM: a relative one can be read by rsync as host:path" >&2
+		exit 2 ;;
+	esac
+	case "/$_val/" in
+	*/../*)	echo "$PROGRAM: $_v contains a '..' component: $_val" >&2; exit 2 ;;
+	esac
+done
+[ -d "$ART" ] || { echo "$PROGRAM: no such artifact directory: $ART" >&2; exit 1; }
+[ -d "$PKG/$VERSION" ] || { echo "$PROGRAM: no such package version: $PKG/$VERSION" >&2; exit 1; }
+
+# The package set must satisfy the release contract. Publishing a repository
+# nothing checked is how four packages reached a webroot once.
+CONTRACT="$SCRIPTDIR/check_release_contract.sh"
+[ -x "$CONTRACT" ] || { echo "$PROGRAM: $CONTRACT missing; refusing to publish unchecked" >&2; exit 2; }
+if ! sh "$CONTRACT" -r "$PKG" -v "$VERSION"; then
+	echo "$PROGRAM: the package repository does not satisfy the release contract" >&2
+	exit 1
+fi
+
+# Media: at least one installer image, and every file non-empty. A zero-length
+# image uploads perfectly and fails on the machine that boots it.
+# Newline-separated with globbing OFF. Unquoted word splitting on find output
+# breaks a name containing a space into two paths, and an unquoted expansion is
+# still glob-expanded -- a file called `*.iso` would expand to every iso in the
+# current directory and publish files this build never produced.
+_saveIFS=$IFS
+set -f
+IFS='
+'
+_media=$(find -- "$ART" -maxdepth 1 \( -name '*.iso' -o -name '*.img' -o -name '*.xz' \) | sort)
+[ -n "$_media" ] || { echo "$PROGRAM: no media in $ART" >&2; exit 1; }
+_count=0
+for _f in $_media; do
+	[ -s "$_f" ] || { echo "$PROGRAM: zero-length artifact: $_f" >&2; exit 1; }
+	# A name containing a newline splits into two paths here however carefully
+	# IFS is set, and the second becomes an extra rsync source. These names are
+	# ours; an unexpected one is refused rather than handled.
+	case "${_f##*/}" in
+	*[!0-9A-Za-z._-]*)
+		echo "$PROGRAM: artifact name has characters we never generate: ${_f##*/}" >&2
+		exit 1 ;;
+	esac
+	_count=$((_count + 1))
+done
+# The loop must have seen every file find found. If a name contained a newline
+# the counts disagree, and that is the case this cannot otherwise detect.
+_found=$(find -- "$ART" -maxdepth 1 \( -name '*.iso' -o -name '*.img' -o -name '*.xz' \) |
+    wc -l | tr -d ' ')
+[ "$_count" = "$_found" ] || {
+	echo "$PROGRAM: counted $_count artifacts but find reported $_found;" >&2
+	echo "$PROGRAM: a filename probably contains a newline. Refusing." >&2
+	exit 1
+}
+# Restored immediately. Left set, globbing stays OFF for the rest of the run and
+# the package step's "$PKG/$VERSION"/*.pkg is handed to ls as a literal string,
+# so the count it verifies the transfer against is meaningless.
+IFS=$_saveIFS
+set +f
+say "$_count media files, none empty"
+
+say "checking the remote layout"
+remote "test -d '$WWW/pkgbase/$ABI'" || { echo "$PROGRAM: $WWW/pkgbase/$ABI missing on $HOST" >&2; exit 1; }
+remote "test -d '$WWW/releases'"     || { echo "$PROGRAM: $WWW/releases missing on $HOST" >&2; exit 1; }
+
+PREV=$(remote "readlink '$WWW/pkgbase/$ABI/latest' 2>/dev/null || true")
+PREV=${PREV##*/}
+say "currently published: ${PREV:-<none>}"
+[ "$PREV" != "$VERSION" ] || say "note: $VERSION is already the published version; this will refresh it"
+
+# ---------------------------------------------------------------- packages
+# RULE 3: copy new, verify it is in place, and only then move the pointer.
+say "copying packages ($(du -sh "$PKG/$VERSION" | cut -f1))"
+if ! would "rsync $PKG/$VERSION -> $HOST:$WWW/pkgbase/$ABI/"; then
+	rsync -a --delete -- "$PKG/$VERSION/" "$HOST:$WWW/pkgbase/$ABI/$VERSION.incoming/"
+	# Rename into place only after the whole transfer succeeded, so an
+	# interrupted copy never becomes a half-populated version directory that
+	# looks complete.
+	# Move aside, rename, restore on failure -- the same shape as the media
+	# step. `rm -rf` then `mv` destroys the published version BEFORE the rename,
+	# so an interruption between the two leaves nothing to serve and nothing to
+	# put back. That matters most on a republish of the same version, which this
+	# script explicitly allows.
+	if ! remote "set -e
+		D='$WWW/pkgbase/$ABI'
+		rm -rf \"\$D/$VERSION.old\"
+		if [ -d \"\$D/$VERSION\" ]; then mv \"\$D/$VERSION\" \"\$D/$VERSION.old\"; fi
+		if ! mv \"\$D/$VERSION.incoming\" \"\$D/$VERSION\"; then
+			if [ -d \"\$D/$VERSION.old\" ]; then mv \"\$D/$VERSION.old\" \"\$D/$VERSION\"; fi
+			exit 1
+		fi
+		rm -rf \"\$D/$VERSION.old\""; then
+		echo "$PROGRAM: could not put the packages in place; the previous copy of" >&2
+		echo "$PROGRAM: $VERSION was restored and nothing was published" >&2
+		exit 1
+	fi
+	# Compare the NAMES that landed against the names that were sent. Two counts
+	# can agree at zero: an unmatched glob makes ls error and wc print 0 on both
+	# sides, so a transfer that landed nothing compares equal and reads as
+	# verified. A name list cannot be satisfied that way.
+	# The remote command's STATUS is checked separately from its output. An ssh
+	# failure and an empty directory both produce no output, and telling the
+	# operator "packages are missing" when the network dropped points at
+	# entirely the wrong repair.
+	if ! _remote_list=$(remote "cd '$WWW/pkgbase/$ABI/$VERSION' && find . -maxdepth 1 -name '*.pkg' | sed 's|^\./||' | sort"); then
+		echo "$PROGRAM: could not list the published packages on $HOST" >&2
+		echo "$PROGRAM: this is a connection or path failure, not a missing package" >&2
+		exit 1
+	fi
+	_local_list=$(cd "$PKG/$VERSION" && find . -maxdepth 1 -name '*.pkg' | sed 's|^\./||' | sort)
+	_ln=$(printf '%s\n' "$_local_list" | grep -c .)
+	[ "$_ln" -gt 0 ] || { echo "$PROGRAM: no packages found locally to publish" >&2; exit 1; }
+	if [ "$_remote_list" != "$_local_list" ]; then
+		echo "$PROGRAM: what landed is not what was sent." >&2
+		_cmp=$(mktemp -d) || exit 1
+		printf '%s\n' "$_local_list"  > "$_cmp/local"
+		printf '%s\n' "$_remote_list" > "$_cmp/remote"
+		comm -23 "$_cmp/local" "$_cmp/remote" | sed 's/^/  missing remotely: /' >&2
+		comm -13 "$_cmp/local" "$_cmp/remote" | sed 's/^/  unexpected there: /' >&2
+		rm -rf "$_cmp"
+		exit 1
+	fi
+	say "verified $_ln packages in place, by name"
+fi
+
+# ------------------------------------------------------------------- media
+say "copying media"
+RELDIR="$WWW/releases/16.0-CURRENT-amd64"
+if ! would "rsync media -> $HOST:$RELDIR/"; then
+	# Cleared, not just created. A failure part-way through the upload leaves
+	# .incoming populated, and mkdir -p on the next run merges the new files
+	# into the old ones and moves the mixture into place as one build.
+	remote "rm -rf '$RELDIR.incoming' && mkdir -p '$RELDIR.incoming'"
+	# One at a time, quoted, after `--`. An unquoted list splits on spaces, and
+	# rsync reads a source beginning with `--` as an OPTION -- a file called
+	# --files-from=x.iso sitting in the artifact directory would silently
+	# redirect the transfer to another file list.
+	_s2=$IFS; set -f; IFS='
+'
+	for _f in $_media; do
+		IFS=$_s2; set +f
+		rsync -a -- "$_f" "$HOST:$RELDIR.incoming/"
+		set -f; IFS='
+'
+	done
+	IFS=$_s2; set +f
+	# `if`, not `[ -f ] && rsync`. As the last statement of a loop body under
+	# set -e, a false test makes the LOOP exit non-zero and aborts the script --
+	# so a missing release.json would kill the publish after the media was
+	# uploaded, leaving an orphaned .incoming on the server and the release
+	# half-done.
+	for _extra in README.txt CHECKSUM.SHA256 CHECKSUM.SHA256.txt release.json; do
+		if [ -f "$ART/$_extra" ]; then
+			rsync -a -- "$ART/$_extra" "$HOST:$RELDIR.incoming/"
+		fi
+	done
+	# Keep the outgoing set as the rollback until the new one is verified.
+	# Rolled back if the final move fails. Without this the previous release is
+	# already aside, the live directory does not exist, and the run carries on to
+	# flip `latest` at a release whose media is missing -- the site then serves
+	# nothing for it until somebody notices.
+	if ! remote "set -e
+		rm -rf '$RELDIR.previous'
+		if [ -d '$RELDIR' ]; then mv '$RELDIR' '$RELDIR.previous'; fi
+		if ! mv '$RELDIR.incoming' '$RELDIR'; then
+			if [ -d '$RELDIR.previous' ]; then mv '$RELDIR.previous' '$RELDIR'; fi
+			exit 1
+		fi"; then
+		echo "$PROGRAM: could not put the new media in place; the previous release" >&2
+		echo "$PROGRAM: was restored and nothing was published" >&2
+		exit 1
+	fi
+	# .previous is KEPT on purpose and is not cleaned up here. Media has no
+	# per-version directories -- unlike packages, where the previous version
+	# remains under its own name -- so this copy is the only rollback that
+	# exists. One generation, replaced by the next publish.
+	say "media in place, previous kept at $(basename "$RELDIR").previous"
+fi
+
+# ------------------------------------------------------------ the pointer
+# Moved last. Everything above is invisible to a user until this changes.
+say "pointing latest at $VERSION"
+if ! would "ln -sfn $VERSION $WWW/pkgbase/$ABI/latest"; then
+	remote "ln -sfn '$VERSION' '$WWW/pkgbase/$ABI/latest'"
+	_now=$(remote "readlink '$WWW/pkgbase/$ABI/latest'")
+	[ "${_now##*/}" = "$VERSION" ] || { echo "$PROGRAM: latest is ${_now}, not $VERSION" >&2; exit 1; }
+fi
+
+# --------------------------------------------------------------- verify
+# RULE: by CONTENT, never by status. The site is an SPA behind a fallback, so a
+# MISSING file returns 200 serving index.html. A status-code check passes for
+# something that is not there.
+if [ "$DRY" = 1 ]; then
+	say "dry run: nothing was changed"
+	exit 0
+fi
+
+# /pkg is a symlink to pkgbase on the serving host. The upload writes pkgbase/
+# and the verification reads /pkg/, so if that symlink ever goes away the check
+# fetches a URL unrelated to what was just published -- and a real failure
+# reports ok. Assert the mapping instead of assuming it.
+if ! _pkgmap=$(remote "cd '$WWW' || exit 1
+	if [ -L pkg ]; then readlink pkg
+	elif [ -d pkg ]; then echo DIRECTORY
+	else echo ABSENT
+	fi"); then
+	echo "$PROGRAM: could not inspect $WWW/pkg on $HOST" >&2
+	exit 1
+fi
+case "$_pkgmap" in
+pkgbase|pkgbase/)	say "/pkg -> pkgbase, so the published URL reaches what was uploaded" ;;
+DIRECTORY)	echo "$PROGRAM: $WWW/pkg is a real directory, not a link to pkgbase." >&2
+		echo "$PROGRAM: the packages went to pkgbase/ and the site serves /pkg/;" >&2
+		echo "$PROGRAM: they are different places and nothing would be served." >&2
+		exit 1 ;;
+ABSENT)		echo "$PROGRAM: $WWW/pkg does not exist; /pkg URLs reach nothing" >&2; exit 1 ;;
+*)		echo "$PROGRAM: $WWW/pkg points at '$_pkgmap', not pkgbase" >&2; exit 1 ;;
+esac
+
+say "verifying what is actually served"
+_fail=0
+_check() {
+	_url=$1; _want=$2
+	# fetch(1) where it exists, curl otherwise. Calling a missing fetch prints
+	# an error for every artifact and buries the real result.
+	_ct=""
+	if command -v fetch >/dev/null 2>&1; then
+		_ct=$(fetch -qo /dev/null --print-headers -- "$_url" 2>/dev/null |
+		    sed -n 's/^Content-Type: *//p' | tr -d '\r' | head -1)
+	fi
+	if [ -z "$_ct" ] && command -v curl >/dev/null 2>&1; then
+		_ct=$(curl -sI -- "$_url" 2>/dev/null |
+		    sed -n 's/^[Cc]ontent-[Tt]ype: *//p' | tr -d '\r' | head -1)
+	fi
+	# text/html FIRST. The site is an SPA behind a fallback, so a missing file
+	# returns 200 serving index.html -- and `text/html` matches a `text/`
+	# prefix, so testing the wanted type first reported a missing file as ok.
+	# That is exactly the confusion this whole function exists to prevent, and
+	# it was reintroduced by the order of two case arms.
+	case "$_ct" in
+	text/html*)	echo "  MISSING $_url -- served the SPA fallback, not the file" >&2; _fail=$((_fail+1)) ;;
+	"$_want"*)	echo "  ok   $_url ($_ct)" ;;
+	'')		echo "  NO ANSWER $_url" >&2; _fail=$((_fail+1)) ;;
+	*)		echo "  BAD  $_url (content-type $_ct, wanted $_want)" >&2; _fail=$((_fail+1)) ;;
+	esac
+}
+_check "$BASE/pkg/$ABI/latest/meta.conf" "text/"
+_s3=$IFS; set -f; IFS='
+'
+for _f in $_media; do
+	IFS=$_s3; set +f
+	_check "$BASE/releases/16.0-CURRENT-amd64/$(basename "$_f")" "application/"
+	set -f; IFS='
+'
+done
+IFS=$_s3; set +f
+
+[ "$_fail" -eq 0 ] || { echo "$PROGRAM: $_fail published artefact(s) are not being served" >&2; exit 1; }
+
+say "published $VERSION"
+say "previous release $PREV remains in place as a rollback"
