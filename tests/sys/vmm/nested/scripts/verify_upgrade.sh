@@ -321,7 +321,14 @@ send "pkg lock -l"
 # reports "nothing is locked" on a machine whose locks were simply not read
 # yet -- and the lock state is the entire reason the two published upgrade
 # routes disagree, so a wrong reading here is worse than no reading.
-if ! wait_for_new "$LOCK_MARK" 'Currently locked|No packages are locked' 45; then
+# 45 seconds was not enough and the check never ran. Both published upgrade
+# routes reported "COULD NOT READ (pkg did not answer in time)" -- honestly,
+# which is why this was visible at all, but a check that never completes proves
+# nothing. `pkg lock -l` on a freshly booted guest opens the package database
+# for the first time, and on a cold ZFS ARC that is slower than a shell prompt
+# suggests. The wait is now long enough for the answer rather than long enough
+# for the command to echo.
+if ! wait_for_new "$LOCK_MARK" 'Currently locked|No packages are locked' 150; then
 	LOCK_READ=no
 else
 	LOCK_READ=yes
