@@ -445,7 +445,24 @@ run buildkernel $STAMP make -C "$TREE" -j"$J" buildkernel KERNCONF=GENERIC
 # belong to another build entirely -- and that module is both the one gated for
 # undefined symbols and the one hashed into the provenance file.
 KERNCONF_DIR_NAME=GENERIC
-KO=$(find "${MAKEOBJDIRPREFIX}${TREE}" -name vmm.ko -print -quit)
+# Find the KERNEL BUILD directory first, then the module inside it.
+#
+# Searching for vmm.ko across the objdir and taking the first hit picks
+# whichever the directory walk reaches first, and there is more than one: a
+# previous release run leaves a staged copy under kernelstage/kernel/boot/
+# kernel/vmm.ko, which has no GENERIC ancestor at all. The walk-upwards that
+# followed then could not find the kernel directory -- correctly, because it
+# had been handed the wrong module.
+#
+# The build directory is the right scope: it holds every module this build
+# produced, where the stage holds a subset that has already been copied.
+_kdir=$(find "${MAKEOBJDIRPREFIX}${TREE}" -type d -path "*/sys/$KERNCONF_DIR_NAME" -print -quit)
+if [ -z "$_kdir" ] || [ ! -d "$_kdir" ]; then
+	say "no sys/$KERNCONF_DIR_NAME kernel build directory under ${MAKEOBJDIRPREFIX}${TREE}."
+	say "The path check cannot run, and a check that cannot run is not a pass."
+	exit 1
+fi
+KO=$(find "$_kdir" -name vmm.ko -print -quit)
 # An empty KO is worse than a missing one: `nm ""` fails, its error is
 # discarded, grep matches nothing, and the symbol gate reports a pass it never
 # performed.
@@ -473,22 +490,7 @@ fi
 # Scoped to the shipped artifacts: the kernel binary and *.ko. The rest of the
 # objdir legitimately contains absolute paths -- .meta files record them by
 # design -- so scanning the directory wholesale would fail every build.
-_kdir=$(dirname "$KO")
-while [ "$_kdir" != "/" ] && [ "$(basename "$_kdir")" != "$KERNCONF_DIR_NAME" ]; do
-	_parent=$(dirname "$_kdir")
-	[ "$_parent" = "$_kdir" ] && break
-	_kdir=$_parent
-done
-# No silent fallback. The previous version dropped back to the directory
-# holding vmm.ko, which scopes the scan to one module and makes the kernel
-# check below vanish through a failed -f test -- and the summary still says the
-# gate passed. A gate that cannot find what it is meant to examine has to say
-# so, not narrow itself until it succeeds.
-if [ "$(basename "$_kdir")" != "$KERNCONF_DIR_NAME" ] || [ ! -d "$_kdir" ]; then
-	say "cannot find the $KERNCONF_DIR_NAME kernel directory above $KO."
-	say "The path check cannot run, and a check that cannot run is not a pass."
-	exit 1
-fi
+# $_kdir was established above, before vmm.ko was looked for inside it.
 if [ ! -f "$_kdir/kernel" ]; then
 	say "no kernel binary at $_kdir/kernel -- the path check would examine"
 	say "modules only and report a pass for a kernel it never looked at."
