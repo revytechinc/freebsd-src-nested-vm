@@ -136,6 +136,47 @@ export PKG_WWW=https://nested.cloudbsd.cat
 # path is still there.
 STAMP_USER=cloudbsd
 STAMP_HOST=build
+
+# PKG_VERSION is what every package in the repository is NAMED, and without it
+# the packages come out called after a FreeBSD snapshot rather than after this
+# release.
+#
+# Makefile.inc1 sets it only `.if !defined(PKG_VERSION)`, and its default for a
+# CURRENT branch is "16.snap<timestamp>". So a build that does not pass it
+# produces CloudBSD-bhyve-16.snap20260909121429 where every published release
+# so far is CloudBSD-bhyve-16.0.20260908.deepnest13 -- 524 of them, none
+# carrying "snap". That is not cosmetic: pkg decides whether an installed
+# machine is out of date by comparing those strings, so publishing the snapshot
+# form puts the upgrade path in the hands of a version comparison nobody
+# intended.
+#
+# -r already names the release. It is the same fact, so it is not asked for
+# twice: the version is derived from it and the revision the tree declares.
+# PKG_VERSION from the environment still wins, for a build that needs to say
+# something else.
+if [ -z "${PKG_VERSION:-}" ]; then
+	_rev=$(awk -F'"' '/^REVISION=/{print $2}' "$TREE/sys/conf/newvers.sh")
+	[ -n "$_rev" ] || { echo "$PROGRAM: cannot read REVISION from newvers.sh" >&2; exit 1; }
+	_rel=${RELEASE_TAG:-untagged}
+	case "$_rel" in
+	*[!0-9A-Za-z._-]*|"")
+		echo "$PROGRAM: -r may only contain [0-9A-Za-z._-]: $_rel" >&2; exit 2 ;;
+	esac
+	PKG_VERSION="${_rev}.$(date -u +%Y%m%d).${_rel}"
+fi
+# Validated whatever its source. It is not only derived here -- the environment
+# can supply it -- and it ends up in a package filename, in an `env` argument
+# list, and in a pattern used to check those filenames. Every one of those
+# treats a space, a quote or a regex metacharacter as something other than text.
+case "$PKG_VERSION" in
+""|*[!0-9A-Za-z._-]*)
+	echo "$PROGRAM: PKG_VERSION may only contain [0-9A-Za-z._-]: $PKG_VERSION" >&2
+	exit 2 ;;
+esac
+export PKG_VERSION
+
+# PKG_VERSION is exported above, so `env` need not carry it as an unquoted word
+# in a string that later gets split. The other two are fixed literals.
 STAMP="env USER=$STAMP_USER HOSTNAME=$STAMP_HOST WITH_REPRODUCIBLE_PATHS=yes"
 
 mkdir -p "$LOGD"
@@ -584,8 +625,45 @@ PKGJ=$(( PHYSG / 5 ))
 [ "$PKGJ" -lt 4 ] && PKGJ=4
 say "pkgbase-repo: -j$PKGJ (memory-bound: ~2.7GB per pkg process, so a fifth of RAM on ${PHYSG}G)"
 
+say "package version: $PKG_VERSION"
 run pkgbase-repo $STAMP make -C "$TREE/release" -j"$PKGJ" pkgbase-repo \
 	WORLDDIR="$TREE" NOPORTS=1
+
+# The packages must actually be NAMED after this release.
+#
+# `make` exiting zero says the recipe ran, not that it produced what was asked
+# for. PKG_VERSION reaching the build is one variable away from not reaching
+# it, and the symptom is a repository full of correctly built packages with the
+# wrong name -- which publishes perfectly and breaks the upgrade path, because
+# pkg decides what is out of date by comparing those strings.
+_pkgs=$(find "$RELOBJ/pkgbase-repo" -name '*.pkg' 2>/dev/null) || _pkgs=""
+_npkg=$(printf '%s' "$_pkgs" | grep -c .) || _npkg=0
+if [ "$_npkg" -lt 100 ]; then
+	say "pkgbase-repo produced $_npkg packages. A release carries hundreds."
+	say "make reported success; the target did not do its work."
+	exit 1
+fi
+# A `case` glob, not a grep pattern. PKG_VERSION interpolated into a regex
+# makes its dots match any character -- and a less friendly value could match
+# everything, so a repository with entirely wrong names would pass. `case`
+# compares text, and the loop runs in this shell rather than forking per file.
+_wrong=$(printf '%s\n' "$_pkgs" | sed 's|.*/||' | while read -r _b; do
+	[ -n "$_b" ] || continue
+	case "$_b" in
+	data.pkg|packagesite.pkg|filesite.pkg|meta.pkg) continue ;;
+	*"-$PKG_VERSION.pkg") continue ;;
+	*) echo "$_b" ;;
+	esac
+done)
+_nwrong=$(printf '%s' "$_wrong" | grep -c .) || _nwrong=0
+if [ "$_nwrong" -ne 0 ]; then
+	say "$_nwrong of $_npkg packages are not named for $PKG_VERSION, e.g."
+	printf '%s\n' "$_wrong" | head -5 | sed 's/^/    /' | tee -a "$LOGD/summary.log"
+	say "PKG_VERSION did not reach the package build. Publishing these would"
+	say "put the upgrade path in the hands of a version string nobody chose."
+	exit 1
+fi
+say "packages: $_npkg, all named $PKG_VERSION"
 
 # Prove the repo is usable rather than trusting make's exit status: the
 # staging step needs a `latest' symlink and a catalogue, and their absence is
