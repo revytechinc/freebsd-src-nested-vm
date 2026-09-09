@@ -174,10 +174,148 @@ pkg_from_stage bhyve \
 # Without it the repo has only raw .pkg files and the pkg-install path
 # (install.sh) fails. Run it BEFORE the stable-alias symlinks below so the
 # packages are not double-indexed under two filenames.
-if pkg repo "$OUTDIR" >/dev/null 2>&1; then
-	log "pkg repo: catalog generated in $OUTDIR"
+# Signed when a signing command is configured.
+#
+# NESTED_SIGNING_COMMAND is the command pkg pipes the repository digest to and
+# reads a signature back from. It is a command rather than a key path on
+# purpose: the key stays on the machine that holds it and is reached over ssh,
+# so this build host can ask for a signature but can never take the key. A
+# compromised builder then costs a signature on one repository, not the ability
+# to sign anything for ever.
+#
+# Unsigned is still reachable, because that is what the current release is and
+# refusing it outright would make this script unable to reproduce it -- but only
+# by saying NESTED_ALLOW_UNSIGNED=1 out loud. An unsigned repository sits above
+# the signed FreeBSD one at priority 10 on every host that installs from us, and
+# it ships pkg itself, so it is not something a build should be able to arrive
+# at by forgetting a variable.
+
+# has_signature: does this catalogue archive carry a signature member?
+#
+# The member names are MEASURED, on pkg 2.8.4, by building the same repository
+# three ways and listing what came out. They are not what one would guess, and
+# the two signing modes do not agree with each other:
+#
+#   mode                  data.pkg                packagesite.pkg
+#   --------------------  ----------------------  ---------------------------
+#   unsigned              data                    packagesite.yaml
+#   rsa:<keyfile>         signature, data         signature, packagesite.yaml
+#   signing_command: ...  data.sig, data.pub,     packagesite.yaml.sig,
+#                         data                    packagesite.yaml.pub,
+#                                                 packagesite.yaml
+#
+# So a check for a member named "signature" -- which is what this originally
+# had -- reports EVERY command-signed repository as unsigned, and the build
+# would have aborted on the release it had just signed correctly. The check
+# accepts either shape: "signature", or "<content member>.sig".
+#
+# Exact member names, never a substring: `grep signature` over a listing is
+# also satisfied by a package named something-signature-something. And the
+# expected name is derived from THIS archive's content member -- passing $2 --
+# rather than accepting any member ending in .sig, so a stray or mismatched
+# signature member cannot stand in for the one that covers this catalogue.
+#
+#   has_signature <archive> <content member>
+has_signature() {
+	[ -f "$1" ] || return 1
+	tar -tf "$1" 2>/dev/null | grep -qxF -e signature -e "$2.sig"
+}
+
+if [ -n "${NESTED_SIGNING_COMMAND:-}" ]; then
+	log "pkg repo: signing with: $NESTED_SIGNING_COMMAND"
+	_siglog="$OUTDIR/.pkg-repo-sign.log"
+	# $NESTED_SIGNING_COMMAND is deliberately UNQUOTED. pkg takes the signing
+	# command as its remaining arguments -- the documented form is
+	# "signing_command: ssh signing-server sign.sh" -- so the words have to
+	# reach pkg as separate arguments, and quoting it would hand pkg one
+	# argument containing spaces. `set -f` for the duration is the missing
+	# half: word splitting is wanted here, pathname expansion is not, and
+	# without it a signing command containing a "*" would be replaced by
+	# whatever happens to be in the current directory.
+	#
+	# The `if` condition form, not a bare command followed by `$?`: this
+	# script runs under `set -e`, so a bare failing pkg would end the run
+	# before the status could be read AND before `set -f` was turned back off.
+	set -f
+	if pkg repo "$OUTDIR" signing_command: $NESTED_SIGNING_COMMAND >"$_siglog" 2>&1; then
+		set +f
+		log "pkg repo: catalog generated and SIGNED in $OUTDIR"
+		# Prove it rather than trust the exit status: pkg reports success for a
+		# catalogue it wrote, and the signature is a separate member inside it.
+		#
+		# This used to run `pkg repo -l "$OUTDIR"` first and grep its output.
+		# That was actively destructive: -l is --list-files, so it REGENERATED
+		# the catalogue -- with no signing argument, hence unsigned -- and then
+		# the check ran against the catalogue it had just stripped. Signing
+		# could never have reported success, and a repository that had been
+		# signed correctly came out unsigned. Verification must not be able to
+		# change what it verifies.
+		if has_signature "$OUTDIR/data.pkg" data &&
+		   has_signature "$OUTDIR/packagesite.pkg" packagesite.yaml; then
+			log "pkg repo: signature present in data.pkg and packagesite.pkg"
+			rm -f "$_siglog"
+		else
+			log "ERROR: signing was requested but a catalogue carries no signature"
+			has_signature "$OUTDIR/data.pkg" data ||
+			    log "       data.pkg (the catalogue clients read) is unsigned"
+			has_signature "$OUTDIR/packagesite.pkg" packagesite.yaml ||
+			    log "       packagesite.pkg is unsigned"
+			exit 1
+		fi
+	else
+		set +f
+		log "ERROR: signing failed -- refusing to leave an unsigned repository"
+		log "       where a signed one was asked for"
+		# pkg's own diagnostic, which this used to discard: the only symptom
+		# of a broken signing command was this message and nothing else.
+		#
+		# An `if`, not `[ -s ... ] && sed ...`: under `set -e` a false test
+		# ends the whole compound non-zero and the script exits THERE, so the
+		# `exit 1` below is never reached. The status happens to match today,
+		# which is exactly what makes it a trap for the next edit.
+		if [ -s "$_siglog" ]; then
+			sed 's/^/       pkg: /' "$_siglog"
+		fi
+		exit 1
+	fi
+elif [ "${NESTED_ALLOW_UNSIGNED:-0}" != 1 ]; then
+	# Unsigned is a decision, not a default.
+	#
+	# Without this, a build whose NESTED_SIGNING_COMMAND simply failed to
+	# reach the environment -- a typo, a variable not exported through one
+	# more layer of shell -- produces an unsigned repository and a green
+	# build, and nothing anywhere says the release was downgraded. That
+	# repository installs at priority 10 above the signed FreeBSD one on
+	# every host that follows our instructions, and it ships pkg itself.
+	#
+	# So the two ways to get an unsigned repository are now both explicit:
+	# set NESTED_SIGNING_COMMAND and get a signed one, or say
+	# NESTED_ALLOW_UNSIGNED=1 and mean it.
+	log "ERROR: no NESTED_SIGNING_COMMAND, and NESTED_ALLOW_UNSIGNED is not 1."
+	log "       Refusing to build an unsigned repository by omission."
+	log "       Set NESTED_SIGNING_COMMAND to sign, or NESTED_ALLOW_UNSIGNED=1"
+	log "       to say plainly that this release ships unsigned."
+	exit 1
 else
-	log "WARNING: 'pkg repo $OUTDIR' failed -- no catalog; pkg update/install will not work"
+	# Symmetric with the signed path above: pkg's diagnostic is kept, and a
+	# failure is fatal. It used to discard the output and merely warn, so a
+	# build host where `pkg repo` could not run published a directory of raw
+	# .pkg files with no catalogue at all -- which every client reads as an
+	# empty repository -- and still exited 0 with the one line explaining it
+	# thrown away.
+	_repolog="$OUTDIR/.pkg-repo.log"
+	if pkg repo "$OUTDIR" >"$_repolog" 2>&1; then
+		log "pkg repo: catalog generated in $OUTDIR"
+		log "pkg repo: UNSIGNED, by explicit NESTED_ALLOW_UNSIGNED=1"
+		rm -f "$_repolog"
+	else
+		log "ERROR: 'pkg repo $OUTDIR' failed -- no catalog was written, so"
+		log "       pkg update and pkg install will see an empty repository"
+		if [ -s "$_repolog" ]; then
+			sed 's/^/       pkg: /' "$_repolog"
+		fi
+		exit 1
+	fi
 fi
 
 # pkgbase: ${REPODIR}/${ABI}/latest -> version directory (Makefile.inc1).

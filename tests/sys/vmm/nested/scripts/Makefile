@@ -32,6 +32,14 @@ ${PACKAGE}FILES+=	verify_upgrade.sh
 ${PACKAGE}FILES+=	run_published_gates.sh
 ${PACKAGE}FILES+=	check_artifacts.sh
 ${PACKAGE}FILES+=	check_internal_tls.sh
+${PACKAGE}FILES+=	check_public_endpoints.sh
+${PACKAGE}FILES+=	check_release_contract.sh
+${PACKAGE}FILES+=	run_nested_demo.sh
+${PACKAGE}FILES+=	build_release_media.sh
+${PACKAGE}FILES+=	stage_release_artifacts.sh
+${PACKAGE}FILES+=	gen_release_manifest.sh
+${PACKAGE}FILES+=	gen_release_manifest.py
+${PACKAGE}FILES+=	publish_release.sh
 
 # bsd.files.mk gives a FILES group SHAREMODE, and a 0444 script cannot be
 # executed -- not even by root, which needs at least one x bit set.  Nearly
