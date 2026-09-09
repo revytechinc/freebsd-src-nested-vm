@@ -227,7 +227,7 @@ fi
 if ! sysctl hw.vmm.nested >/dev/null 2>&1; then
 	err "this kernel has no 'hw.vmm.nested' - it is NOT a CloudBSD nested kernel."
 	err "Install the nested kernel + tools first:"
-	err "    fetch -o - https://nested.cloudbsd.cat/install.sh | NESTED_ALLOW_UNSIGNED=1 sh"
+	err "    fetch -o - https://nested.cloudbsd.cat/install.sh | sh"
 	exit 1
 fi
 
@@ -258,7 +258,7 @@ done
 if ! sysctl -n hw.vmm.nested.enable >/dev/null 2>&1; then
 	err "hw.vmm.nested.enable is absent: this kernel has no nested-virt support."
 	err "You are running stock bhyve, not the CloudBSD nested build."
-	err "Install it:  fetch -o - https://nested.cloudbsd.cat/install.sh | NESTED_ALLOW_UNSIGNED=1 sh"
+	err "Install it:  fetch -o - https://nested.cloudbsd.cat/install.sh | sh"
 	exit 1
 fi
 if [ "$(sysctl -n hw.vmm.nested.vmx 2>/dev/null || echo 0)" = 0 ] && \
