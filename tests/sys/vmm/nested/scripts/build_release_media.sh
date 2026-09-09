@@ -466,8 +466,14 @@ if [ "$_nchecked" -lt 50 ]; then
 	say "hundreds. The scan would pass by looking at almost nothing. Refusing."
 	exit 1
 fi
+# `|| _leakers=""` is not decoration. grep exits 1 when it matches nothing,
+# xargs turns that into 123, and under `set -e` the failed assignment ends the
+# script instantly and SILENTLY -- no message, no phase log, no evidence
+# directory. So the gate aborted the build precisely when it had nothing to
+# report, which is to say on every clean build. It did exactly that here: the
+# run stopped dead after printing the vmm.ko path and left eight lines of log.
 _leakers=$(find "$_kdir" -name '*.ko' -type f -print0 2>/dev/null |
-    xargs -0 grep -al -- "$TREE" 2>/dev/null)
+    xargs -0 grep -al -- "$TREE" 2>/dev/null) || _leakers=""
 _nleak=$(printf '%s' "$_leakers" | grep -c . 2>/dev/null) || _nleak=0
 if [ "$_nleak" -ne 0 ]; then
 	say "$_nleak module(s) carry the build tree path $TREE:"
