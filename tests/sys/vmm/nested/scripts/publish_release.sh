@@ -406,6 +406,123 @@ if ! would "rsync media -> $HOST:$RELDIR/"; then
 	say "media in place, previous kept at $(basename "$RELDIR").previous"
 fi
 
+# ------------------------------------------------------- the trust material
+# A signed repository is only usable by a client that knows which key to trust,
+# and for command-signed repositories that means a FINGERPRINT file. Publishing
+# the packages without it leaves every client with signature checking either
+# off or wrong, and a wrong one fails SILENTLY -- pkg says the repository is up
+# to date and shows nothing in it.
+#
+# The fingerprint is derived from the catalogue being published, not from a key
+# file somebody points at. data.pub inside data.pkg is byte-identical to the
+# public half of the key that signed it, so the published fingerprint cannot
+# be the fingerprint of a different key than the one that signed the release.
+#
+# Nothing is published when the catalogue is unsigned. That is not an omission
+# to fix later: publishing a fingerprint beside an unsigned repository makes
+# every client that follows our instructions see an empty repository.
+#
+# One window this does not close, stated rather than hidden: the fingerprint is
+# served from ONE fixed path shared by every release, because install.sh has to
+# be able to fetch it without knowing which release it is about to install. So
+# between replacing it here and moving `latest` below, a client still on the
+# previous release fetches trust material for the new catalogue. That is
+# harmless while the signing key stays the same -- which is the normal case,
+# and the only case so far -- and silently presents as an empty repository if
+# the key ever changes between releases. Rotating the key therefore needs its
+# own procedure, not just another run of this script.
+# Initialised before the branches, not inside them. Under `set -u` a path that
+# leaves it unset -- a dry run whose generator failed, say -- aborts the script
+# where the verification block reads it, which is a long way from the cause.
+PUBLISHED_FINGERPRINT=0
+_fpsum=""
+_cat="$PKG/$VERSION/data.pkg"
+_fpsrc="$SCRIPTDIR/gen_repo_fingerprint.sh"
+if [ ! -f "$_cat" ]; then
+	echo "$PROGRAM: no catalogue at $_cat -- packages were published without one" >&2
+	exit 1
+fi
+
+# Whether the catalogue is signed decides between publishing a fingerprint and
+# DELETING the published one, so it is established positively or not at all.
+#
+# `tar -tf ... | grep -q` reads a tar failure as "unsigned", because the
+# pipeline's status is grep's. A truncated file, an unreadable one, or a tar
+# that died would therefore have deleted the live fingerprint of a correctly
+# signed release, and every client checking signatures would then see an empty
+# repository. So the listing is captured, tar's own status is checked, and
+# anything other than a clean answer stops the publish.
+if ! _members=$(tar -tf "$_cat" 2>/dev/null); then
+	echo "$PROGRAM: cannot list $_cat -- so whether this release is signed" >&2
+	echo "$PROGRAM: cannot be established, and the choice between publishing" >&2
+	echo "$PROGRAM: a fingerprint and deleting one must not be guessed" >&2
+	exit 1
+fi
+# Both spellings: tar writes "data.pub" or "./data.pub" depending on how the
+# archive was created, and only one of them was accepted before.
+if printf '%s\n' "$_members" | grep -qxF -e data.pub -e ./data.pub; then
+	[ -x "$_fpsrc" ] || [ -f "$_fpsrc" ] || {
+		echo "$PROGRAM: the repository is signed but $_fpsrc is missing," >&2
+		echo "$PROGRAM: so no fingerprint can be published and every client" >&2
+		echo "$PROGRAM: would see an empty repository" >&2
+		exit 1; }
+	say "repository is signed; publishing the fingerprint"
+	_fp=$(mktemp) || exit 1
+	if ! sh "$_fpsrc" -c "$_cat" -o "$_fp" >/dev/null; then
+		rm -f "$_fp"
+		if [ "$DRY" = 1 ]; then
+			# A dry run reports; it does not fail. Aborting here would make
+			# the one mode that exists to be safe the only one that stops.
+			say "WOULD FAIL: cannot derive the fingerprint from $_cat"
+			PUBLISHED_FINGERPRINT=0
+			_fp=""
+		else
+			echo "$PROGRAM: could not derive the fingerprint from $_cat" >&2
+			exit 1
+		fi
+	fi
+	# The digest that was actually published, kept so the verification below
+	# can require THIS value rather than merely a fingerprint-shaped page.
+	_fpsum=""
+	if [ -n "$_fp" ] && [ -s "$_fp" ]; then
+		_fpsum=$(sed -n 's/^fingerprint: *"\([0-9a-f]*\)".*/\1/p' "$_fp")
+	fi
+	if [ -n "$_fp" ] && ! would "scp the fingerprint -> $HOST:$WWW/cloudbsd-fingerprint"; then
+		# Copy to a temporary name and rename, so a client fetching during the
+		# upload gets either the old file or the new one and never half of one.
+		if ! scp -q -- "$_fp" "$HOST:$WWW/cloudbsd-fingerprint.incoming" ||
+		   ! remote "mv '$WWW/cloudbsd-fingerprint.incoming' '$WWW/cloudbsd-fingerprint' &&
+			     chmod 0444 '$WWW/cloudbsd-fingerprint'"; then
+			rm -f "$_fp"
+			remote "rm -f '$WWW/cloudbsd-fingerprint.incoming'" || true
+			echo "$PROGRAM: could not publish the fingerprint" >&2
+			exit 1
+		fi
+	fi
+	[ -z "$_fp" ] || rm -f "$_fp"
+	[ -z "$_fpsum" ] || PUBLISHED_FINGERPRINT=1
+else
+	say "repository is UNSIGNED; publishing no fingerprint"
+	say "  clients will install over HTTPS with no signature check"
+	# Remove a fingerprint left by a previous SIGNED release. Leaving it makes
+	# every new install configure fingerprint checking against a repository
+	# that carries no signature, and see an empty repository for it.
+	if ! would "rm -f $HOST:$WWW/cloudbsd-fingerprint (stale, from a signed release)"; then
+		# NOT `|| true`. If this ssh fails, a fingerprint from the previous
+		# signed release stays served beside an unsigned repository, and every
+		# new install configures signature checking that rejects everything --
+		# silently, as an empty repository. Swallowing the failure produces
+		# exactly the state the comment above says must not exist.
+		if ! remote "rm -f '$WWW/cloudbsd-fingerprint'"; then
+			echo "$PROGRAM: could not remove the stale fingerprint on $HOST." >&2
+			echo "$PROGRAM: this release is unsigned, so leaving it served would" >&2
+			echo "$PROGRAM: make every new install see an empty repository." >&2
+			exit 1
+		fi
+	fi
+	PUBLISHED_FINGERPRINT=0
+fi
+
 # ------------------------------------------------------------ the pointer
 # Moved last. Everything above is invisible to a user until this changes.
 say "pointing latest at $VERSION"
@@ -489,6 +606,44 @@ _check() {
 # arrives as application/octet-stream. What must be true is that it is not the
 # fallback page.
 _check "$BASE/pkg/$ABI/latest/meta.conf" ANY
+
+# The fingerprint, when there is one. Checked by CONTENT and by its actual
+# text, not merely by being served: the site answers 200 with the SPA fallback
+# for anything missing, and index.html would pass a status check, pass a
+# content-type check for text/*, and then be installed on every client as
+# trust material -- which reads as "signature verification is on" while
+# verifying nothing.
+if [ "$PUBLISHED_FINGERPRINT" = 1 ]; then
+	_fpbody=""
+	if command -v fetch >/dev/null 2>&1; then
+		_fpbody=$(fetch -qo - -- "$BASE/cloudbsd-fingerprint" 2>/dev/null || true)
+	fi
+	if [ -z "$_fpbody" ] && command -v curl >/dev/null 2>&1; then
+		_fpbody=$(curl -fs -- "$BASE/cloudbsd-fingerprint" 2>/dev/null || true)
+	fi
+	# The exact digest, not merely a page containing the right two words. The
+	# SPA fallback, a cached copy of the PREVIOUS release's fingerprint, or any
+	# page that happens to carry both tokens would satisfy a shape check -- and
+	# a stale fingerprint is the worst of the three, because it is a real
+	# fingerprint for the wrong key and turns every install into an empty
+	# repository while reporting that verification is on.
+	_served=$(printf '%s\n' "$_fpbody" |
+	    sed -n 's/^fingerprint: *"\([0-9a-f]*\)".*/\1/p' | head -1)
+	if [ -z "$_fpbody" ]; then
+		echo "  BAD  $BASE/cloudbsd-fingerprint (nothing served)" >&2
+		_fail=$((_fail+1))
+	elif [ "$_served" = "$_fpsum" ] && [ -n "$_fpsum" ]; then
+		echo "  ok   $BASE/cloudbsd-fingerprint ($_fpsum)"
+	elif [ -z "$_served" ]; then
+		echo "  BAD  $BASE/cloudbsd-fingerprint (not a fingerprint file)" >&2
+		_fail=$((_fail+1))
+	else
+		echo "  BAD  $BASE/cloudbsd-fingerprint serves $_served," >&2
+		echo "       but this release was signed with $_fpsum" >&2
+		_fail=$((_fail+1))
+	fi
+fi
+
 _s3=$IFS; set -f; IFS='
 '
 for _f in $_media; do

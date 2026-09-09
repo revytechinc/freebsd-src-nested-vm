@@ -177,11 +177,20 @@ pkg_from_stage bhyve \
 # Signed when a signing command is configured.
 #
 # NESTED_SIGNING_COMMAND is the command pkg pipes the repository digest to and
-# reads a signature back from. It is a command rather than a key path on
-# purpose: the key stays on the machine that holds it and is reached over ssh,
-# so this build host can ask for a signature but can never take the key. A
-# compromised builder then costs a signature on one repository, not the ability
-# to sign anything for ever.
+# reads a signature back from. It is a command rather than a key path so that
+# the key can stay on the machine that holds it, reached over ssh.
+#
+# How much that is worth depends entirely on the account the command runs as,
+# and it is worth being exact rather than reassuring. If the build host can ssh
+# to the signing host as a user who can READ the key file, then the separation
+# is cosmetic: a compromised builder takes the key and can sign anything for
+# ever. The property only exists when the key is owned by an account the
+# builder cannot become -- a forced command in that account's authorized_keys,
+# so the builder can ask for a signature and get nothing else.
+#
+# What signing buys unconditionally is different and still worth having:
+# tampering AFTER the build -- at the webroot, at a cache, on a mirror -- is
+# detected by every client. That does not depend on where the key lives.
 #
 # Unsigned is still reachable, because that is what the current release is and
 # refusing it outright would make this script unable to reproduce it -- but only

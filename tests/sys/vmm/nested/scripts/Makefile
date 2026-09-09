@@ -39,6 +39,7 @@ ${PACKAGE}FILES+=	build_release_media.sh
 ${PACKAGE}FILES+=	stage_release_artifacts.sh
 ${PACKAGE}FILES+=	gen_release_manifest.sh
 ${PACKAGE}FILES+=	gen_release_manifest.py
+${PACKAGE}FILES+=	gen_repo_fingerprint.sh
 ${PACKAGE}FILES+=	publish_release.sh
 
 # bsd.files.mk gives a FILES group SHAREMODE, and a 0444 script cannot be
