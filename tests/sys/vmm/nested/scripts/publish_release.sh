@@ -157,9 +157,31 @@ esac
 say() { echo "==> $*"; }
 would() { if [ "$DRY" = 1 ]; then echo "WOULD: $*"; return 0; fi; return 1; }
 
-# RULE 7: one privileged invocation rather than doas sprinkled inside, so an
-# unprivileged predicate cannot silently report the wrong thing.
-remote() { ssh -o BatchMode=yes -- "$HOST" "$@"; }
+# RULE 7: one privileged channel, decided once, rather than doas sprinkled
+# through the script. The webroot lives inside a jail whose directory is not
+# traversable by the publishing user, so an unprivileged `test -d` reports the
+# path missing when it is merely unreadable -- which is exactly the "predicate
+# silently reports the wrong thing" case rule 7 exists for.
+#
+# The command is sent on STDIN rather than as an argument. Wrapping it in
+# `doas sh -c '...'` would add a second layer of shell quoting around values
+# that are already interpolated, and every layer is another chance to get the
+# escaping wrong. `sh -s` reads the script and re-parses nothing extra.
+PRIV=""
+remote() { printf '%s\n' "$*" | ssh -o BatchMode=yes -- "$HOST" "${PRIV}sh -s"; }
+
+# Decided once, by asking rather than assuming.
+if printf 'test -d %s\n' "$WWW" | ssh -o BatchMode=yes -- "$HOST" "sh -s" 2>/dev/null; then
+	PRIV=""
+	say "the webroot is reachable unprivileged"
+elif printf 'test -d %s\n' "$WWW" | ssh -o BatchMode=yes -- "$HOST" "doas sh -s" 2>/dev/null; then
+	PRIV="doas "
+	RSYNC_PATH="doas rsync"
+	say "the webroot needs doas; using it for every remote step"
+else
+	echo "$PROGRAM: cannot reach $WWW on $HOST, with or without doas" >&2
+	exit 1
+fi
 
 # RULE 4: assert the layout BEFORE changing anything.
 say "checking the local artifacts"
@@ -248,7 +270,12 @@ say "currently published: ${PREV:-<none>}"
 # RULE 3: copy new, verify it is in place, and only then move the pointer.
 say "copying packages ($(du -sh "$PKG/$VERSION" | cut -f1))"
 if ! would "rsync $PKG/$VERSION -> $HOST:$WWW/pkgbase/$ABI/"; then
-	rsync -a --delete -- "$PKG/$VERSION/" "$HOST:$WWW/pkgbase/$ABI/$VERSION.incoming/"
+	if [ -n "${RSYNC_PATH:-}" ]; then
+		rsync -a --delete --rsync-path="$RSYNC_PATH" -- \
+		    "$PKG/$VERSION/" "$HOST:$WWW/pkgbase/$ABI/$VERSION.incoming/"
+	else
+		rsync -a --delete -- "$PKG/$VERSION/" "$HOST:$WWW/pkgbase/$ABI/$VERSION.incoming/"
+	fi
 	# Rename into place only after the whole transfer succeeded, so an
 	# interrupted copy never becomes a half-populated version directory that
 	# looks complete.
@@ -315,7 +342,11 @@ if ! would "rsync media -> $HOST:$RELDIR/"; then
 '
 	for _f in $_media; do
 		IFS=$_s2; set +f
-		rsync -a -- "$_f" "$HOST:$RELDIR.incoming/"
+		if [ -n "${RSYNC_PATH:-}" ]; then
+			rsync -a --rsync-path="$RSYNC_PATH" -- "$_f" "$HOST:$RELDIR.incoming/"
+		else
+			rsync -a -- "$_f" "$HOST:$RELDIR.incoming/"
+		fi
 		set -f; IFS='
 '
 	done
@@ -327,7 +358,11 @@ if ! would "rsync media -> $HOST:$RELDIR/"; then
 	# half-done.
 	for _extra in README.txt CHECKSUM.SHA256 CHECKSUM.SHA256.txt release.json; do
 		if [ -f "$ART/$_extra" ]; then
-			rsync -a -- "$ART/$_extra" "$HOST:$RELDIR.incoming/"
+			if [ -n "${RSYNC_PATH:-}" ]; then
+				rsync -a --rsync-path="$RSYNC_PATH" -- "$ART/$_extra" "$HOST:$RELDIR.incoming/"
+			else
+				rsync -a -- "$ART/$_extra" "$HOST:$RELDIR.incoming/"
+			fi
 		fi
 	done
 	# Keep the outgoing set as the rollback until the new one is verified.
@@ -335,13 +370,31 @@ if ! would "rsync media -> $HOST:$RELDIR/"; then
 	# already aside, the live directory does not exist, and the run carries on to
 	# flip `latest` at a release whose media is missing -- the site then serves
 	# nothing for it until somebody notices.
+	# Do NOT rotate .previous when republishing the SAME version. Re-running a
+	# publish -- to fix a verification bug, say -- would otherwise move the
+	# just-published media aside and put it straight back, so .previous ends up
+	# holding a copy of the release it is supposed to be the rollback FROM. The
+	# genuine previous release is then gone. That happened.
+	_rotate=yes
+	[ "$PREV" = "$VERSION" ] && _rotate=no
+	[ "$_rotate" = yes ] || say "republishing $VERSION: keeping the existing rollback untouched"
 	if ! remote "set -e
-		rm -rf '$RELDIR.previous'
-		if [ -d '$RELDIR' ]; then mv '$RELDIR' '$RELDIR.previous'; fi
+		if [ '$_rotate' = yes ]; then
+			rm -rf '$RELDIR.previous'
+			if [ -d '$RELDIR' ]; then mv '$RELDIR' '$RELDIR.previous'; fi
+		else
+			rm -rf '$RELDIR.replacing'
+			if [ -d '$RELDIR' ]; then mv '$RELDIR' '$RELDIR.replacing'; fi
+		fi
 		if ! mv '$RELDIR.incoming' '$RELDIR'; then
-			if [ -d '$RELDIR.previous' ]; then mv '$RELDIR.previous' '$RELDIR'; fi
+			if [ '$_rotate' = yes ] && [ -d '$RELDIR.previous' ]; then
+				mv '$RELDIR.previous' '$RELDIR'
+			elif [ -d '$RELDIR.replacing' ]; then
+				mv '$RELDIR.replacing' '$RELDIR'
+			fi
 			exit 1
-		fi"; then
+		fi
+		rm -rf '$RELDIR.replacing'"; then
 		echo "$PROGRAM: could not put the new media in place; the previous release" >&2
 		echo "$PROGRAM: was restored and nothing was published" >&2
 		exit 1
@@ -395,6 +448,11 @@ esac
 
 say "verifying what is actually served"
 _fail=0
+# _want is the type expected, or ANY to accept anything that is not the SPA
+# fallback. The real assertion here is "a file was served, not index.html";
+# pinning an exact type fails correctly-published files whose extension nginx
+# does not recognise, which is worse than not checking, because it reports a
+# good release as broken.
 _check() {
 	_url=$1; _want=$2
 	# fetch(1) where it exists, curl otherwise. Calling a missing fetch prints
@@ -415,12 +473,22 @@ _check() {
 	# it was reintroduced by the order of two case arms.
 	case "$_ct" in
 	text/html*)	echo "  MISSING $_url -- served the SPA fallback, not the file" >&2; _fail=$((_fail+1)) ;;
+	esac
+	case "$_ct" in
+	text/html*)	;;
+	*)		[ "$_want" = ANY ] && { echo "  ok   $_url ($_ct)"; return 0; } ;;
+	esac
+	case "$_ct" in
+	text/html*)	;;
 	"$_want"*)	echo "  ok   $_url ($_ct)" ;;
 	'')		echo "  NO ANSWER $_url" >&2; _fail=$((_fail+1)) ;;
 	*)		echo "  BAD  $_url (content-type $_ct, wanted $_want)" >&2; _fail=$((_fail+1)) ;;
 	esac
 }
-_check "$BASE/pkg/$ABI/latest/meta.conf" "text/"
+# ANY: the repository catalogue has no extension nginx maps to a type, so it
+# arrives as application/octet-stream. What must be true is that it is not the
+# fallback page.
+_check "$BASE/pkg/$ABI/latest/meta.conf" ANY
 _s3=$IFS; set -f; IFS='
 '
 for _f in $_media; do
@@ -434,4 +502,8 @@ IFS=$_s3; set +f
 [ "$_fail" -eq 0 ] || { echo "$PROGRAM: $_fail published artefact(s) are not being served" >&2; exit 1; }
 
 say "published $VERSION"
-say "previous release $PREV remains in place as a rollback"
+if [ "$PREV" = "$VERSION" ]; then
+	say "republished $VERSION; the existing rollback was left as it was"
+else
+	say "previous release $PREV remains in place as a rollback"
+fi
