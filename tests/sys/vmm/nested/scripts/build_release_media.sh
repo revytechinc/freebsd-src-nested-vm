@@ -275,4 +275,50 @@ find "${MAKEOBJDIRPREFIX}${TREE}" \( -name '*.iso' -o -name '*.img' -o -name '*.
 	-o -name '*.vhd' -o -name '*.vmdk' \) 2>/dev/null |
 	while read -r f; do printf '  %8s  %s\n' "$(du -h "$f" | cut -f1)" "$f"; done |
 	tee -a "$LOGD/summary.log"
+
+# The README that ships beside the images. It was hand-written for the first
+# release and then hand-edited for each one after, which is how it came to
+# describe the media as a CloudBSD release -- it is an experimental FreeBSD
+# build for one feature, and CloudBSD is only the package-name prefix. Nothing
+# generated it, so nothing kept it true either.
+#
+# The warning is not boilerplate: this is unaudited kernel code that can take
+# a host down, and someone who downloads an image without reading the site has
+# only this file to tell them so.
+# Without this the sed below writes nothing, and the file whose entire job is
+# to say which kernel these images carry ships with an empty identity section.
+[ -s "$LOGD/build-identity.txt" ] || {
+	say "no build identity to put in the README -- refusing to ship media that does not say what it is"
+	exit 1
+}
+README="$RELOBJ/README.txt"
+{
+	echo "Experimental FreeBSD media — bhyve nested virtualization"
+	echo
+	echo "EXPERIMENTAL. This carries brand-new bhyve nested-virtualization"
+	echo "kernel code. It has NOT been security audited and has NOT been"
+	echo "production hardened. It can panic or destabilise the host. Do not"
+	echo "install it on production equipment or any machine whose data you"
+	echo "care about. Use throwaway or test hardware only."
+	echo
+	echo "Build identity"
+	echo "--------------"
+	sed 's/^/  /' "$LOGD/build-identity.txt"
+	echo
+	echo "Artifacts"
+	echo "---------"
+	# RELOBJ, not the objdir prefix: these are the files that ship, and they
+	# sit beside this README. stat(1) is the FreeBSD one -- so is mkimg, sysctl
+	# and everything else here, and a GNU fallback would be worse than none:
+	# `stat -f' on GNU coreutils means filesystem status, succeeds, and prints
+	# text where a byte count belongs.
+	find "$RELOBJ" -maxdepth 1 \( -name '*.iso' -o -name '*.img' \
+		-o -name '*.qcow2' -o -name '*.vhd' -o -name '*.vmdk' \
+		-o -name '*.xz' \) 2>/dev/null | sort |
+		while read -r f; do
+			printf '  %-45s %12d\n' "${f##*/}" "$(stat -f %z "$f")"
+		done
+} > "$README"
+say "README: $README"
+
 say "DONE $TARGET"
