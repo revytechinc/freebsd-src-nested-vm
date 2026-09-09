@@ -151,7 +151,21 @@ src=$ARTIFACT
 case "$src" in
 *.xz)
 	log "decompressing $(basename "$src")"
-	DECOMPRESSED=$WORKDIR/$(basename "${src%.xz}").$$
+	# The uniqueness suffix goes BEFORE the extension. Appending it after
+	# produced "...-zfs.raw.4483", which the format check immediately below
+	# then rejected as an unrecognised type -- so every compressed artifact
+	# failed this gate at the step after the one that created the name.
+	_stem=$(basename "${src%.xz}")
+	case "$_stem" in
+	*.*)	DECOMPRESSED="$WORKDIR/${_stem%.*}.$$.${_stem##*.}" ;;
+	*)	# No extension left after stripping .xz. Appending .$$ here would
+		# recreate the very bug this fixes -- the format check below would
+		# see ".4483" and reject it. There is nothing to detect a format
+		# from, so say that instead of failing three steps later with a
+		# message about an unrecognised type.
+		die "cannot tell what format $(basename "$ARTIFACT") is:" \
+		    "it has no extension once .xz is stripped" ;;
+	esac
 	xz -dc "$src" > "$DECOMPRESSED"
 	src=$DECOMPRESSED
 	;;
