@@ -640,8 +640,12 @@ run pkgbase-repo $STAMP make -C "$TREE/release" -j"$PKGJ" pkgbase-repo \
 # pkg decides what is out of date by comparing those strings.
 _pkgs=$(find "$RELOBJ/pkgbase-repo" -name '*.pkg' 2>/dev/null) || _pkgs=""
 _npkg=$(printf '%s' "$_pkgs" | grep -c .) || _npkg=0
-if [ "$_npkg" -lt 100 ]; then
-	say "pkgbase-repo produced $_npkg packages. A release carries hundreds."
+# Counted separately from the total, because the total includes packages that
+# are not ours and a plausible total says nothing about how many we shipped.
+_nours=$(printf '%s\n' "$_pkgs" | sed 's|.*/||' | grep -c "^${PKG_NAME_PREFIX}-") || _nours=0
+if [ "$_npkg" -lt 100 ] || [ "$_nours" -lt 100 ]; then
+	say "pkgbase-repo produced $_npkg packages, $_nours of them ${PKG_NAME_PREFIX}-*."
+	say "A release carries hundreds of each."
 	say "make reported success; the target did not do its work."
 	exit 1
 fi
@@ -649,10 +653,18 @@ fi
 # makes its dots match any character -- and a less friendly value could match
 # everything, so a repository with entirely wrong names would pass. `case`
 # compares text, and the loop runs in this shell rather than forking per file.
+# Scoped to OUR packages. The repository also carries pkg(8) itself --
+# pkg-2.8.4.pkg -- which legitimately has its own upstream version and is in
+# the published release for the same reason: a machine installing from us needs
+# a pkg that can read this catalogue. Requiring the release version of it
+# refused a repository that was entirely correct.
 _wrong=$(printf '%s\n' "$_pkgs" | sed 's|.*/||' | while read -r _b; do
 	[ -n "$_b" ] || continue
 	case "$_b" in
-	data.pkg|packagesite.pkg|filesite.pkg|meta.pkg) continue ;;
+	"${PKG_NAME_PREFIX}-"*) ;;
+	*) continue ;;
+	esac
+	case "$_b" in
 	*"-$PKG_VERSION.pkg") continue ;;
 	*) echo "$_b" ;;
 	esac
@@ -665,7 +677,7 @@ if [ "$_nwrong" -ne 0 ]; then
 	say "put the upgrade path in the hands of a version string nobody chose."
 	exit 1
 fi
-say "packages: $_npkg, all named $PKG_VERSION"
+say "packages: $_npkg total, $_nours ${PKG_NAME_PREFIX}-* all named $PKG_VERSION"
 
 # Prove the repo is usable rather than trusting make's exit status: the
 # staging step needs a `latest' symlink and a catalogue, and their absence is
