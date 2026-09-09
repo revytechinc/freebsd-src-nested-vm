@@ -369,6 +369,32 @@ say "prefix: release=[$P_REL] installer=[$P_INS]"
 	exit 1
 }
 
+# The object directory has to be writable BY THIS USER, all of it.
+#
+# This build runs unprivileged. build_packages.sh runs under doas and shares
+# this object directory, so it leaves root-owned files behind -- 75 of them,
+# the last time -- and the next unprivileged build dies partway through
+# buildworld with:
+#
+#   error: unable to open output file 'vmmapi_machdep.o': 'Operation not permitted'
+#
+# which reads as a compiler problem and is a permissions problem. Finding the
+# first offending file takes milliseconds; discovering it through a failed
+# buildworld takes as long as the build got. `doas chown -R` on the object
+# directory is the fix, and the message says so rather than making somebody
+# work it out twice.
+_me=$(id -un)
+_notmine=$(find "$MAKEOBJDIRPREFIX" ! -user "$_me" -print 2>/dev/null | head -1)
+if [ -n "$_notmine" ]; then
+	_n=$(find "$MAKEOBJDIRPREFIX" ! -user "$_me" 2>/dev/null | grep -c .) || _n="?"
+	say "$_n file(s) under $MAKEOBJDIRPREFIX are not owned by $_me, e.g."
+	say "    $_notmine"
+	say "This build is unprivileged and would fail partway through buildworld"
+	say "with 'unable to open output file ... Operation not permitted'."
+	say "Fix: doas chown -R $_me $MAKEOBJDIRPREFIX"
+	exit 1
+fi
+
 run buildworld  $STAMP make -C "$TREE" -j"$J" buildworld
 run buildkernel $STAMP make -C "$TREE" -j"$J" buildkernel KERNCONF=GENERIC
 
