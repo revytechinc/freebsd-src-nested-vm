@@ -33,7 +33,18 @@
 # from the machine rather than taking it as an argument.
 set -eu
 
+
 PROGRAM="${0##*/}"
+# Absolute, resolved BEFORE the cd below. `dirname "$0"` evaluated after
+# `cd "$TREE"` points somewhere else entirely for any relative invocation, and
+# the run then aborts saying it cannot find its own helper -- after the
+# multi-hour build has already completed.
+SCRIPTDIR=$(cd "$(dirname "$0")" && pwd -P)
+# Verified now, not at the end. The package set is checked by a helper beside
+# this script; if it is missing, finding out AFTER the world and the packages
+# are built loses the whole run for a condition that takes a millisecond to
+# test. Same argument as every other preflight here.
+CONTRACT="$SCRIPTDIR/check_release_contract.sh"
 COMMIT=""
 RELEASE_TAG="${RELEASE_TAG:-}"
 TREE=""
@@ -67,7 +78,11 @@ fi
 # all silently no-op, and the stale-artifact traps this script exists to avoid
 # are back, with nothing saying so.
 TREE=$(cd "$TREE" && pwd -P) || { echo "$PROGRAM: no such tree" >&2; exit 2; }
-[ -d "$TREE/.git" ] || { echo "$PROGRAM: $TREE is not a git checkout" >&2; exit 2; }
+# `git rev-parse`, not `[ -d "$TREE/.git" ]`: in a git WORKTREE the .git entry
+# is a FILE containing a gitdir: pointer, not a directory. Every tree this
+# project builds from is a worktree, so the directory test refuses all of them.
+git -C "$TREE" rev-parse --git-dir >/dev/null 2>&1 || {
+	echo "$PROGRAM: $TREE is not a git checkout" >&2; exit 2; }
 [ -f "$TREE/Makefile.inc1" ] || { echo "$PROGRAM: $TREE is not a FreeBSD source tree" >&2; exit 2; }
 
 BRANCH=$(git -C "$TREE" rev-parse --abbrev-ref HEAD)
@@ -76,7 +91,32 @@ export MAKEOBJDIRPREFIX=${MAKEOBJDIRPREFIX:-$HOME/obj-relmedia}
 
 # Read the width from the machine; the fleet is not uniform and a literal is
 # how half of a 64-core builder sat idle through every previous build.
-J=${BUILD_J:-$(sysctl -n hw.ncpu)}
+# Portable core count. `sysctl -n hw.ncpu` is FreeBSD and macOS; `nproc` is
+# Linux. Failing loudly beats defaulting to 1, which turns a 2.7-hour build into
+# an overnight one with nothing saying why.
+_numeric() {
+	case "$1" in
+	''|*[!0-9]*)	return 1 ;;
+	*)		printf '%s\n' "$1"; return 0 ;;
+	esac
+}
+ncpu() {
+	# Each probe judged by the VALUE it printed, not by its exit status: some
+	# builds of these tools print a usable number while returning non-zero, and
+	# others exit 0 having printed nothing.
+	_v=$(sysctl -n hw.ncpu 2>/dev/null) || _v=""
+	_numeric "$_v" && return 0
+	_v=$(nproc 2>/dev/null) || _v=""
+	_numeric "$_v" && return 0
+	_v=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || _v=""
+	_numeric "$_v" && return 0
+	return 1
+}
+# Tested by value, not by status: `J=$(...)` is an assignment and an assignment
+# always succeeds, so a `||` clause on it never fires however badly the
+# substitution failed.
+J=${BUILD_J:-$(ncpu)}
+[ -n "$J" ] || { echo "$PROGRAM: cannot determine the core count; set BUILD_J" >&2; exit 2; }
 
 export PKG_NAME_PREFIX=CloudBSD
 export PKG_MAINTAINER=nested@cloudbsd.cat
@@ -89,14 +129,202 @@ mkdir -p "$LOGD"
 say() { echo "=== $(date '+%H:%M:%S') $*" | tee -a "$LOGD/summary.log"; }
 run() {
 	_phase=$1; shift
+	CURRENT_PHASE=$_phase
 	say "$_phase: starting"
-	if "$@" > "$LOGD/$_phase.log" 2>&1; then
+	# Only external commands are ever passed here. Do not pass a shell function:
+	# backgrounding runs it in a child, so any variable it sets is lost to this
+	# shell and surfaces much later as an empty path.
+	"$@" > "$LOGD/$_phase.log" 2>&1 &
+	CURRENT_CHILD=$!
+	if wait "$CURRENT_CHILD"; then
+		CURRENT_CHILD=
+		# Cleared on success. Left set, an interrupt arriving between phases
+		# reports the phase that already finished -- and if that was
+		# buildworld, on_failure treats the interrupt as a SOURCE failure and
+		# keeps the staging tier, which is the state the trap exists to remove.
+		CURRENT_PHASE="after-$_phase"
 		say "$_phase: ok"
 	else
+		CURRENT_CHILD=
 		say "$_phase: FAILED -- last 40 lines:"
 		tail -40 "$LOGD/$_phase.log" | tee -a "$LOGD/summary.log"
+		on_failure "$_phase"
 		exit 1
 	fi
+}
+
+# Which failures are the source's fault, and which are ours.
+#
+# A compile error means the code is wrong. Its object directory is the
+# expensive, still-valid part -- 83k .meta files that are the difference
+# between a ten-minute retry and a three-hour one -- and it is KEPT.
+#
+# Everything after that produces staging state, and staging state left behind
+# is what makes the NEXT run lie: pkgbase-repo is a directory target with no
+# prerequisites, so make sees the directory, skips the recipe and reports
+# success. That is not cleaned file by file. It is removed as a unit, because
+# surgery on it buys minutes and reintroduces the exact class it exists to
+# prevent.
+#
+# Two things this deliberately never touches: MAKEOBJDIRPREFIX above $RELOBJ,
+# and anything outside the tree being built.
+SOURCE_PHASES="buildworld buildkernel"
+
+is_source_phase() {
+	for _p in $SOURCE_PHASES; do
+		[ "$1" = "$_p" ] && return 0
+	done
+	return 1
+}
+
+# Evidence FIRST, always. The partial repository, the half-written images and
+# the stage directories are the proof of what went wrong; cleaning first and
+# reporting after is how a failure becomes unreproducible.
+capture_evidence() {
+	_phase=$1
+	_dir="$LOGD/issues/$(date -u +%Y%m%dT%H%M%SZ)-$_phase"
+	mkdir -p "$_dir" || return 0
+	# `after-<phase>` is a position, not a phase, so its log is named for the
+	# phase that produced it. Without this an interrupt between phases captures
+	# no log at all.
+	_logname=${_phase#after-}
+	[ -f "$LOGD/$_logname.log" ] && tail -500 "$LOGD/$_logname.log" > "$_dir/phase.log"
+	[ -f "$LOGD/build-identity.txt" ] && cp "$LOGD/build-identity.txt" "$_dir/" 2>/dev/null
+	# Every expansion guarded. This runs from a trap, and the trap is armed
+	# before some of these are assigned -- under `set -u` an unbound variable
+	# aborts the handler, so an early Ctrl-C would capture nothing AND skip the
+	# cleanup, which is the debris the trap exists to remove.
+	{
+		echo "phase:    $_phase"
+		echo "target:   ${TARGET:-<unset>}"
+		echo "tree:     ${TREE:-<unset>}"
+		echo "commit:   $(git -C "${TREE:-.}" rev-parse HEAD 2>/dev/null)"
+		echo "dirty:    $(git -C "${TREE:-.}" status --porcelain 2>/dev/null | wc -l | tr -d ' ') path(s)"
+		echo "objdir:   ${MAKEOBJDIRPREFIX:-<unset>}"
+		echo "relobj:   ${RELOBJ:-<not reached>}"
+		echo "when:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		echo "host:     $(hostname -s)"
+		echo "source_failure: $(is_source_phase "$_phase" && echo yes || echo no)"
+	} > "$_dir/issue.txt" 2>/dev/null || say "could not write the evidence file; continuing to clean up"
+	# What the staging tier looked like at the moment it failed -- a listing is
+	# small and answers "how far did it get" without keeping gigabytes.
+	if [ -n "${RELOBJ:-}" ] && [ -d "$RELOBJ" ]; then
+		ls -la "$RELOBJ" > "$_dir/relobj.listing" 2>/dev/null
+		# Deep enough to reach pkgbase-repo/<ABI>/<version>/*.pkg. This count is
+		# the signal that says "it exited 0 with four packages", so a depth that
+		# stops short records 0 and throws away the whole point.
+		# BSD wc pads its output; the count is read by eye and by grep, and
+		# "packages_at_failure:        4" is worse at both than "4".
+		echo "packages_at_failure: $(find "$RELOBJ" -maxdepth 5 -name '*.pkg' \
+		    2>/dev/null | wc -l | tr -d ' ')" >> "$_dir/issue.txt"
+	fi
+	say "evidence: $_dir"
+}
+
+# The staging tier, removed as a unit. Never $MAKEOBJDIRPREFIX itself.
+clean_stage() {
+	[ -n "${RELOBJ:-}" ] || return 0
+	[ -d "$RELOBJ" ] || return 0
+	[ -n "${MAKEOBJDIRPREFIX:-}" ] && [ -n "${TREE:-}" ] || {
+		say "refusing to clean: the objdir or tree is not set"
+		return 0
+	}
+	# Refuse to run on anything that is not the release directory under the
+	# objdir we were given. An empty or unexpected value reaching rm -rf is
+	# how a deploy script once deleted a webroot.
+	#
+	# Both sides are resolved before comparing. A textual match against
+	# "${MAKEOBJDIRPREFIX}${TREE}" compares SPELLINGS, so a trailing slash, a
+	# symlinked tree, or a path containing .. makes it stop matching -- and the
+	# failure is silent: it prints "refusing", returns 0, and the run carries on
+	# believing the staging tier was removed when it was not.
+	_expect=$(cd "${MAKEOBJDIRPREFIX}${TREE}" 2>/dev/null && pwd -P) || _expect=""
+	_actual=$(cd "$RELOBJ" 2>/dev/null && pwd -P) || _actual=""
+	if [ -z "$_expect" ] || [ -z "$_actual" ]; then
+		# Not cleaning is the safe choice, but it must not read as cleaned.
+		# The staging tier survives, so the NEXT run would meet a directory
+		# target that already exists, skip it and report success. Say so loudly
+		# enough that the next run's preflight is expected to refuse.
+		say "WARNING: could not resolve the staging path, so it was NOT removed."
+		say "WARNING: $RELOBJ may still exist. The next build must refuse it as stale."
+		return 0
+	fi
+	# Recomputed, not glob-matched: `*` in a case pattern matches slashes too,
+	# so "$_expect"/*/release accepted any release directory arbitrarily deep
+	# under the objdir, and rm -rf'd it.
+	_want=""
+	for _cand in "${MAKEOBJDIRPREFIX}${TREE}/${TARGET_ARCH:-amd64}.${TARGET_ARCH:-amd64}/release" \
+	             "${MAKEOBJDIRPREFIX}${TREE}/amd64.amd64/release" \
+	             "${MAKEOBJDIRPREFIX}${TREE}/release"; do
+		_r=$(cd "$_cand" 2>/dev/null && pwd -P) || continue
+		[ "$_r" = "$_actual" ] && { _want=$_r; break; }
+	done
+	if [ -z "$_want" ]; then
+		say "WARNING: the staging path is not one this script builds into, so it was"
+		say "WARNING: NOT removed. found: $_actual"
+		say "WARNING: it may still exist. The next build must refuse it as stale."
+		return 0
+	fi
+	say "removing the staging tier as a unit: $RELOBJ"
+	rm -rf "$RELOBJ"
+}
+
+on_failure() {
+	_phase=$1
+	capture_evidence "$_phase"
+	if is_source_phase "$_phase"; then
+		say "$_phase is a source failure -- the object directory is kept, it is still valid"
+		return 0
+	fi
+	clean_stage
+}
+
+# Interrupted is not a verdict, but it leaves the same staging debris a failure
+# does -- and the next run would then skip a target and report success. Capture
+# and clean on the way out, exactly as for a failure.
+# Disarmed on entry, so a second Ctrl-C during capture_evidence -- which walks
+# a large object tree and can take seconds -- cannot re-enter and start a second
+# rm -rf beside the first.
+# Stop and reap the running phase before anything is removed. SIGINT rather
+# than SIGKILL: bmake runs its own interrupt handling, and a killed mkimg, xz or
+# pkg create leaves a truncated target with a fresh mtime that make then treats
+# as done.
+stop_child() {
+	[ -n "${CURRENT_CHILD:-}" ] || return 0
+	# SIGINT to the phase process. `set -m` was tried here to make it a process
+	# group leader so the whole group could be signalled, and it is the wrong
+	# tool: job control needs a controlling terminal, so under daemon(8) -- which
+	# is how the build service will run this -- it prints "can't access tty" and
+	# turns itself off, leaving the group approach silently inoperative.
+	#
+	# Signalling the direct child is sufficient in practice because bmake
+	# installs its own SIGINT handler and terminates its job processes before
+	# exiting. What makes that safe is the bounded wait below: nothing is
+	# removed until the phase has actually gone.
+	kill -INT "$CURRENT_CHILD" 2>/dev/null || true
+	# `wait` alone is not enough -- it can return immediately if the job was
+	# already reaped when the trap interrupted it, and returning then would start
+	# rm -rf beside a live writer. Poll until the process is really gone.
+	_w=0
+	while kill -0 "$CURRENT_CHILD" 2>/dev/null && [ "$_w" -lt 60 ]; do
+		sleep 1
+		_w=$((_w + 1))
+	done
+	[ "$_w" -lt 60 ] || say "the phase did not stop within 60s; not removing anything"
+	CURRENT_CHILD=''
+	[ "$_w" -lt 60 ]
+}
+
+# If the phase will not stop, nothing is removed: a partly-removed tree with a
+# live writer in it is worse than a stale one, because the next run cannot tell
+# what it is looking at.
+trap 'trap - INT TERM; say "interrupted"; if stop_child; then on_failure "${CURRENT_PHASE:-interrupted}"; else capture_evidence "${CURRENT_PHASE:-interrupted}"; fi; exit 130' INT TERM
+
+[ -x "$CONTRACT" ] || {
+	echo "$PROGRAM: $CONTRACT is missing or not executable." >&2
+	echo "$PROGRAM: it decides whether the built repository is publishable, so a" >&2
+	echo "$PROGRAM: build without it would produce media nothing had checked." >&2
+	exit 2
 }
 
 say "target=$TARGET tree=$TREE branch=$BRANCH cores=$J host=$(hostname -s)"
@@ -215,11 +443,41 @@ if [ ! -L "$REPO/$ABI/latest" ]; then
 	ls -la "$REPO/$ABI" 2>/dev/null | head -5 | tee -a "$LOGD/summary.log"
 	exit 1
 fi
-NPKG=$(ls "$REPO/$ABI/latest"/*.pkg 2>/dev/null | wc -l | tr -d " ")
-say "pkgbase-repo: $NPKG packages, latest -> $(readlink "$REPO/$ABI/latest")"
-if [ "${NPKG:-0}" -lt 100 ]; then
-	say "only $NPKG packages -- expected the full base set; refusing to build media"
-	exit 1
+# A count is not the contract. A floor of 100 catches the four-package case and
+# misses 526 of 527 with CloudBSD-bhyve absent, which installs a kernel with no
+# hypervisor and is far likelier. check_release_contract.sh compares the set.
+# No `else` here. The preflight at the top of this script already exits when
+# $CONTRACT is missing or not executable, so a fallback branch would be
+# unreachable -- and an unreachable fallback reads as a supported path that
+# somebody will later rely on.
+if [ -x "$CONTRACT" ]; then
+	# NOT piped into tee. `cmd | tee` reports tee's status, and tee succeeds
+	# whenever it can write -- so a repository that FAILS the contract would
+	# fall straight through and go on to build media from it. That is precisely
+	# the failure this check replaced a package count to catch, reintroduced by
+	# the plumbing. Capture the status, then show the output.
+	# Run it as an `if` CONDITION, not as a bare command whose status is read
+	# afterwards. This script is `set -e`: a bare failing command exits
+	# immediately, so `_cc=$?` never runs and neither does the evidence capture
+	# or the cleanup below -- the build would abort with nothing recorded about
+	# why. A condition is the one context where set -e stands down.
+	_cc_out="$LOGD/contract.out"
+	if [ -n "${RELEASE_BASELINE_REPO:-}" ]; then
+		if sh "$CONTRACT" -r "$REPO/$ABI" -b "$RELEASE_BASELINE_REPO" \
+		    > "$_cc_out" 2>&1; then _cc=0; else _cc=1; fi
+	else
+		if sh "$CONTRACT" -r "$REPO/$ABI" > "$_cc_out" 2>&1; then
+			_cc=0
+		else
+			_cc=1
+		fi
+	fi
+	cat "$_cc_out" | tee -a "$LOGD/summary.log"
+	if [ "$_cc" -ne 0 ]; then
+		say "the built repository does not satisfy the release contract"
+		on_failure pkgbase-repo
+		exit 1
+	fi
 fi
 
 # pkg(8) refuses a repository whose files are not owned by the user
