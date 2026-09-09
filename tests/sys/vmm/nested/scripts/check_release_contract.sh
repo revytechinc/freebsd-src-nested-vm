@@ -172,4 +172,8 @@ if [ "$FAILED" -gt 0 ]; then
 	exit 1
 fi
 
+# Name what `latest` resolves to on the success path as well as the failure
+# path: the summary log is where a passing build's artifact identity is read
+# back from later, and a pass that records nothing is not traceable.
+note "latest -> ${LATEST_TARGET:-<not a symlink>}"
 note "PASS -- $VERSION satisfies the release contract"
