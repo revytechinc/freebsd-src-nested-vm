@@ -602,9 +602,25 @@ done
 # before that point are from this build and the rest are from the last
 # one, so what is left in the directory is a mixture of two builds that
 # looks like one.
-rm -f "$RELOBJ"/*.iso "$RELOBJ"/*.img "$RELOBJ"/*.xz \
-      "$RELOBJ"/vm.*.raw "$RELOBJ"/vm.*.qcow2 \
-      "$RELOBJ"/vm.*.vhd "$RELOBJ"/vm.*.vmdk 2>/dev/null || true
+# ONLY the outputs of the target being built.
+#
+# This used to remove every image of both kinds, and the two targets do not
+# produce the same ones. A release needs both -- installer media and VM images
+# -- so running the second target deleted the first target's output, and
+# staging then correctly refused the release for missing the four installer
+# images. Two hours of media work, and the refusal was right.
+#
+# real-release makes *.iso and the memstick *.img; vm-release makes vm.* and
+# the compressed images beside them. Neither can collide with the other, so
+# neither needs to remove the other.
+case "$TARGET" in
+real-release)
+	rm -f "$RELOBJ"/*.iso "$RELOBJ"/*.img 2>/dev/null || true ;;
+vm-release)
+	rm -f "$RELOBJ"/*.xz \
+	      "$RELOBJ"/vm.*.raw "$RELOBJ"/vm.*.qcow2 \
+	      "$RELOBJ"/vm.*.vhd "$RELOBJ"/vm.*.vmdk 2>/dev/null || true ;;
+esac
 
 # The vm-image target ends `mk-vmimage.sh ... || true` followed by
 # `touch ${.TARGET}`, so a FAILED image build still marks itself complete.
