@@ -528,7 +528,10 @@ fi
 # number. An empty find produces an empty leaker list, which is
 # indistinguishable from a clean build: the gate would report a pass having
 # examined nothing. A GENERIC kernel build has hundreds of modules.
-_nchecked=$(find "$_kdir" -name '*.ko' -type f 2>/dev/null | grep -c .) || _nchecked=0
+# *.ko AND *.ko.debug: the debug objects ship in the -dbg packages, are
+# published, and are built by the same rules. Scanning only the stripped module
+# checks half of what goes out.
+_nchecked=$(find "$_kdir" \( -name '*.ko' -o -name '*.ko.debug' \) -type f 2>/dev/null | grep -c .) || _nchecked=0
 if [ "$_nchecked" -lt 50 ]; then
 	say "only $_nchecked modules found under $_kdir -- a GENERIC build has"
 	say "hundreds. The scan would pass by looking at almost nothing. Refusing."
@@ -540,7 +543,7 @@ fi
 # directory. So the gate aborted the build precisely when it had nothing to
 # report, which is to say on every clean build. It did exactly that here: the
 # run stopped dead after printing the vmm.ko path and left eight lines of log.
-_leakers=$(find "$_kdir" -name '*.ko' -type f -print0 2>/dev/null |
+_leakers=$(find "$_kdir" \( -name '*.ko' -o -name '*.ko.debug' \) -type f -print0 2>/dev/null |
     xargs -0 grep -al -- "$TREE" 2>/dev/null) || _leakers=""
 _nleak=$(printf '%s' "$_leakers" | grep -c . 2>/dev/null) || _nleak=0
 if [ "$_nleak" -ne 0 ]; then
@@ -566,7 +569,13 @@ fi
 # version string, is reported and allowed. Anything else is a real leak.
 _kbin="$_kdir/kernel"
 if [ -f "$_kbin" ]; then
-	_khits=$(strings "$_kbin" 2>/dev/null | grep -- "$TREE") || _khits=""
+	# `strings -a`, not bare `strings`. FreeBSD's strings scans only LOADABLE
+	# sections by default, so a path sitting in a debug section is invisible to
+	# it -- and the debug sections are exactly where a compiler puts the build
+	# directory. Confirmed on the published kernel: bare strings reports zero
+	# occurrences of a path that `grep -a` finds. The module scan above already
+	# uses grep, which reads the whole file; this line did not.
+	_khits=$(strings -a "$_kbin" 2>/dev/null | grep -- "$TREE") || _khits=""
 	_nk=$(printf '%s' "$_khits" | grep -c . 2>/dev/null) || _nk=0
 	# The EXACT prefix newvers.sh writes, built from the same USER and
 	# HOSTNAME the STAMP sets -- not a generic word@word: pattern, which any
@@ -590,14 +599,14 @@ fi
 # And the other half: /usr/src must actually be present in vmm.ko. Absence of
 # the real path alone would also be satisfied by a module carrying no path
 # strings at all, which proves nothing about the rewrite.
-_mapped=$(strings "$KO" 2>/dev/null | grep -c -- /usr/src) || _mapped=0
+_mapped=$(strings -a "$KO" 2>/dev/null | grep -c -- /usr/src) || _mapped=0
 if [ "$_mapped" -eq 0 ]; then
 	say "vmm.ko carries neither $TREE nor /usr/src in any string."
 	say "That is not the reproducible-paths rewrite working -- it is a module"
 	say "with no path strings at all, so this check proved nothing. Refusing."
 	exit 1
 fi
-say "paths: $_nchecked modules checked, none carry $TREE; vmm.ko has $_mapped rewritten to /usr/src"
+say "paths: $_nchecked modules and debug objects checked, none carry $TREE; vmm.ko has $_mapped rewritten to /usr/src"
 
 # `pkgbase-repo' is a DIRECTORY target with no prerequisites, so once the
 # directory exists make reports "up to date" and skips the recipe entirely.
