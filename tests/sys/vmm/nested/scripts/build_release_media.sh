@@ -180,6 +180,31 @@ export PKG_VERSION
 STAMP="env USER=$STAMP_USER HOSTNAME=$STAMP_HOST WITH_REPRODUCIBLE_PATHS=yes"
 
 mkdir -p "$LOGD"
+
+# Leave a pid where anything can find it.
+#
+# A release build runs for hours, and whatever is watching it will not always
+# survive that long -- an orchestration host lost power mid-build and every
+# means of following the job went with it, while the build itself carried on
+# and finished. Recovering the answer meant logging in and reading a log by
+# hand.
+#
+# Reading this file is exact. The alternative is matching a command line in the
+# process table, which is inference: it needs `ps -ww` to avoid a 79-column
+# truncation, and "mentions the script and mentions the log directory" also
+# matches the ssh command that started it and any wrapper that observes one
+# build while starting another. Both of those have been observed reporting a
+# build that was not running as running.
+#
+# Removed on EXIT only, deliberately. A later trap in this file handles INT and
+# TERM, and a second `trap` for a signal REPLACES the first rather than adding
+# to it -- so claiming INT and TERM here would silently disarm that one. EXIT
+# runs whatever ends the script, including that handler's own `exit 130`, so
+# the pid file goes either way and a stale pid cannot outlive the run and be
+# matched against an unrelated process that later reuses the number.
+echo $$ > "$LOGD/build.pid"
+trap 'rm -f "$LOGD/build.pid"' EXIT
+
 say() { echo "=== $(date '+%H:%M:%S') $*" | tee -a "$LOGD/summary.log"; }
 run() {
 	_phase=$1; shift
