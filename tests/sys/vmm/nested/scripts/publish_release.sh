@@ -375,11 +375,58 @@ if ! would "rsync media -> $HOST:$RELDIR/"; then
 	# just-published media aside and put it straight back, so .previous ends up
 	# holding a copy of the release it is supposed to be the rollback FROM. The
 	# genuine previous release is then gone. That happened.
+	# Whether to rotate is decided from the MEDIA ACTUALLY IN PLACE, not from
+	# the package pointer.
+	#
+	# $PREV is read from the published packages' `latest` symlink, and the two
+	# can disagree -- they disagree exactly when a publish failed between the
+	# media step and the pointer step, which is the situation a re-run is for.
+	# Keyed on $PREV, the retry rotates a second time: the media just published
+	# is moved into .previous, and the genuine previous release is gone. The
+	# comment above records that happening once already; this is the same loss
+	# by a different route.
+	#
+	# release.json travels with the media and names the commit it was built
+	# from, so the media can identify itself. If what is already there is this
+	# build, there is nothing to roll back to and nothing to rotate.
 	_rotate=yes
 	[ "$PREV" = "$VERSION" ] && _rotate=no
 	[ "$_rotate" = yes ] || say "republishing $VERSION: keeping the existing rollback untouched"
+
+	# The identity of the media already in place is established INSIDE the same
+	# remote script that acts on it.
+	#
+	# Deciding it on one connection and acting on it on the next is a race with
+	# a bad prize: between the two, an overlapping publish can change what is
+	# there, and the flag computed a moment ago then either rotates a tree that
+	# has become this same build -- replacing the rollback with the thing it
+	# was meant to roll back from -- or declines to rotate a tree that has
+	# become a different release, overwriting it with no copy kept.
+	#
+	# The comparison is a checksum of release.json, not a field parsed out of
+	# it. release.json carries the commit, the build time and every artifact
+	# with its size, so an identical file is an identical build; and a checksum
+	# needs no regex escaped through two shells, where a quoting slip returns
+	# an empty string, compares unequal, and rotates.
+	_heresum=""
+	if [ -f "$ART/release.json" ]; then
+		_heresum=$(sha256 -q "$ART/release.json" 2>/dev/null) || _heresum=""
+		[ -n "$_heresum" ] || _heresum=$(sha256sum "$ART/release.json" 2>/dev/null | cut -d" " -f1)
+	fi
+	case "$_heresum" in
+	""|*[!0-9a-f]*) _heresum="" ;;
+	esac
 	if ! remote "set -e
-		if [ '$_rotate' = yes ]; then
+		_rotate='$_rotate'
+		if [ -n '$_heresum' ] && [ -f '$RELDIR/release.json' ]; then
+			_t=\$(sha256 -q '$RELDIR/release.json' 2>/dev/null) || _t=''
+			[ -n \"\$_t\" ] || _t=\$(sha256sum '$RELDIR/release.json' 2>/dev/null | cut -d' ' -f1)
+			if [ \"\$_t\" = '$_heresum' ]; then
+				_rotate=no
+				echo 'the media in place is already this build; keeping the existing rollback'
+			fi
+		fi
+		if [ \"\$_rotate\" = yes ]; then
 			rm -rf '$RELDIR.previous'
 			if [ -d '$RELDIR' ]; then mv '$RELDIR' '$RELDIR.previous'; fi
 		else
@@ -387,7 +434,7 @@ if ! would "rsync media -> $HOST:$RELDIR/"; then
 			if [ -d '$RELDIR' ]; then mv '$RELDIR' '$RELDIR.replacing'; fi
 		fi
 		if ! mv '$RELDIR.incoming' '$RELDIR'; then
-			if [ '$_rotate' = yes ] && [ -d '$RELDIR.previous' ]; then
+			if [ \"\$_rotate\" = yes ] && [ -d '$RELDIR.previous' ]; then
 				mv '$RELDIR.previous' '$RELDIR'
 			elif [ -d '$RELDIR.replacing' ]; then
 				mv '$RELDIR.replacing' '$RELDIR'
@@ -487,12 +534,34 @@ if printf '%s\n' "$_members" | grep -qxF -e data.pub -e ./data.pub; then
 	if [ -n "$_fp" ] && [ -s "$_fp" ]; then
 		_fpsum=$(sed -n 's/^fingerprint: *"\([0-9a-f]*\)".*/\1/p' "$_fp")
 	fi
-	if [ -n "$_fp" ] && ! would "scp the fingerprint -> $HOST:$WWW/cloudbsd-fingerprint"; then
-		# Copy to a temporary name and rename, so a client fetching during the
-		# upload gets either the old file or the new one and never half of one.
-		if ! scp -q -- "$_fp" "$HOST:$WWW/cloudbsd-fingerprint.incoming" ||
-		   ! remote "mv '$WWW/cloudbsd-fingerprint.incoming' '$WWW/cloudbsd-fingerprint' &&
-			     chmod 0444 '$WWW/cloudbsd-fingerprint'"; then
+	# WRITTEN REMOTELY, not scp'd.
+	#
+	# scp runs as the login user and cannot write a webroot that needs doas --
+	# which this one does, and the script says so twenty lines earlier before
+	# using doas for every other remote step. So the packages and the media
+	# published fine and the fingerprint failed with "Permission denied",
+	# leaving the site serving new media, old packages and no trust material.
+	#
+	# The file is two lines built from a digest this has already constrained to
+	# 64 lowercase hex characters, so generating it on the far side costs
+	# nothing and goes through the same privileged path as everything else.
+	case "$_fpsum" in
+	[0-9a-f]*) ;;
+	*) echo "$PROGRAM: refusing to publish a non-hex fingerprint: $_fpsum" >&2; exit 1 ;;
+	esac
+	case "$_fpsum" in
+	*[!0-9a-f]*) echo "$PROGRAM: refusing to publish a non-hex fingerprint" >&2; exit 1 ;;
+	esac
+	[ "${#_fpsum}" = 64 ] || {
+		echo "$PROGRAM: fingerprint is ${#_fpsum} characters, not 64" >&2; exit 1; }
+	if [ -n "$_fp" ] && ! would "write the fingerprint on $HOST:$WWW/cloudbsd-fingerprint"; then
+		# Written to a temporary name and renamed, so a client fetching during
+		# the write gets either the old file or the new one and never half.
+		if ! remote "set -e
+			printf 'function: sha256\nfingerprint: \"$_fpsum\"\n' \
+			    > '$WWW/cloudbsd-fingerprint.incoming'
+			chmod 0444 '$WWW/cloudbsd-fingerprint.incoming'
+			mv '$WWW/cloudbsd-fingerprint.incoming' '$WWW/cloudbsd-fingerprint'"; then
 			rm -f "$_fp"
 			remote "rm -f '$WWW/cloudbsd-fingerprint.incoming'" || true
 			echo "$PROGRAM: could not publish the fingerprint" >&2
