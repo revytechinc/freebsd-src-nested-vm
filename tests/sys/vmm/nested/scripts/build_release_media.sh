@@ -123,7 +123,20 @@ export PKG_MAINTAINER=nested@cloudbsd.cat
 export PKG_WWW=https://nested.cloudbsd.cat
 # newvers.sh bakes $USER@$HOSTNAME into uname -v and the loader banner; keep
 # any internal hostname out of the media.
-STAMP="env USER=cloudbsd HOSTNAME=build"
+#
+# WITH_REPRODUCIBLE_PATHS is NOT a default. REPRODUCIBLE_PATHS is listed under
+# __DEFAULT_NO_OPTIONS in share/mk/bsd.opts.mk, so without this every module
+# this builds carries the absolute path of the build tree -- the builder's home
+# directory -- in its debug and assertion strings, and ships it to everyone who
+# downloads the media. Removing that is the entire reason the release this was
+# written for exists, and it would have been undone here by omission.
+#
+# It is asserted after buildkernel rather than trusted, because the failure is
+# invisible: the build succeeds, the module loads, and only `strings` says the
+# path is still there.
+STAMP_USER=cloudbsd
+STAMP_HOST=build
+STAMP="env USER=$STAMP_USER HOSTNAME=$STAMP_HOST WITH_REPRODUCIBLE_PATHS=yes"
 
 mkdir -p "$LOGD"
 say() { echo "=== $(date '+%H:%M:%S') $*" | tee -a "$LOGD/summary.log"; }
@@ -364,6 +377,7 @@ run buildkernel $STAMP make -C "$TREE" -j"$J" buildkernel KERNCONF=GENERIC
 # An unscoped search returns whichever vmm.ko the walk reaches first, which may
 # belong to another build entirely -- and that module is both the one gated for
 # undefined symbols and the one hashed into the provenance file.
+KERNCONF_DIR_NAME=GENERIC
 KO=$(find "${MAKEOBJDIRPREFIX}${TREE}" -name vmm.ko -print -quit)
 # An empty KO is worse than a missing one: `nm ""` fails, its error is
 # discarded, grep matches nothing, and the symbol gate reports a pass it never
@@ -376,6 +390,114 @@ say "vmm.ko: $KO"
 if nm "$KO" 2>/dev/null | grep -q ' U svm_l2'; then
 	say "vmm.ko has undefined svm_l2 symbols -- would not load"; exit 1
 fi
+
+# The build tree's path must not survive into the module.
+#
+# WITH_REPRODUCIBLE_PATHS rewrites it to /usr/src via -ffile-prefix-map. Both
+# halves are checked: absence of the real path says the option took effect, and
+# presence of /usr/src says the rewrite happened rather than the strings simply
+# being absent from a module built some other way. Checking only the first
+# would pass for a vmm.ko that carried no path strings at all.
+# Checked across the KERNEL AND EVERY MODULE, not just vmm.ko. The option is
+# set for the whole build, so the interesting failure is the partial one -- a
+# subdirectory that overrides the flag -- and a gate that looks at one module
+# reports success for it.
+#
+# Scoped to the shipped artifacts: the kernel binary and *.ko. The rest of the
+# objdir legitimately contains absolute paths -- .meta files record them by
+# design -- so scanning the directory wholesale would fail every build.
+_kdir=$(dirname "$KO")
+while [ "$_kdir" != "/" ] && [ "$(basename "$_kdir")" != "$KERNCONF_DIR_NAME" ]; do
+	_parent=$(dirname "$_kdir")
+	[ "$_parent" = "$_kdir" ] && break
+	_kdir=$_parent
+done
+# No silent fallback. The previous version dropped back to the directory
+# holding vmm.ko, which scopes the scan to one module and makes the kernel
+# check below vanish through a failed -f test -- and the summary still says the
+# gate passed. A gate that cannot find what it is meant to examine has to say
+# so, not narrow itself until it succeeds.
+if [ "$(basename "$_kdir")" != "$KERNCONF_DIR_NAME" ] || [ ! -d "$_kdir" ]; then
+	say "cannot find the $KERNCONF_DIR_NAME kernel directory above $KO."
+	say "The path check cannot run, and a check that cannot run is not a pass."
+	exit 1
+fi
+if [ ! -f "$_kdir/kernel" ]; then
+	say "no kernel binary at $_kdir/kernel -- the path check would examine"
+	say "modules only and report a pass for a kernel it never looked at."
+	exit 1
+fi
+# xargs, not a loop calling grep per file. 880 artefacts is 880 forks that way
+# and the scan takes minutes; batched it is under a second, which is the
+# difference between a gate that runs every build and one that gets removed.
+# Count what will be scanned BEFORE scanning, and refuse an implausible
+# number. An empty find produces an empty leaker list, which is
+# indistinguishable from a clean build: the gate would report a pass having
+# examined nothing. A GENERIC kernel build has hundreds of modules.
+_nchecked=$(find "$_kdir" -name '*.ko' -type f 2>/dev/null | grep -c .) || _nchecked=0
+if [ "$_nchecked" -lt 50 ]; then
+	say "only $_nchecked modules found under $_kdir -- a GENERIC build has"
+	say "hundreds. The scan would pass by looking at almost nothing. Refusing."
+	exit 1
+fi
+_leakers=$(find "$_kdir" -name '*.ko' -type f -print0 2>/dev/null |
+    xargs -0 grep -al -- "$TREE" 2>/dev/null)
+_nleak=$(printf '%s' "$_leakers" | grep -c . 2>/dev/null) || _nleak=0
+if [ "$_nleak" -ne 0 ]; then
+	say "$_nleak module(s) carry the build tree path $TREE:"
+	printf '%s\n' "$_leakers" | head -10 | sed 's/^/    /' | tee -a "$LOGD/summary.log"
+	say "WITH_REPRODUCIBLE_PATHS did not take effect everywhere, and this media"
+	say "would publish the builder's directory layout to everyone who downloads it."
+	exit 1
+fi
+
+# The kernel binary is checked separately, because it has one known and
+# DIFFERENT leak that -ffile-prefix-map does not address.
+#
+# newvers.sh writes "${user}@${host}:${objdir}" into the version string, so
+# `uname -v` on every installed machine names the build directory. That is the
+# OBJDIR, not a source path, and the option that removes it is
+# WITH_REPRODUCIBLE_BUILD -- which also drops the "#N" build number that
+# bench_guest.sh parses for its label and that the install page tells people to
+# look for. Turning it on is therefore a decision with consequences outside
+# this script, and it is not made here.
+#
+# What this does is refuse to let it hide: exactly one match, and only the
+# version string, is reported and allowed. Anything else is a real leak.
+_kbin="$_kdir/kernel"
+if [ -f "$_kbin" ]; then
+	_khits=$(strings "$_kbin" 2>/dev/null | grep -- "$TREE") || _khits=""
+	_nk=$(printf '%s' "$_khits" | grep -c . 2>/dev/null) || _nk=0
+	# The EXACT prefix newvers.sh writes, built from the same USER and
+	# HOSTNAME the STAMP sets -- not a generic word@word: pattern, which any
+	# other string carrying the build path could satisfy and thereby have a
+	# real leak downgraded to an advisory.
+	_kvers=$(printf '%s' "$_khits" |
+	    grep -c "^[[:space:]]*${STAMP_USER}@${STAMP_HOST}:") || _kvers=0
+	if [ "$_nk" -gt 0 ] && [ "$_nk" -eq "$_kvers" ]; then
+		say "kernel: the only build-path string is newvers.sh's version line,"
+		say "        which WITH_REPRODUCIBLE_PATHS does not cover. uname -v will"
+		say "        name the object directory. Set WITH_REPRODUCIBLE_BUILD to"
+		say "        remove it -- see the note above for what else that changes."
+	elif [ "$_nk" -gt 0 ]; then
+		say "kernel carries $_nk build-path string(s), $((_nk - _kvers)) of them"
+		say "outside newvers.sh's version line:"
+		printf '%s\n' "$_khits" | head -5 | sed 's/^/    /' | tee -a "$LOGD/summary.log"
+		exit 1
+	fi
+fi
+
+# And the other half: /usr/src must actually be present in vmm.ko. Absence of
+# the real path alone would also be satisfied by a module carrying no path
+# strings at all, which proves nothing about the rewrite.
+_mapped=$(strings "$KO" 2>/dev/null | grep -c -- /usr/src) || _mapped=0
+if [ "$_mapped" -eq 0 ]; then
+	say "vmm.ko carries neither $TREE nor /usr/src in any string."
+	say "That is not the reproducible-paths rewrite working -- it is a module"
+	say "with no path strings at all, so this check proved nothing. Refusing."
+	exit 1
+fi
+say "paths: $_nchecked modules checked, none carry $TREE; vmm.ko has $_mapped rewritten to /usr/src"
 
 # `pkgbase-repo' is a DIRECTORY target with no prerequisites, so once the
 # directory exists make reports "up to date" and skips the recipe entirely.
