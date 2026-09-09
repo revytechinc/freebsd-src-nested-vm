@@ -44,8 +44,33 @@ say "sha256: $(sha256 -q "$IMG" 2>/dev/null)"
 say "host:   $(hostname -s) / $(sysctl -n hw.model)"
 say "start:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# Optical media is attached as optical media.
+#
+# Everything here used to go on as virtio-blk, which is right for a raw disk
+# image and silently wrong for an installer ISO: UEFI finds no boot entry on
+# what it has been told is a hard disk, prints "No bootable option or device
+# was found", and the run reports TIMEOUT. That reads as a broken image, and
+# the image is fine -- the published disc1.iso was declared a failure that way.
+#
+# A check that cannot run is not a pass; one that cannot run and reports a
+# failure is worse, because somebody acts on it.
+# Detected by CONTENT, not by name. ISO 9660 puts "CD001" at offset 32769, and
+# that is true of an artifact called .ISO, or .img, or nothing at all. Matching
+# the suffix means an image published under any other name falls through to the
+# disk path and reproduces the exact failure this exists to prevent.
+if dd if="$IMG" bs=1 skip=32769 count=5 2>/dev/null | grep -q CD001; then
+	DISKSPEC="2,ahci-cd,$IMG"
+else
+	DISKSPEC="2,virtio-blk,$IMG"
+fi
+
+# ONE argument, quoted at the call site. Assembling "-s 2,kind,path" into a
+# string and letting the shell split it puts every space and glob character in
+# the path into bhyve's argv as separate words -- so a path with a space
+# produces a malformed -s spec and a run that fails looking like a bad image.
+# The form this replaced passed "$IMG" quoted and did not have that exposure.
 bhyve -c 2 -m 4G -A -H -P \
-	-s 0,hostbridge -s 2,virtio-blk,"$IMG" -s 31,lpc \
+	-s 0,hostbridge -s "$DISKSPEC" -s 31,lpc \
 	-l com1,"/dev/nmdm${VM}A" \
 	-l bootrom,"$UEFI" "$VM" > "/tmp/${VM}.bhyve" 2>&1 &
 BPID=$!
