@@ -13,7 +13,7 @@
 # collector existed in the tree and were installed on no machine -- which means
 # every measurement published so far was gathered by hand.
 
-PACKAGE=	tests
+PACKAGE=	nested-tests
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/stats
 BINDIR=		${TESTSDIR}
 

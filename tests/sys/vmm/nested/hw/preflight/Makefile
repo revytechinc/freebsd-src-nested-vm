@@ -3,7 +3,7 @@
 # declare ATF_TESTS_SH+= preflight_integrity, but preflight_integrity.sh is
 # not in the tree -- so kyua had nothing to run either way. The stale
 # reference only became visible once this directory was wired into the build.
-PACKAGE=	tests
+PACKAGE=	nested-tests
 
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/hw/preflight
 

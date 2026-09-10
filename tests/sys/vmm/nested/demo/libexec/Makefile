@@ -7,7 +7,7 @@
 # root-owned outside the tests tree by install_demo_kit.sh; they are carried
 # here so that the version on a host can always be traced to a commit.
 
-PACKAGE=	tests
+PACKAGE=	nested-tests
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/demo/libexec
 BINDIR=		${TESTSDIR}
 

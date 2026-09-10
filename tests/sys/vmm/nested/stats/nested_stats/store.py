@@ -17,8 +17,29 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
+import sys
 import time
+
+# FreeBSD ships python3's sqlite3 module in a separate, version-specific
+# package. Without it this import fails with "No module named '_sqlite3'",
+# which reads as a broken tool rather than a missing package -- so the message
+# names the package, derived from the running interpreter so it cannot name the
+# wrong version. Raised rather than printed: a library that writes to stderr on
+# import is not one the callers can control.
+try:
+    import sqlite3
+except ModuleNotFoundError as exc:
+    if exc.name not in ("sqlite3", "_sqlite3"):
+        raise
+    raise ModuleNotFoundError(
+        "python3's sqlite3 module is missing, so the measurement store cannot "
+        "be opened. Install it with: doas pkg install -y py%d%d-sqlite3 -- that "
+        "package is specific to this interpreter (python %d.%d), and one built "
+        "for another version installs cleanly and changes nothing. Prove it "
+        "afterwards with: python3 -c 'import sqlite3'"
+        % (sys.version_info[:2] + sys.version_info[:2]),
+        name=exc.name,
+    ) from exc
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 TOOL_VERSION = "1.0"
@@ -267,7 +288,7 @@ class Writer(_Base):
         if row is None:
             vals = [fields.get(c) for c in cols]
             cur = self.conn.execute(
-                "INSERT INTO host (name, %s, first_seen) VALUES (?, %s, ?)"
+                "INSERT INTO host (name, %s, first_seen) VALUES (?, %s, ?)"  # nosec B608 -- interpolates only names from the literal cols tuple; every value is bound
                 % (", ".join(cols), ", ".join("?" * len(cols))),
                 [name] + vals + [utcnow()],
             )
@@ -276,7 +297,7 @@ class Writer(_Base):
         given = [(c, fields[c]) for c in cols if fields.get(c) is not None]
         if given:
             self.conn.execute(
-                "UPDATE host SET " + ", ".join(f"{c} = ?" for c, _ in given) +
+                "UPDATE host SET " + ", ".join(f"{c} = ?" for c, _ in given) +  # nosec B608 -- interpolates only names from the literal cols tuple; every value is bound
                 " WHERE host_id = ?",
                 [v for _, v in given] + [row["host_id"]],
             )
@@ -297,7 +318,7 @@ class Writer(_Base):
             if vals[cols.index("status")] is None:
                 vals[cols.index("status")] = "unknown"
             cur = self.conn.execute(
-                "INSERT INTO build (vmm_sha256, sha_prefix, %s, first_seen) "
+                "INSERT INTO build (vmm_sha256, sha_prefix, %s, first_seen) "  # nosec B608 -- interpolates only names from the literal cols tuple; every value is bound
                 "VALUES (?, ?, %s, ?)" % (", ".join(cols), ", ".join("?" * len(cols))),
                 [sha, sha[:16]] + vals + [utcnow()],
             )
@@ -314,7 +335,7 @@ class Writer(_Base):
         given = [(c, fields[c]) for c in cols if fields.get(c) is not None]
         if given:
             self.conn.execute(
-                "UPDATE build SET " + ", ".join(f"{c} = ?" for c, _ in given) +
+                "UPDATE build SET " + ", ".join(f"{c} = ?" for c, _ in given) +  # nosec B608 -- interpolates only names from the literal cols tuple; every value is bound
                 " WHERE build_id = ?",
                 [v for _, v in given] + [existing["build_id"]],
             )
