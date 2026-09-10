@@ -10,14 +10,25 @@ after a regression: *which build was this measured on?*
 
 ## What it needs on a machine
 
-`python3` and its **sqlite3 module**, which FreeBSD ships as a separate package:
+`python3` and its **sqlite3 module**, which FreeBSD ships as a separate package.
+Derive the package from the interpreter rather than naming a version, and then
+prove the import rather than trusting the install:
 
-```
-pkg install py312-sqlite3
+```sh
+pyver=$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')
+doas pkg install -y "py${pyver}-sqlite3"
+python3 -c 'import sqlite3'
 ```
 
-Match the version to the installed interpreter — `py311-sqlite3` for a 3.11,
-`py313-sqlite3` for a 3.13. Without it every command fails at import with
+The install needs root; the other two lines do not.
+
+The module is owned by a **version-specific** package — on a 3.12 host
+`pkg which` reports `py312-sqlite3` — so `py311-sqlite3` there installs
+perfectly cleanly, into a 3.11 path, and leaves the import exactly as broken as
+before. A fix that reports success and changes nothing is worse than no fix,
+because the next person reads the successful install and looks elsewhere.
+
+Without the right one, every command fails at import with
 `No module named '_sqlite3'`, which reads as a broken tool rather than a missing
 package.
 
