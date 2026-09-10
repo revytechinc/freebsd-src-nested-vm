@@ -8,7 +8,7 @@
 # step with the kernel it is meant to be testing.
 
 
-PACKAGE=	tests
+PACKAGE=	nested-tests
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/features
 BINDIR=		${TESTSDIR}
 

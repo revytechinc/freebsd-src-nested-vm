@@ -7,7 +7,7 @@
 # into a user's home directory; they are thin wrappers on purpose, so that what
 # someone reads before running it is short enough to read.
 
-PACKAGE=	tests
+PACKAGE=	nested-tests
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/demo/home
 BINDIR=		${TESTSDIR}
 

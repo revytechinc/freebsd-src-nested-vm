@@ -1,4 +1,4 @@
-PACKAGE=	tests
+PACKAGE=	nested-tests
 
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested
 

@@ -84,7 +84,8 @@ if [ -z "$DEMO" ]; then
 	echo "$PROGRAM: the nested demo is not installed on this host." >&2
 	echo "$PROGRAM: looked in:" >&2
 	printf '  %s\n' $DEFAULT_PATHS >&2
-	echo "$PROGRAM: install the demo kit, or the CloudBSD-tests package, first." >&2
+	echo "$PROGRAM: install the demo kit, or the CloudBSD-nested-tests package," >&2
+	echo "$PROGRAM: first." >&2
 	# Distinct from the demo failing: nothing was learned about nesting here,
 	# and reporting a missing harness as a nesting failure is how a fleet
 	# round grows a defect that does not exist.

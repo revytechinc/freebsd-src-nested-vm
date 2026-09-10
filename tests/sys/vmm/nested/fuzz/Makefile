@@ -36,7 +36,7 @@
 # remote box; it spawns fuzz_all under kyua and asserts the L1 integrity
 # post-condition (see Acceptance Criteria in the plan).
 
-PACKAGE=	tests
+PACKAGE=	nested-tests
 
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/fuzz
 

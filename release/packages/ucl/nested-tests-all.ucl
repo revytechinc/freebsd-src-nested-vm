@@ -1,0 +1,40 @@
+/*
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2026 REVYTECH, Inc.
+ */
+
+comment = "Nested virtualization test harness and measurement store"
+
+desc = <<EOD
+The test harness for nested virtualization: the boot and guest-lifecycle
+tests, the hardware and parity probes, the soak and stress drivers, and the
+SQLite measurement store that keeps every figure alongside the build it was
+taken on.
+
+Run the suite with:
+
+	kyua test -k /usr/tests/sys/vmm/nested/Kyuafile
+
+That needs kyua and atf-sh, which arrive with any FreeBSD system's test suite
+and are already present on a machine that has one. This package does not depend
+on them, because doing so would name the CloudBSD copies, and those replace
+files an installed FreeBSD test suite already owns. The harness is packaged
+apart from the rest of the test suite so that it can be added to a machine that
+keeps its existing userland, which is what a dependency on the CloudBSD test
+suite would prevent.
+
+The measurement store is SQLite, reached through python3 and its sqlite3
+module, which FreeBSD ships as a version-specific package -- py312-sqlite3 on a
+3.12 host. Neither is a dependency of this package, because the tests and the
+harness run without them; only the store needs them, and it says so plainly when
+the import fails rather than recording nothing.
+
+It also does not depend on the nested virtualization kernel. Measuring a stock
+kernel is how a baseline is taken, and a dependency would make the harness
+uninstallable in exactly the boot environment where that baseline is measured.
+EOD
+
+annotations {
+	set = nested
+}
