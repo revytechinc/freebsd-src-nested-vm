@@ -173,6 +173,27 @@ stage_previous() {
 [ "$(id -u)" -eq 0 ] || { log "need root"; exit 2; }
 mkdir -p "$WORK"
 
+# A path that came back from another machine, before it is put into a command
+# that will run there again under doas. Two conditions, both necessary: it must
+# start with the directory we asked about -- so a lookup that answered about
+# somewhere else cannot redirect the next command -- and it must contain only
+# characters that mean themselves to a shell.
+#
+# Refused rather than quoted. A path needing to be escaped to be safe here is a
+# path worth a question, and quoting correctly through two rounds of shell
+# parsing is exactly the kind of thing that looks right and is not.
+safe_remote_path() {
+	case "$1" in
+	"$2"/*)	;;
+	*)	log "refusing $1: not under $2"; return 1 ;;
+	esac
+	case "$1" in
+	*[!/A-Za-z0-9._-]*)
+		log "refusing $1: not a plain path"; return 1 ;;
+	esac
+	return 0
+}
+
 # find_previous locates the last published image.
 #
 # The publishing side already keeps it: retiring a release moves it aside
@@ -197,18 +218,62 @@ find_previous() {
 	# newest, and the name carries no timestamp to sort by -- do not read
 	# the sort as picking a most-recent release.
 	#
+	# `doas sh -c', and BOTH halves of that are load-bearing. Measured on the
+	# real site host, three ways:
+	#
+	#   unprivileged, login shell   zsh: no matches found
+	#   unprivileged, forced sh     (empty)
+	#   doas, forced sh             the directory
+	#
+	# The webroot needs doas to read, which is why the middle line is empty
+	# -- and the remote login shell is zsh, which ABORTS on an unmatched
+	# glob rather than passing the pattern through, so the first line is not
+	# even a listing. Fixing only one of those would have changed nothing.
+	# publish_release.sh already goes through `doas sh -c' for this reason;
+	# this did not, and so the auto-discovery could never run.
+	#
 	# The exit status of the remote pipeline is tail's, which is 0 even when
 	# ls found nothing, so emptiness is what is checked rather than status.
 	# Remote paths are quoted where they are re-used: whatever came back is
 	# a string from another machine, and it goes into a second command.
 	_rel=$(ssh -4 -o BatchMode=yes "$_host" \
-	    "ls -d '$_dir'/*.previous 2>/dev/null | sort | tail -1")
+	    "doas sh -c \"ls -d '$_dir'/*.previous 2>/dev/null | sort | tail -1\"")
 	[ -n "$_rel" ] || { log "no retired release found under $_dir"; return 1; }
+	# Whatever came back goes into a SECOND remote command that runs under
+	# doas, so it is parsed by a shell again, with privilege. A name
+	# carrying a quote, a semicolon or a backtick would be a command rather
+	# than a path. The webroot is ours, which is a reason to keep it that
+	# way rather than a reason not to check: refuse anything that is not a
+	# plain path under the directory we asked about.
+	safe_remote_path "$_rel" "$_dir" || return 1
 	_img=$(ssh -4 -o BatchMode=yes "$_host" \
-	    "ls '$_rel'/*.raw.xz 2>/dev/null | head -1")
+	    "doas sh -c \"ls '$_rel'/*.raw.xz 2>/dev/null | head -1\"")
 	[ -n "$_img" ] || { log "no image inside $_rel"; return 1; }
+	safe_remote_path "$_img" "$_rel" || return 1
 	log "previous release: $_img"
-	scp -4 -q "$_host:$_img" "$WORK/prev-release.raw.xz" || return 1
+	# Also through doas: scp runs as the login user and cannot read the
+	# webroot, so a copy that skipped it would fail after the lookup had
+	# just succeeded -- the confusing shape where discovery works and
+	# retrieval does not.
+	_want=$(ssh -4 -o BatchMode=yes "$_host" \
+	    "doas sh -c \"wc -c < '$_img'\"" | tr -d ' ') || _want=""
+	ssh -4 -o BatchMode=yes "$_host" "doas cat '$_img'" > "$WORK/prev-release.raw.xz" ||
+	    return 1
+	# A stream through ssh carries no integrity check and no end-to-end
+	# status: a read interrupted part-way leaves a file that is non-empty,
+	# so `-s' passes and the truncated archive fails decompression later --
+	# reading as a bad previous release rather than a bad copy. The size is
+	# what tells those apart, and it is asked for before the copy so a
+	# failure to ask is not mistaken for a match.
+	_got=$(wc -c < "$WORK/prev-release.raw.xz" | tr -d ' ')
+	if [ -z "$_want" ]; then
+		log "could not read the size of $_img; not trusting the copy"
+		return 1
+	fi
+	if [ "$_got" != "$_want" ]; then
+		log "the previous image copied short: $_got of $_want bytes"
+		return 1
+	fi
 	PREV="$WORK/prev-release.raw.xz"
 	return 0
 }

@@ -163,9 +163,34 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ---- 1. the stock image, and proof that it is stock ------------------------
+# Retried, and used for EVERY mirror fetch rather than the first one.
+#
+# A single name-resolution blip has cost this gate four runs across two
+# releases, always as `Transient resolver failure' part-way through a session
+# where the host is also running bhyve guests, and always succeeding a minute
+# later by hand. One attempt decides the gate on something that has nothing to
+# do with the release under test.
+#
+# Each attempt starts from nothing: a failed fetch can leave a partial file,
+# and a later attempt resuming onto it hands the checksum comparison a
+# truncated download -- which then reads as a bad image rather than a bad
+# transfer.
+fetch_retry() {
+	_out=$1; _url=$2
+	_n=0
+	while :; do
+		_n=$((_n + 1))
+		rm -f "$_out"
+		fetch -q -o "$_out" "$_url" && return 0
+		log "  attempt $_n could not fetch $_url"
+		[ "$_n" -lt 3 ] || return 1
+		sleep $(( _n * 10 ))
+	done
+}
+
 log "fetching FreeBSD's own checksum manifest"
-fetch -q -o CHECKSUM.SHA256 "$MIRROR/CHECKSUM.SHA256" ||
-    die "cannot reach the FreeBSD snapshot mirror"
+fetch_retry CHECKSUM.SHA256 "$MIRROR/CHECKSUM.SHA256" ||
+    die "cannot reach the FreeBSD snapshot mirror in three attempts"
 
 # Fetch from the DATED snapshot directory, by the exact filename the manifest
 # names.
@@ -188,7 +213,7 @@ IMG=$MANIFEST_NAME
 
 if [ ! -f "$IMG" ]; then
 	log "fetching $IMG (this is large)"
-	fetch -q -o "$IMG" "$SNAPDIR/$IMG" || die "cannot fetch $SNAPDIR/$IMG"
+	fetch_retry "$IMG" "$SNAPDIR/$IMG" || die "cannot fetch $SNAPDIR/$IMG"
 fi
 
 WANT=$(sed -n "s/^SHA256 ($MANIFEST_NAME) = //p" CHECKSUM.SHA256)
