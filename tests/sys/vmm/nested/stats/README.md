@@ -8,6 +8,21 @@ whichever machine produced them. They were lost between sessions, could not be
 compared across weeks, and could not answer the one question that matters most
 after a regression: *which build was this measured on?*
 
+## What it needs on a machine
+
+`python3` and its **sqlite3 module**, which FreeBSD ships as a separate package:
+
+```
+pkg install py312-sqlite3
+```
+
+Match the version to the installed interpreter — `py311-sqlite3` for a 3.11,
+`py313-sqlite3` for a 3.13. Without it every command fails at import with
+`No module named '_sqlite3'`, which reads as a broken tool rather than a missing
+package.
+
+Nothing else. The store is a single file and the tools are the standard library.
+
 ## Design, and the two things it refuses to do
 
 **It never overwrites a result.** `UPDATE` and `DELETE` on `run` and
