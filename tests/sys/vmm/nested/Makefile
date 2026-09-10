@@ -30,5 +30,6 @@ SUBDIR+=	resource
 SUBDIR+=	scripts
 SUBDIR+=	snapshot
 SUBDIR+=	soak
+SUBDIR+=	stats
 
 .include <bsd.test.mk>
