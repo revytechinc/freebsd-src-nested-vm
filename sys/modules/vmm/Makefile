@@ -2,9 +2,6 @@
 
 KMOD=	vmm
 
-.if ${MACHINE_CPUARCH} == "amd64"
-.endif
-
 SRCS+=	acpi_if.h bus_if.h device_if.h pci_if.h pcib_if.h vnode_if.h
 
 CFLAGS+= -DVMM_KEEP_STATS
@@ -18,7 +15,6 @@ SRCS+=	vmm.c			\
 	vmm_dev_machdep.c	\
 	vmm_instruction_emul.c	\
 	vmm_mem.c		\
-	vmm_nested.c		\
 	vmm_stat.c		\
 	vmm_vm.c
 
@@ -92,6 +88,7 @@ SRCS+=	vmm_host.c	\
 	vmm_ioport.c	\
 	vmm_lapic.c	\
 	vmm_mem_machdep.c \
+	vmm_nested.c	\
 	vmm_util.c	\
 	x86.c
 
