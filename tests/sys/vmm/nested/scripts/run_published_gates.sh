@@ -182,6 +182,35 @@ mkdir -p "$WORK"
 # Refused rather than quoted. A path needing to be escaped to be safe here is a
 # path worth a question, and quoting correctly through two rounds of shell
 # parsing is exactly the kind of thing that looks right and is not.
+# Run a remote read as the user who INVOKED this, not as root.
+#
+# The gate runs under doas, so ssh would use root's credentials -- and root
+# here has no key of its own and no host key for the publishing host, so every
+# lookup failed with "Host key verification failed" and the caller was told
+# "no retired release found". Three unrelated causes, one message: the wrong
+# name, the wrong privilege, and the wrong user, each reported identically.
+#
+# doas records who asked in DOAS_USER. Dropping back to them uses their keys
+# and their known_hosts, which is what a person running this by hand would
+# use, and does not require giving root credentials it has managed without.
+#
+# stderr is RETURNED rather than discarded, because the whole point is that
+# "could not reach the host" and "the host has nothing" must not look alike.
+remote_read() {
+	_cmd=$1
+	if [ "$(id -u)" = 0 ] && [ -n "${DOAS_USER:-}" ]; then
+		su -m "$DOAS_USER" -c "$_cmd" 2>"$WORK/remote.err"
+	else
+		sh -c "$_cmd" 2>"$WORK/remote.err"
+	fi
+}
+
+# Whatever remote_read last wrote to stderr, on one line, for a message.
+remote_err() {
+	[ -s "$WORK/remote.err" ] || return 1
+	tr '\n' ' ' < "$WORK/remote.err" | LC_ALL=C.UTF-8 cut -c1-160
+}
+
 safe_remote_path() {
 	case "$1" in
 	"$2"/*)	;;
@@ -205,6 +234,27 @@ find_previous() {
 	[ -n "$PUBLISH" ] || return 1
 	_host=${PUBLISH%%:*}
 	_dir=${PUBLISH#*:}
+	# Both come from -P, and both are interpolated into a command string
+	# that a shell parses -- twice, once here and once on the far side. A
+	# value carrying a quote, a semicolon, a backtick or a $( would be a
+	# command rather than an address, and the far side runs it under doas.
+	#
+	# Refused rather than quoted, for the same reason as the paths that come
+	# back: getting quoting right through two rounds of parsing is exactly
+	# the kind of thing that looks correct and is not, and neither of these
+	# has any business containing such a character.
+	case "$_host" in
+	*[!@A-Za-z0-9._-]*|"")
+		log "refusing $_host: not a plain user@host"; return 1 ;;
+	esac
+	case "$_dir" in
+	/*)	;;
+	*)	log "refusing $_dir: not an absolute path"; return 1 ;;
+	esac
+	case "$_dir" in
+	*[!/A-Za-z0-9._-]*)
+		log "refusing $_dir: not a plain path"; return 1 ;;
+	esac
 	# `.previous', which is what publish_release.sh actually creates when it
 	# rotates. This looked for `.retired-*' -- a name that appears exactly
 	# once in this tree, here, and is produced by nothing. The lookup could
@@ -236,9 +286,15 @@ find_previous() {
 	# ls found nothing, so emptiness is what is checked rather than status.
 	# Remote paths are quoted where they are re-used: whatever came back is
 	# a string from another machine, and it goes into a second command.
-	_rel=$(ssh -4 -o BatchMode=yes "$_host" \
-	    "doas sh -c \"ls -d '$_dir'/*.previous 2>/dev/null | sort | tail -1\"")
-	[ -n "$_rel" ] || { log "no retired release found under $_dir"; return 1; }
+	_rel=$(remote_read "ssh -4 -o BatchMode=yes '$_host' \"doas sh -c 'ls -d \"$_dir\"/*.previous 2>/dev/null | sort | tail -1'\"")
+	if [ -z "$_rel" ]; then
+		if _why=$(remote_err); then
+			log "could not read $_dir on $_host: $_why"
+		else
+			log "no retired release found under $_dir"
+		fi
+		return 1
+	fi
 	# Whatever came back goes into a SECOND remote command that runs under
 	# doas, so it is parsed by a shell again, with privilege. A name
 	# carrying a quote, a semicolon or a backtick would be a command rather
@@ -246,18 +302,23 @@ find_previous() {
 	# way rather than a reason not to check: refuse anything that is not a
 	# plain path under the directory we asked about.
 	safe_remote_path "$_rel" "$_dir" || return 1
-	_img=$(ssh -4 -o BatchMode=yes "$_host" \
-	    "doas sh -c \"ls '$_rel'/*.raw.xz 2>/dev/null | head -1\"")
-	[ -n "$_img" ] || { log "no image inside $_rel"; return 1; }
+	_img=$(remote_read "ssh -4 -o BatchMode=yes '$_host' \"doas sh -c 'ls \"$_rel\"/*.raw.xz 2>/dev/null | head -1'\"")
+	if [ -z "$_img" ]; then
+		if _why=$(remote_err); then
+			log "could not list $_rel on $_host: $_why"
+		else
+			log "no image inside $_rel"
+		fi
+		return 1
+	fi
 	safe_remote_path "$_img" "$_rel" || return 1
 	log "previous release: $_img"
 	# Also through doas: scp runs as the login user and cannot read the
 	# webroot, so a copy that skipped it would fail after the lookup had
 	# just succeeded -- the confusing shape where discovery works and
 	# retrieval does not.
-	_want=$(ssh -4 -o BatchMode=yes "$_host" \
-	    "doas sh -c \"wc -c < '$_img'\"" | tr -d ' ') || _want=""
-	ssh -4 -o BatchMode=yes "$_host" "doas cat '$_img'" > "$WORK/prev-release.raw.xz" ||
+	_want=$(remote_read "ssh -4 -o BatchMode=yes '$_host' \"doas sh -c 'wc -c < \"$_img\"'\"" | tr -d ' ')
+	remote_read "ssh -4 -o BatchMode=yes '$_host' \"doas cat '$_img'\"" > "$WORK/prev-release.raw.xz" ||
 	    return 1
 	# A stream through ssh carries no integrity check and no end-to-end
 	# status: a read interrupted part-way leaves a file that is non-empty,
