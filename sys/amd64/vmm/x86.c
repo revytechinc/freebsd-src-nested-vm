@@ -47,7 +47,7 @@
 #include "x86.h"
 
 /*
- * Host-wide nested-virt gate (T2): exposed via hw.vmm.nested.enable.
+ * Host-wide nested-virt gate: exposed via hw.vmm.nested.enable.
  * Defined in sys/amd64/vmm/vmm.c; declared here rather than promoted
  * to a public header so this translation unit can read the gate.
  */

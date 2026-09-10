@@ -144,7 +144,7 @@ static uint8_t *vmxon_region;
 
 
 /*
- * Host-wide nested-virt gate (T2). Defined in sys/amd64/vmm/vmm.c;
+ * Host-wide nested-virt gate. Defined in sys/amd64/vmm/vmm.c;
  * declared here rather than promoted to a public header per task
  * file-scope restriction.
  */
@@ -1068,12 +1068,12 @@ vmx_modinit(int ipinum)
 	vmx_nested_status = nested_hw ? 1 : 0;
 
 	/*
-	 * Nested-VMX (T15, T18): we deliberately do NOT OR the
+	 * Nested-VMX: we deliberately do NOT OR the
 	 * VMCS-shadowing bit into the global `procbased_ctls2` here.
-	 * The Intel SDM (Vol 3 §25.4.2) requires that, when
-	 * VMCS shadowing is enabled, the shadow VMCS address in the
-	 * L0 VMCS must point at a valid, populated shadow VMCS --
-	 * otherwise VM-entry fails.  bhyve always writes
+	 * Enabling VMCS shadowing makes VMCS_LINK_POINTER architecturally
+	 * significant: it must then address a valid, populated shadow
+	 * VMCS, and VM entry fails if it does not.  That is why the bit
+	 * must never be set globally -- there is no other guard.  bhyve always writes
 	 * VMCS_LINK_POINTER = ~0 in vmcs_init(), which is the
 	 * correct value for a non-shadowing VMCS but is illegal
 	 * when shadowing is on.  So we leave the global ctl2
@@ -1238,7 +1238,7 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 	vcpu->vmcs = malloc_aligned(sizeof(*vmcs), PAGE_SIZE, M_VMX,
 	    M_WAITOK | M_ZERO);
 	/*
-	 * Nested-VMX (T15): allocate the 4KB VMCS12 image only for
+	 * Nested-VMX: allocate the 4KB VMCS12 image only for
 	 * nested-enabled VMs.  The region is plain zero-initialised
 	 * memory at this point; the actual L1-visible content is
 	 * filled in by vmx_nested_load_vmcs12() on the first
@@ -1247,8 +1247,9 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 	 * VMCS_LINK_POINTER.  We intentionally do not touch the
 	 * shadow bit or link pointer here -- doing so would break
 	 * every nested-enabled VMCS that has not yet installed a
-	 * VMCS12 (Intel SDM Vol 3 §25.4.2 requires a valid link
-	 * pointer when shadowing is on).
+	 * VMCS12: with shadowing on, VMCS_LINK_POINTER must address a
+	 * valid shadow VMCS, and the ~0 bhyve writes in vmcs_init() is
+	 * not one.
 	 */
 	if (vmx->vm->nested_enabled) {
 		vcpu->nvmcs12 = malloc_aligned(sizeof(*vcpu->nvmcs12),
@@ -1257,7 +1258,7 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 			panic("vmx_vcpu_init: nvmcs12 alloc failed vcpu %d",
 			    vcpuid);
 		/*
-		 * Wave 4 (T18-T23b): allocate the per-vCPU nested-VMX
+		 * allocate the per-vCPU nested-VMX
 		 * state alongside the existing nvmcs12 buffer.  The
 		 * VMCS-shadow field bitmaps are allocated lazily inside
 		 * vmx_nested_load_vmcs12() on the first VMPTRLD; here
@@ -1362,7 +1363,7 @@ vmx_vcpu_init(void *vmi, struct vcpu *vcpu1, int vcpuid)
 		panic("vmx_setup_cr0_shadow %d", error);
 
 	/*
-	 * Nested-VMX (T14): if this VM is a nested-enabled L1, seed
+	 * Nested-VMX: if this VM is a nested-enabled L1, seed
 	 * the CR4 read shadow with CR4_VMXE set.  The shadow is what
 	 * the guest reads back on `mov %cr4, %rxx`, so seeding it
 	 * with VMXE means an L1 that reads CR4 before writing it
@@ -2061,7 +2062,7 @@ vmx_emulate_cr4_access(struct vmx_vcpu *vcpu, uint64_t exitqual)
 	regval = vmx_get_guest_reg(vcpu, (exitqual >> 8) & 0xf);
 
 	/*
-	 * Nested-VMX (T14): when L1 is a nested hypervisor, L1 must
+	 * Nested-VMX: when L1 is a nested hypervisor, L1 must
 	 * never be allowed to clear CR4.VMXE in its own (visible)
 	 * CR4 — that would prevent it from executing VMPTRLD/VMXON
 	 * for L2.  Clearing VMXE in the *real* (host) CR4 would
@@ -2991,7 +2992,7 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 	case EXIT_REASON_VMRESUME:
 	case EXIT_REASON_VMWRITE:
 		/*
-		 * Wave 4 (T18-T23b): when nested-virt is active, dispatch
+		 * when nested-virt is active, dispatch
 		 * the VM* instruction to the in-kernel handlers.  Each
 		 * handler returns 0 if it consumed the exit (caller
 		 * advances L1 RIP past the instruction), or -1 if it
@@ -3020,7 +3021,7 @@ vmx_exit_process(struct vmx *vmx, struct vmx_vcpu *vcpu, struct vm_exit *vmexit)
 	case EXIT_REASON_INVEPT:
 	case EXIT_REASON_INVVPID:
 		/*
-		 * Wave 4 (T23b): when nested-virt is active, dispatch
+		 * when nested-virt is active, dispatch
 		 * the TLB-management instruction to the in-kernel
 		 * handler.  The handler forwards the L1-stated EPTP /
 		 * VPID to the L0 hardware INVEPT/INVVPID so the L0 MMU
@@ -3508,7 +3509,7 @@ vmx_vcpu_cleanup(void *vcpui)
 
 	vpid_free(vcpu->state.vpid);
 	/*
-	 * Nested-VMX (T15): free the VMCS12 shadow if vmx_vcpu_init
+	 * Nested-VMX: free the VMCS12 shadow if vmx_vcpu_init
 	 * allocated it.  The field is left NULL for non-nested VMs,
 	 * so the free() on NULL is a safe no-op.
 	 */

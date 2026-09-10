@@ -52,7 +52,7 @@
 /*
  * VMX capability MSR numbers not yet named in <machine/specialreg.h>.
  * These are referenced from the nested-VMX capability masking path
- * below (T12); once <machine/specialreg.h> is updated to add them,
+ * below; once <machine/specialreg.h> is updated to add them,
  * these local defines become redundant and can be removed.
  */
 #ifndef	MSR_VMX_MISC
@@ -330,7 +330,7 @@ vmx_msr_init(void)
 }
 
 /*
- * Nested-VMX capability MSR shadow masks (T12).
+ * Nested-VMX capability MSR shadow masks.
  *
  * For each capability MSR in the 0x480-0x490 range (17 entries,
  * 0x480..0x490 inclusive) we cache a pair (and_mask, or_mask)
@@ -486,12 +486,25 @@ vmx_cap_masks_init(void)
 		switch (class) {
 		case VMX_CAP_CLASS_BASIC:
 			/*
-			 * The capability MSR layout (per Intel SDM
-			 * §25.1): bits 0-31 -> 0 indicates which bits
-			 * MUST be 1, bits 32-63 -> 1 indicates which
-			 * bits MAY be 1.  Keep forced-zero bits at 0
-			 * (AND mask); force on the mandatory bits
-			 * (OR mask).
+			 * A control capability MSR is two halves: the
+			 * low 32 bits are the allowed-0 settings and
+			 * the high 32 bits the allowed-1 settings, so
+			 * clearing a high-half bit is what forbids L1
+			 * from enabling that control.  That is the
+			 * lever vmx_nested_cap_msr_read() pulls when it
+			 * withdraws a control L0 cannot honour.
+			 *
+			 * These two masks pull no lever.  and_mask is
+			 * host_val's low half with the high half all
+			 * ones, or_mask is host_val's high half, so
+			 * (host_val & and_mask) | or_mask is host_val
+			 * again for every input -- the arithmetic is
+			 * the identity.  The one effect that survives
+			 * is the all-zero and_mask the TRUE_CTL case
+			 * below uses as a "this MSR does not exist"
+			 * sentinel.  Everything L1 must not see is
+			 * cleared explicitly, per MSR, in
+			 * vmx_nested_cap_msr_read().
 			 */
 			and_mask = ~(~host_val & 0xffffffff);
 			or_mask = host_val & 0xffffffff00000000ULL;
@@ -793,7 +806,7 @@ vmx_rdmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t *val, bool *retu)
 	}
 
 	/*
-	 * Nested-VMX (T16): the VMX-fixed and VMCS-enumeration MSRs
+	 * Nested-VMX: the VMX-fixed and VMCS-enumeration MSRs
 	 * are reporting-only — they tell L1 which bits of CR0/CR4
 	 * the architecture forces 1 or 0 in VMX operation, and which
 	 * VMCS encoding values are supported.  Returning 0 would be
@@ -802,12 +815,12 @@ vmx_rdmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t *val, bool *retu)
 	 * value verbatim.
 	 *
 	 * This branch is logically redundant with the
-	 * vmx_nested_cap_msr_read() path above (T12's AND/OR mask
+	 * vmx_nested_cap_msr_read() path above (the AND/OR mask
 	 * happens to preserve the FIXED MSR host value because the
 	 * mask is identity for the lower-32-bits-only data layout
 	 * of these MSRs) but is kept as an explicit fast-path so
 	 * the FIXED-MSR contract is obvious in the source and
-	 * cannot regress if the T12 mask derivation is later
+	 * cannot regress if the mask derivation is later
 	 * tightened.
 	 */
 	if (vcpu->vmx != NULL && vcpu->vmx->vm != NULL &&
@@ -820,7 +833,7 @@ vmx_rdmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t *val, bool *retu)
 	}
 
 	/*
-	 * Nested-VMX (T13): the IA32_FEATURE_CONTROL MSR reports
+	 * Nested-VMX: the IA32_FEATURE_CONTROL MSR reports
 	 * whether VMXON is allowed outside SMX and whether the MSR
 	 * itself is locked.  A real BIOS that has enabled VMX
 	 * typically locks the MSR with both bits set, so a nested L1
@@ -899,7 +912,7 @@ vmx_wrmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 	}
 
 	/*
-	 * Nested-VMX (T13): L1's attempt to write IA32_FEATURE_CONTROL
+	 * Nested-VMX: L1's attempt to write IA32_FEATURE_CONTROL
 	 * must surface as #GP.  The MSR is locked from L1's view
 	 * (we returned Lock=1 in vmx_rdmsr above), so any WRMSR is
 	 * by definition illegal at L1.  Inject #GP and skip the

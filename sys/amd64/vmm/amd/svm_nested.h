@@ -151,7 +151,7 @@ int	 svm_msr_bitmap_test_intercept(const struct nested_bitmap *nb,
 /*
  * Builder entry point. Composes the per-vCPU MSRPM by composing MSR
  * ranges one at a time. It always installs the MSR_VM_HSAVE_PA
- * intercept required by T8; later tasks add model-specific MSRs, perf
+ * intercept required by the HSAVE MSR; model-specific MSRs, perf
  * counters and the final L1 deny-list. Called only when
  * 'vm->nested_enabled'.
  */

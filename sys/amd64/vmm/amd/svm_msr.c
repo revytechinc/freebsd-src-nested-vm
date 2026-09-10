@@ -55,14 +55,13 @@
 #endif
 
 /*
- * T8 (wave2) nested-virt: per-vCPU L1 HSAVE GPA. bhyve writes to a
+ * Nested-virt: per-vCPU L1 HSAVE GPA. bhyve writes to a
  * bhyve-controlled shadow HPA on every L2 VMRUN; the GPA captured here
  * is the L1-stated destination for the L2->L1 host-save-area state
- * transfer on L2 #VMEXIT (consulted by T25 VMRUN hookup). Indexed by
- * vcpuid, parallel to the 'nested_vmcs12_region[MAXCPU]' file-scope
- * used by T0c (vmx.c). T7's nested_vcpu_state carries the same field
- * for forward compatibility once T7's allocation lands; the file-scope
- * backing here is the actual storage until then.
+ * transfer on L2 #VMEXIT, consulted when VMRUN is emulated. Indexed
+ * by vcpuid; struct nested_vcpu_state carries the same field, and the
+ * file-scope backing here is the actual storage until that allocation
+ * is wired up.
  *
  * MUST NOT be exposed to L1 as-is: the L0 host HSAVE PA lives in
  * MSR_VM_HSAVE_PA while L0 is running. Returning the host PA to an
@@ -71,13 +70,13 @@
 static uint64_t nested_hsave_gpa[MAXCPU];
 
 /*
- * T32-T33 (wave6) nested-virt: per-vCPU Hyper-V enlightenment shadows.
+ * Nested-virt: per-vCPU Hyper-V enlightenment shadows.
  * Each entry is the L1-stated value for the named MSR (TLFS 7.8b §3.1).
  * Indexed by vcpuid; same concurrency story as nested_hsave_gpa.
  *
  * SIEFP / SIMP / HYPERCALL / REFERENCE_TSC entries store L1's
  * page-aligned GPA; on RDMSR we return that GPA so L1 sees its own
- * configuration. WRMSR validates via vm_gpa_hold (T32/T33).
+ * configuration. WRMSR validates via vm_gpa_hold.
  *
  * MUST NOT be exposed to L0: these are L1's view, not the host's
  * actual SynIC state. Returning the host's real SIEFP/SIMP would let
@@ -93,11 +92,11 @@ static uint64_t nested_hv_sint[MAXCPU][MSR_HV_SINT_COUNT];
 static uint64_t nested_hv_hypercall[MAXCPU];
 
 /*
- * T34-T35 (wave6) nested-virt: per-vCPU APIC-assist / TSC shadow state.
+ * Nested-virt: per-vCPU APIC-assist / TSC shadow state.
  * EOI / ICR / TPR MSRs are per-vCPU L1-stated values; L1's writes
  * update only L1's view, never the host's physical APIC. Reference TSC
  * stores L1's TSC page GPA passed in via MSR_HV_REFERENCE_TSC; the
- * actual TSC page backing is bhyve userspace's job (T35).
+ * actual TSC page backing is bhyve userspace's job.
  *
  * MUST NOT be exposed to L0: L1's EOI writes must not be forwarded to
  * the host's LAPIC (would let L1 inject interrupts into L0).
@@ -108,7 +107,7 @@ static uint64_t nested_hv_apic_tpr[MAXCPU];
 static uint64_t nested_hv_ref_tsc[MAXCPU];
 
 /*
- * T36 (wave6) nested-virt: L1 Hyper-V identity MSRs.
+ * Nested-virt: L1 Hyper-V identity MSRs.
  * GUEST_OS_ID, VP_RUNTIME accumulate values across L1's vCPU residency.
  * GUEST_IDLE is a pass-through (L1's interpretation of "is this vCPU
  * idle"); we just store the L1 value.
@@ -126,13 +125,13 @@ static uint64_t nested_hv_vp_runtime[MAXCPU];
 static uint64_t nested_hv_guest_idle[MAXCPU];
 
 /*
- * Host-wide nested-virt gate (T2). File-scope extern mirrors the
+ * Host-wide nested-virt gate. File-scope extern mirrors the
  * pattern in sys/amd64/vmm/intel/vmx.c::nested_vmcs12_region.
  */
 extern int vmm_nested_enable;
 
 /*
- * T32-T33: validate that 'gpa' refers to a real, mapped page in L1
+ * validate that 'gpa' refers to a real, mapped page in L1
  * physical memory. Page-aligned (mask check enforced by caller).
  * Returns non-zero on success. Used for MSRs that store a GPA into
  * L1 memory (SIEFP/SIMP/HYPERCALL/REFERENCE_TSC).
@@ -259,7 +258,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_SIEFP:
 		/*
-		 * T32: L1 SynIC event flag page GPA read. Return L1's
+		 * L1 SynIC event flag page GPA read. Return L1's
 		 * last-set value (0 if unset). Outside nested-virt, fall
 		 * through to EINVAL/VMEXIT (existing behavior).
 		 */
@@ -276,7 +275,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_SIMP:
 		/*
-		 * T32: L1 SynIC message page GPA read. Return L1's
+		 * L1 SynIC message page GPA read. Return L1's
 		 * last-set value (0 if unset).
 		 */
 		if (vcpu->vcpu == NULL ||
@@ -292,7 +291,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_SCONTROL:
 		/*
-		 * T32: L1 SynIC control read. Return L1's last-set value.
+		 * L1 SynIC control read. Return L1's last-set value.
 		 */
 		if (vcpu->vcpu == NULL ||
 		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
@@ -307,7 +306,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_EOM:
 		/*
-		 * T32: L1 SynIC end-of-message read. Return L1's
+		 * L1 SynIC end-of-message read. Return L1's
 		 * last-set value (0 if unset).
 		 */
 		if (vcpu->vcpu == NULL ||
@@ -323,7 +322,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_SINT0 ... MSR_HV_SINT15:
 		/*
-		 * T32: L1 SynIC source MSR read. Return L1's last-set
+		 * L1 SynIC source MSR read. Return L1's last-set
 		 * value for the corresponding SINTn.
 		 */
 		if (vcpu->vcpu == NULL ||
@@ -339,7 +338,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_HYPERCALL:
 		/*
-		 * T33: L1 hypercall page GPA read. Return L1's stored
+		 * L1 hypercall page GPA read. Return L1's stored
 		 * GPA OR'd with MSR_HV_HYPERCALL_ENABLE so L1 thinks
 		 * it's enabled. L1's HYPERVMCALL can then be redirected
 		 * through L1's page.
@@ -358,7 +357,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_APIC_EOI:
 		/*
-		 * T34: L1 EOI write acknowledgement. TLFS 7.8b §3.1.6:
+		 * L1 EOI write acknowledgement. TLFS 7.8b §3.1.6:
 		 * any non-zero write to MSR_HV_APIC_EOI signals "EOI
 		 * the highest-priority in-service interrupt". On RDMSR
 		 * the value is implementation-defined (TLFS allows
@@ -378,7 +377,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_APIC_ICR:
 		/*
-		 * T34: L1 ICR (Interrupt Command Register) shadow
+		 * L1 ICR (Interrupt Command Register) shadow
 		 * read. Stores L1's APIC assist ICR value; L1's
 		 * interrupt dispatches via L1's SINT routing, not the
 		 * host's LAPIC.
@@ -396,7 +395,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_APIC_TPR:
 		/*
-		 * T34: L1 TPR (Task Priority Register) shadow read.
+		 * L1 TPR (Task Priority Register) shadow read.
 		 * L1's CR8 accesses go through to L1's virtual APIC
 		 * page; this MSR is the SynIC-side assist.
 		 */
@@ -413,7 +412,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_REFERENCE_TSC:
 		/*
-		 * T35: L1 Reference TSC page GPA read. Return L1's
+		 * L1 Reference TSC page GPA read. Return L1's
 		 * stored GPA. The actual TSC page layout (sequence,
 		 * scale, offset) is bhyve userspace's job to populate
 		 * when L1 sets the GPA (this is the L1-virtual TSC,
@@ -432,7 +431,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_TIME_REF_COUNT:
 		/*
-		 * T35: L1 TIME_REF_COUNT read. Returns L1's virtual
+		 * L1 TIME_REF_COUNT read. Returns L1's virtual
 		 * timestamp counter (L1's TSC offset-adjusted). NAIVE
 		 * implementation: return rdtsc() minus L1's offset.
 		 * Full emulation (with L1's paravirtualized TSC clock)
@@ -480,7 +479,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_VM_HSAVE_PA:
 		/*
-		 * T8: nested-virt L1 HSAVE GPA read.
+		 * nested-virt L1 HSAVE GPA read.
 		 *
 		 * Return the L1-stated GPA (or 0 if L1 has not set one).
 		 * NEVER return the L0 host's HSAVE PA -- that is an info
@@ -516,7 +515,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_GUEST_OS_ID:
 		/*
-		 * T36: L1 OS identity read. Return L1's last-set value
+		 * L1 OS identity read. Return L1's last-set value
 		 * or MSR_HV_GUEST_OS_ID_WINDOWS (0x8100) if never set
 		 * per TLFS 7.8b §3.1.1 recommendation.
 		 */
@@ -535,7 +534,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_VP_INDEX:
 		/*
-		 * T36: L1's vCPU index. L1 sees itself as the vCPU
+		 * L1's vCPU index. L1 sees itself as the vCPU
 		 * it's actually running on (= our vcpuid). Must NOT
 		 * return the host's vCPU index.
 		 */
@@ -552,7 +551,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_VP_RUNTIME:
 		/*
-		 * T36: L1's vCPU runtime. Returns accumulated L1 vCPU
+		 * L1's vCPU runtime. Returns accumulated L1 vCPU
 		 * time. We store L1's last-set value (L1 enforces its
 		 * own runtime accounting via this MSR; the actual
 		 * timing is bhyve userspace's job).
@@ -570,7 +569,7 @@ svm_rdmsr(struct svm_vcpu *vcpu, u_int num, uint64_t *result, bool *retu)
 		break;
 	case MSR_HV_GUEST_IDLE:
 		/*
-		 * T36: L1 vCPU idle state. Pass-through storage.
+		 * L1 vCPU idle state. Pass-through storage.
 		 */
 		if (vcpu->vcpu == NULL ||
 		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
@@ -665,7 +664,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_VM_HSAVE_PA:
 		/*
-		 * T8: nested-virt L1 HSAVE GPA write.
+		 * nested-virt L1 HSAVE GPA write.
 		 *
 		 * Validate the GPA before storing: must be page-aligned
 		 * (AMD APM Vol 2 §15.11) and must resolve to a real
@@ -674,7 +673,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		 * nested_hsave_gpa on failure.
 		 *
 		 * On success: store the GPA so a later L1 RDMSR returns
-		 * it and so T25 (VMRUN) can target the L2->L1 state
+		 * it and so VMRUN can target the L2->L1 state
 		 * transfer at this GPA. Note: 0 is a valid stored value
 		 * meaning "L1 has cleared the preference"; the semantic
 		 * "never set" is encoded by the array being zero at
@@ -709,7 +708,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_SIEFP:
 		/*
-		 * T32: L1 SynIC event flag page GPA write. Validate
+		 * L1 SynIC event flag page GPA write. Validate
 		 * page-aligned + mapped in L1 phys mem (vm_gpa_hold).
 		 * On failure inject #GP and do NOT store. Acceptance of
 		 * 0 is allowed (L1 clearing the SIEFP).
@@ -733,7 +732,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_SIMP:
 		/*
-		 * T32: L1 SynIC message page GPA write. Same validation
+		 * L1 SynIC message page GPA write. Same validation
 		 * pattern as SIEFP.
 		 */
 		if (vcpu->vcpu == NULL ||
@@ -755,7 +754,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_SCONTROL:
 		/*
-		 * T32: L1 SynIC control write. SCONTROL is a 64-bit
+		 * L1 SynIC control write. SCONTROL is a 64-bit
 		 * value with format defined by TLFS 7.8b §3.1.4. We
 		 * store it verbatim; the SynIC-enabled bit is the
 		 * gating concern but actual enable/disable semantics
@@ -778,7 +777,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_EOM:
 		/*
-		 * T32: L1 SynIC EOM write. TLFS 7.8b §3.1.4: writing
+		 * L1 SynIC EOM write. TLFS 7.8b §3.1.4: writing
 		 * any non-zero value to EOM "clears" the SIMP message
 		 * slot. We store it verbatim; the message-page semantics
 		 * live in bhyve userspace (xmsr.c).
@@ -798,7 +797,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_SINT0 ... MSR_HV_SINT15:
 		/*
-		 * T32: L1 SynIC SINTn write. Each SINT MSR is 16 bytes
+		 * L1 SynIC SINTn write. Each SINT MSR is 16 bytes
 		 * (4 64-bit fields) per TLFS 7.8b §3.1.4. We store
 		 * the first 8 bytes (the format L1 cares about most).
 		 * Full multi-field emulation is bhyve userspace's job.
@@ -818,7 +817,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_HYPERCALL:
 		/*
-		 * T33: L1 hypercall page GPA write. Validate
+		 * L1 hypercall page GPA write. Validate
 		 * page-aligned + mapped in L1 phys mem. ENABLE bit is
 		 * set on every store (L1 enabling it again is a no-op).
 		 * A later RDMSR returns the GPA with ENABLE bit OR'd.
@@ -842,7 +841,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_APIC_EOI:
 		/*
-		 * T34: L1 EOI write. TLFS 7.8b §3.1.6: any non-zero
+		 * L1 EOI write. TLFS 7.8b §3.1.6: any non-zero
 		 * write signals EOI. We must NOT forward to the host
 		 * LAPIC — L1's EOI only completes L1's in-service
 		 * interrupt. Indirect EOI delivery via the L1's virtual
@@ -863,7 +862,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_APIC_ICR:
 		/*
-		 * T34: L1 ICR write. Triggers L1's interrupt delivery
+		 * L1 ICR write. Triggers L1's interrupt delivery
 		 * to L1's SINT routing — never host's LAPIC. The
 		 * dispatch semantics live in xmsr.c.
 		 */
@@ -882,7 +881,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_APIC_TPR:
 		/*
-		 * T34: L1 TPR write. Updates L1's APIC priority only.
+		 * L1 TPR write. Updates L1's APIC priority only.
 		 */
 		if (vcpu->vcpu == NULL ||
 		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
@@ -899,7 +898,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_REFERENCE_TSC:
 		/*
-		 * T35: L1 Reference TSC page GPA write. Validate
+		 * L1 Reference TSC page GPA write. Validate
 		 * page-aligned + mapped in L1 phys mem. Returns L1's
 		 * TSC page GPA on RDMSR. The actual sequence/scale/
 		 * offset fields are populated by bhyve userspace when
@@ -924,7 +923,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_TIME_REF_COUNT:
 		/*
-		 * T35: L1 TIME_REF_COUNT write. TLFS 7.8b §3.1.11 says
+		 * L1 TIME_REF_COUNT write. TLFS 7.8b §3.1.11 says
 		 * this is RO; a write is a NOP (it's a counter, not a
 		 * configuration). We silently accept.
 		 */
@@ -936,7 +935,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_GUEST_OS_ID:
 		/*
-		 * T36: L1 OS identity write. Stores L1's OS ID.
+		 * L1 OS identity write. Stores L1's OS ID.
 		 */
 		if (vcpu->vcpu == NULL ||
 		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
@@ -953,7 +952,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_VP_RUNTIME:
 		/*
-		 * T36: L1 vCPU runtime write. Accumulates L1's vCPU
+		 * L1 vCPU runtime write. Accumulates L1's vCPU
 		 * time. We store verbatim; accounting is bhyve's job.
 		 * Note: a real VP_RUNTIME would also accept a "give me
 		 * current time" write -- L1's instruction is not a
@@ -974,7 +973,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_GUEST_IDLE:
 		/*
-		 * T36: L1 vCPU idle state write. Pass-through storage.
+		 * L1 vCPU idle state write. Pass-through storage.
 		 */
 		if (vcpu->vcpu == NULL ||
 		    !(vcpu->vcpu->vm->nested_enabled && vmm_nested_enable)) {
@@ -991,7 +990,7 @@ svm_wrmsr(struct svm_vcpu *vcpu, u_int num, uint64_t val, bool *retu)
 		break;
 	case MSR_HV_RESET:
 		/*
-		 * T36: L1 reset request. TLFS 7.8b §3.1 requires that
+		 * L1 reset request. TLFS 7.8b §3.1 requires that
 		 * any non-zero write to MSR_HV_RESET triggers an
 		 * immediate L1 reset. We accept the write but the
 		 * actual reset is bhyve userspace's job (xmsr.c).
