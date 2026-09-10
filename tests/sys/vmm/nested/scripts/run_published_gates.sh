@@ -79,7 +79,18 @@ while getopts p:P: o; do
 	esac
 done
 shift $((OPTIND - 1))
-GATES=${*:-"artifacts stock stock-manual stock-be upgrade"}
+GATES=${*:-"artifacts media stock stock-manual stock-be upgrade"}
+
+# Which published images the media gate boots.
+#
+# Both raw images by default. bhyve boots raw natively and the other six
+# artifacts are conversions of these same two filesystems, so this covers both
+# root filesystems for the cost of two boots. MEDIA_ARTIFACTS overrides it --
+# set it to every published name to exercise the conversions as well, which is
+# worth doing when the release machinery changes rather than every release.
+MEDIA_ARTIFACTS=${MEDIA_ARTIFACTS:-"ufs.raw.xz zfs.raw.xz"}
+MEDIA_FETCHED=""
+MEDIA_MISSING=""
 
 log() { printf '%s: %s\n' "$PROGRAM" "$*"; }
 
@@ -221,6 +232,90 @@ safe_remote_path() {
 		log "refusing $1: not a plain path"; return 1 ;;
 	esac
 	return 0
+}
+
+# Fetch the published VM images this gate is to boot, decompressed.
+#
+# From the SITE, by the same URL a reader would use, rather than from the build
+# directory: an artifact that is correct in the objdir and wrong on the site is
+# exactly the failure that publishing can introduce, and boot-testing the local
+# copy would never see it.
+media_artifacts() {
+	MEDIA_FETCHED=""
+	MEDIA_MISSING=""
+	_base=${SITE_URL:-https://nested.cloudbsd.cat}/releases/16.0-CURRENT-amd64
+	_pfx=${MEDIA_PREFIX:-CloudBSD-16.0-CURRENT-amd64}
+	# Both are environment-overridable and both end up in a path that
+	# `rm -f' is run against. A prefix of ../../etc/x would reach outside
+	# the working directory. Refused rather than quoted, as everywhere else
+	# here: these are artifact names and have no business containing a
+	# separator.
+	case "$_pfx" in
+	*[!A-Za-z0-9._-]*|"")
+		log "refusing media prefix $_pfx: not a plain artifact name"
+		return 1 ;;
+	esac
+	for _suffix in $MEDIA_ARTIFACTS; do
+		case "$_suffix" in
+		*[!A-Za-z0-9._-]*|"")
+			log "refusing media suffix $_suffix: not a plain artifact name"
+			MEDIA_MISSING="$MEDIA_MISSING $_suffix"
+			continue ;;
+		esac
+		# `.xz' is required, not assumed. ${_xz%.xz} leaves the name
+		# unchanged for anything else, and the `rm -f "$_xz"' below
+		# would then delete the very file just decompressed into
+		# MEDIA_FETCHED.
+		case "$_suffix" in
+		*.xz)	;;
+		*)	log "refusing media suffix $_suffix: not an xz artifact"
+			MEDIA_MISSING="$MEDIA_MISSING $_suffix"
+			continue ;;
+		esac
+		_url="$_base/$_pfx-$_suffix"
+		_xz="$WORK/media-$_pfx-$_suffix"
+		_raw=${_xz%.xz}
+		log "  fetching $_pfx-$_suffix"
+		# Retried, and each attempt from nothing: the same resolver blip
+		# that has cost the stock gates four runs would otherwise decide
+		# this one, and a resumed partial file fails decompression later
+		# where it reads as a bad image rather than a bad download.
+		_ok=no
+		for _try in 1 2 3; do
+			rm -f "$_xz"
+			fetch -q -o "$_xz" "$_url" && { _ok=yes; break; }
+			log "    attempt $_try could not fetch $_url"
+			[ "$_try" = 3 ] || sleep $(( _try * 10 ))
+		done
+		if [ "$_ok" != yes ]; then
+			log "  could not fetch $_url"
+			MEDIA_MISSING="$MEDIA_MISSING $_suffix"
+			continue
+		fi
+		# Checked before it is trusted. The site answers 200 with an HTML
+		# page for anything missing, and that page decompresses to
+		# nothing while looking like a download that worked.
+		if ! xz -t "$_xz" 2>/dev/null; then
+			log "  what came back for $_suffix is not an xz image:"
+			log "    $(file -b "$_xz" 2>/dev/null | cut -c1-60)"
+			rm -f "$_xz"
+			MEDIA_MISSING="$MEDIA_MISSING $_suffix"
+			continue
+		fi
+		rm -f "$_raw"
+		if ! xz -dk -c "$_xz" > "$_raw"; then
+			log "  could not decompress $_suffix"
+			MEDIA_MISSING="$MEDIA_MISSING $_suffix"
+			continue
+		fi
+		rm -f "$_xz"
+		MEDIA_FETCHED="$MEDIA_FETCHED $_raw"
+	done
+	# EVERY artifact asked for, not merely one of them. A publishing run
+	# that drops an image is exactly what this gate exists to catch, and
+	# returning success because the other one arrived would record that as
+	# a pass having booted half the release.
+	[ -z "$MEDIA_MISSING" ]
 }
 
 # find_previous locates the last published image.
@@ -472,8 +567,64 @@ for g in $GATES; do
 		run_gate upgrade "$HERE/verify_upgrade.sh" "$PREV" "$WORK/upgrade" ||
 		    FAILED="$FAILED upgrade"
 		;;
+	media)
+		# THE ONLY GATE THAT BOOTS SOMETHING FROM THE RELEASE BEING
+		# PUBLISHED.
+		#
+		# Until this existed, no gate did. The three stock routes boot
+		# FreeBSD's own snapshot and install packages onto it; the
+		# upgrade gate boots the PREVIOUS release. Twelve artifacts are
+		# published and none of them was ever started -- so "everything
+		# we tell people to do was done, and worked" was true of the
+		# instructions and said nothing about the images.
+		#
+		# The verdict is an L2 booting INSIDE the image. Reading
+		# hw.vmm.nested.enable in there says the sysctl exists, which is
+		# the class of proxy that let four releases ship a bhyve that
+		# could not start any VM.
+		RAN="$RAN media"
+		if ! media_artifacts; then
+			{
+				echo "CANNOT RUN: these published images could not be"
+				echo "fetched or were not valid xz:$MEDIA_MISSING"
+				echo
+				echo "This gate boots images from the release being"
+				echo "published and runs a guest inside each. An image that"
+				echo "is missing from the site is a publishing failure, and"
+				echo "booting the ones that did arrive would record half a"
+				echo "release as a pass."
+			} > "$WORK/media.log"
+			log "media: CANNOT RUN --$MEDIA_MISSING (see $WORK/media.log)"
+			FAILED="$FAILED media"
+			continue
+		fi
+		_mfail=""
+		: > "$WORK/media.log"
+		for _m in $MEDIA_FETCHED; do
+			log "  booting $(basename "$_m")"
+			# A work directory per image. Sharing one leaves the
+			# previous boot's memory disks and mounts in place, so a
+			# later image can attach what an earlier one left and
+			# report on the wrong disk.
+			if sh "$HERE/verify_media_nested.sh" "$_m" \
+			    "$WORK/media-$$-$(basename "$_m")" \
+			    >> "$WORK/media.log" 2>&1; then
+				log "  $(basename "$_m"): nested guest booted"
+			else
+				log "  $(basename "$_m"): FAILED"
+				_mfail="$_mfail $(basename "$_m")"
+			fi
+		done
+		if [ -n "$_mfail" ]; then
+			echo "FAILED:$_mfail" >> "$WORK/media.log"
+			log "media: FAIL"
+			FAILED="$FAILED media"
+		else
+			log "media: PASS"
+		fi
+		;;
 	*)	log "unknown gate: $g"
-		log "expected: artifacts stock stock-manual stock-be upgrade"
+		log "expected: artifacts media stock stock-manual stock-be upgrade"
 		exit 2 ;;
 	esac
 done
