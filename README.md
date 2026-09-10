@@ -1,3 +1,33 @@
+This is a FORK of FreeBSD, not FreeBSD
+======================================
+
+It adds **nested virtualisation to bhyve on amd64**: running a hypervisor
+inside a bhyve guest, so that guest can itself run virtual machines. Both
+vendor paths are implemented — Intel VMX and AMD SVM.
+
+**This code is new, and it has not been audited. Do not run it on equipment
+you care about.** It is kernel code in the hypervisor's most privileged paths,
+written recently, and a defect there can take down the host and everything on
+it. Use a machine you are willing to lose.
+
+Nesting is on by default and controlled host-wide by a sysctl:
+
+```sh
+sysctl hw.vmm.nested.enable      # 1 enables, 0 disables
+```
+
+See `vmm_nested(9)` for the interface, and
+[nested.cloudbsd.cat](https://nested.cloudbsd.cat/) for prebuilt images, the
+hardware this has actually been run on, and the current list of known
+limitations.
+
+**If you want FreeBSD, get it from [freebsd.org](https://www.freebsd.org/).**
+This tree is maintained by REVYTECH, Inc. and is not affiliated with or
+endorsed by the FreeBSD Project. Everything below this line is FreeBSD's own
+README, unchanged.
+
+---
+
 FreeBSD Source:
 ---------------
 This is the top level of the FreeBSD source directory.

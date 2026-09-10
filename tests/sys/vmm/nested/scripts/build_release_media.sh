@@ -46,6 +46,7 @@ SCRIPTDIR=$(cd "$(dirname "$0")" && pwd -P)
 # test. Same argument as every other preflight here.
 CONTRACT="$SCRIPTDIR/check_release_contract.sh"
 PKBK="$SCRIPTDIR/check_pkgbase_kernel.sh"
+NTPKG="$SCRIPTDIR/check_nested_tests_package.sh"
 COMMIT=""
 RELEASE_TAG="${RELEASE_TAG:-}"
 TREE=""
@@ -492,6 +493,74 @@ command -v strings >/dev/null 2>&1 || {
 	exit 2
 }
 
+[ -x "$NTPKG" ] || {
+	echo "$PROGRAM: $NTPKG is missing or not executable." >&2
+	echo "$PROGRAM: it decides whether the harness ended up in a package that" >&2
+	echo "$PROGRAM: can be installed. Without it a release can ship a harness" >&2
+	echo "$PROGRAM: nobody following the published route is able to install." >&2
+	exit 2
+}
+
+# The checkers' own unit tests, run before the build trusts either of them.
+#
+# Both ship beside their tests and nothing has ever run those tests -- so a
+# checker could have been broken for weeks and the only symptom would be a
+# release that passed. Measured on a build host: seven seconds and one second
+# respectively, against a build of about forty minutes. Both build their own
+# fixtures under TMPDIR and need nothing beyond base utilities and tar -- the
+# pkgbase one
+# SKIPs its zstd and xz cases if this tar cannot write them rather than failing
+# -- so there is no reason for this to be optional. A missing test file is a
+# failure: "the tests are not here" and "the tests passed" must not arrive at
+# the same place.
+# Named, not derived. ${PKBK%.sh}_test.sh looks tidy and makes the build fail
+# hard the day either variable points somewhere without a .sh suffix, for a
+# coupling that buys nothing.
+PKBK_TEST="$SCRIPTDIR/check_pkgbase_kernel_test.sh"
+NTPKG_TEST="$SCRIPTDIR/check_nested_tests_package_test.sh"
+for _t in "$PKBK_TEST" "$NTPKG_TEST"; do
+	[ -x "$_t" ] || {
+		echo "$PROGRAM: $_t is missing or not executable." >&2
+		echo "$PROGRAM: it is the only thing that checks the checker." >&2
+		exit 2
+	}
+	_tout=$("$_t" 2>&1) || {
+		echo "$PROGRAM: $_t FAILED:" >&2
+		printf '%s\n' "$_tout" | sed 's/^/    /' >&2
+		echo "$PROGRAM: a checker that does not pass its own tests decides" >&2
+		echo "$PROGRAM: nothing, and this build would rest on its answer." >&2
+		exit 2
+	}
+	# A passing run still has something to say, and the summary line is
+	# what says it: "N passed, N failed, N skipped".
+	#
+	# Read from the summary rather than by grepping for a SKIP prefix,
+	# because a prefix is a shape one suite happens to print and the other
+	# might reword -- and a suite that died before printing anything would
+	# then look like a suite with nothing to report. A missing summary line
+	# is treated as a failure for the same reason.
+	#
+	# What is at stake is the zstd case: the only one that feeds the
+	# checker the compressed form a real package arrives in. If it is
+	# skipped, the build has "checked the checker" against uncompressed
+	# fixtures alone, and must say so rather than let the line scroll past.
+	_tsum=$(printf '%s\n' "$_tout" |
+	    grep -E '[0-9]+ passed, [0-9]+ failed' | tail -1) || _tsum=""
+	if [ -z "$_tsum" ]; then
+		echo "$PROGRAM: $_t exited 0 without a summary line." >&2
+		printf '%s\n' "$_tout" | sed 's/^/    /' >&2
+		echo "$PROGRAM: it cannot be read as having run." >&2
+		exit 2
+	fi
+	_tnskip=$(printf '%s\n' "$_tsum" |
+	    sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p')
+	if [ -n "$_tnskip" ] && [ "$_tnskip" -gt 0 ]; then
+		say "${_t##*/}: $_tnskip case(s) SKIPPED, not run:"
+		printf '%s\n' "$_tout" | grep '^SKIP' | sed 's/^/    /' |
+		    while read -r _l; do say "$_l"; done
+	fi
+done
+
 say "target=$TARGET tree=$TREE branch=$BRANCH cores=$J host=$(hostname -s)"
 
 cd "$TREE"
@@ -870,6 +939,38 @@ if [ "$_nwrong" -ne 0 ]; then
 	exit 1
 fi
 say "packages: $_npkg total, $_nours ${PKG_NAME_PREFIX}-* all named $PKG_VERSION"
+
+# The nested harness must be wholly inside its own package, and nothing else.
+# A missing PACKAGE line under that tree splits the Kyuafile tree between two
+# packages and breaks kyua on every machine that has one and not the other --
+# and nothing about the build says so. check_nested_tests_package.sh carries
+# the reasoning and its own tests.
+#
+# A missing checker is a failure, not a skip. "The check could not run" and
+# "the check passed" must not reach the same conclusion, which is the whole
+# reason this file is full of assertions rather than reports.
+_ntrc=0
+_ntout=$("$NTPKG" -r "$RELOBJ/pkgbase-repo" \
+    -p "$PKG_NAME_PREFIX" -v "$PKG_VERSION" 2>&1) || _ntrc=$?
+if [ "$_ntrc" -ne 0 ]; then
+	printf '%s\n' "$_ntout" | sed 's/^/    /' | tee -a "$LOGD/summary.log"
+	# 2 is the checker saying it could not carry the check out -- a bad
+	# invocation, or something in the repository it could not read. The
+	# second of those IS a fault in the release, so the message must not
+	# steer the reader away from it; it says where to look instead of
+	# guessing which.
+	if [ "$_ntrc" -eq 2 ]; then
+		say "the package check could not be carried out: it was called"
+		say "wrongly, or something in the repository could not be read."
+		say "Its output above says which. That is neither the release"
+		say "being wrong nor the release being right."
+	else
+		say "the harness cannot be certified installable from this"
+		say "release -- see the check's output above for which part."
+	fi
+	exit 1
+fi
+say "$_ntout"
 
 # Prove the repo is usable rather than trusting make's exit status: the
 # staging step needs a `latest' symlink and a catalogue, and their absence is

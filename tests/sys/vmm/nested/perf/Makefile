@@ -38,7 +38,7 @@
 #   perf_nested.sh        nested-L1 macrobench (informational)
 #   baseline.txt          MANDATORY committed reference numbers
 
-PACKAGE=	tests
+PACKAGE=	nested-tests
 
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/perf
 

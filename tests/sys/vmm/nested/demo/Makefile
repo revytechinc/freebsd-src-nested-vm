@@ -8,7 +8,7 @@
 # the kernel underneath it, and a stale copy fails a working kernel in a way
 # that reads as a hypervisor defect.
 
-PACKAGE=	tests
+PACKAGE=	nested-tests
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/demo
 BINDIR=		${TESTSDIR}
 
