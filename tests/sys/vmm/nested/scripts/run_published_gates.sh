@@ -184,16 +184,25 @@ find_previous() {
 	[ -n "$PUBLISH" ] || return 1
 	_host=${PUBLISH%%:*}
 	_dir=${PUBLISH#*:}
-	# Newest retired directory, and the image inside it. Sorting by name
-	# works because the timestamp is in the name; sorting by mtime would
-	# pick whichever was touched last, which is not the same thing.
+	# `.previous', which is what publish_release.sh actually creates when it
+	# rotates. This looked for `.retired-*' -- a name that appears exactly
+	# once in this tree, here, and is produced by nothing. The lookup could
+	# never succeed, and because it fails closed it reported "no retired
+	# release found" rather than anything about the name being wrong, so the
+	# auto-discovery this function exists for has never once run.
+	#
+	# There is exactly ONE of these: rotation keeps a single generation, at
+	# a fixed name rather than a timestamped one. `tail -1' is therefore a
+	# guard against an unexpected second rather than a way of choosing the
+	# newest, and the name carries no timestamp to sort by -- do not read
+	# the sort as picking a most-recent release.
 	#
 	# The exit status of the remote pipeline is tail's, which is 0 even when
 	# ls found nothing, so emptiness is what is checked rather than status.
 	# Remote paths are quoted where they are re-used: whatever came back is
 	# a string from another machine, and it goes into a second command.
 	_rel=$(ssh -4 -o BatchMode=yes "$_host" \
-	    "ls -d '$_dir'/.retired-* 2>/dev/null | sort | tail -1")
+	    "ls -d '$_dir'/*.previous 2>/dev/null | sort | tail -1")
 	[ -n "$_rel" ] || { log "no retired release found under $_dir"; return 1; }
 	_img=$(ssh -4 -o BatchMode=yes "$_host" \
 	    "ls '$_rel'/*.raw.xz 2>/dev/null | head -1")

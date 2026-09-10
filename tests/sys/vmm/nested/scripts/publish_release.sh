@@ -734,8 +734,22 @@ _check() {
 	case "$_ct" in
 	text/html*)	echo "  MISSING $_url -- served the SPA fallback, not the file" >&2; _fail=$((_fail+1)) ;;
 	esac
+	# The EMPTY case is named before the catch-all, or it falls into it.
+	# `*' matches an empty string, so with -w ANY a request that answered
+	# nothing at all -- no fetch, no curl, DNS gone, the site down, the HEAD
+	# refused -- printed "ok ()" and returned 0 from the last check before
+	# this script reports a release published. That is the same fail-open
+	# the text/html arm above was moved to prevent, in the other direction:
+	# there it was a wrong answer, here it is no answer at all.
+	#
+	# Naming it here only takes it out of the ANY shortcut. What makes it
+	# FAIL is the `''` arm in the third case below, which increments $_fail
+	# -- and the script exits 1 at the end when that is non-zero. Verified
+	# by running the three arms against an empty, a concrete and a text/html
+	# content type: NO ANSWER, ok, MISSING.
 	case "$_ct" in
 	text/html*)	;;
+	'')		;;
 	*)		[ "$_want" = ANY ] && { echo "  ok   $_url ($_ct)"; return 0; } ;;
 	esac
 	case "$_ct" in
