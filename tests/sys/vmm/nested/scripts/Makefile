@@ -43,6 +43,9 @@ ${PACKAGE}FILES+=	gen_repo_fingerprint.sh
 ${PACKAGE}FILES+=	gen_gate_report.sh
 ${PACKAGE}FILES+=	gen_gate_report.py
 ${PACKAGE}FILES+=	publish_release.sh
+${PACKAGE}FILES+=	check_pkgbase_kernel.sh
+${PACKAGE}FILES+=	check_pkgbase_kernel_test.sh
+${PACKAGE}FILES+=	upgrade_to_published.sh
 
 # bsd.files.mk gives a FILES group SHAREMODE, and a 0444 script cannot be
 # executed -- not even by root, which needs at least one x bit set.  Nearly

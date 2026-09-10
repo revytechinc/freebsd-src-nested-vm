@@ -45,6 +45,7 @@ SCRIPTDIR=$(cd "$(dirname "$0")" && pwd -P)
 # are built loses the whole run for a condition that takes a millisecond to
 # test. Same argument as every other preflight here.
 CONTRACT="$SCRIPTDIR/check_release_contract.sh"
+PKBK="$SCRIPTDIR/check_pkgbase_kernel.sh"
 COMMIT=""
 RELEASE_TAG="${RELEASE_TAG:-}"
 TREE=""
@@ -406,6 +407,27 @@ trap 'trap - INT TERM; say "interrupted"; if stop_child; then on_failure "${CURR
 	exit 2
 }
 
+# strings(1) reads the kernel's version line, which becomes the build identity
+# and, from there, the string the download page tells a reader to compare
+# against uname -v. It is not on every FreeBSD install. Checked HERE, with the
+# other preflights, because finding out at the end costs the whole run.
+command -v strings >/dev/null 2>&1 || {
+	echo "$PROGRAM: strings(1) is not installed." >&2
+	echo "$PROGRAM: the kernel's version line is read with it, and that line is" >&2
+	echo "$PROGRAM: what the download page asks a reader to check against" >&2
+	echo "$PROGRAM: uname -v. Without it the release would ship unidentified." >&2
+	exit 2
+}
+
+[ -x "$PKBK" ] || {
+	echo "$PROGRAM: $PKBK is missing or not executable." >&2
+	echo "$PROGRAM: it decides whether an existing package repository was built" >&2
+	echo "$PROGRAM: from this run's kernel. Without it the only safe answer is" >&2
+	echo "$PROGRAM: to rebuild, and a build that quietly stops asking is how a" >&2
+	echo "$PROGRAM: release ends up shipping two kernels under one version." >&2
+	exit 2
+}
+
 say "target=$TARGET tree=$TREE branch=$BRANCH cores=$J host=$(hostname -s)"
 
 cd "$TREE"
@@ -608,17 +630,10 @@ if [ "$_mapped" -eq 0 ]; then
 fi
 say "paths: $_nchecked modules and debug objects checked, none carry $TREE; vmm.ko has $_mapped rewritten to /usr/src"
 
-# `pkgbase-repo' is a DIRECTORY target with no prerequisites, so once the
-# directory exists make reports "up to date" and skips the recipe entirely.
-# A failed or interrupted run leaves that directory behind with a handful of
-# packages in it, and every retry then silently builds nothing and reports
-# success -- the media staging is what eventually fails, several phases later,
-# on a repository with no catalogue. Remove it so the target actually runs.
+# Where the release makefiles put everything: media, staging trees and the
+# package repository. Several of the cleanups below and the pkgbase-repo
+# decision further down all hang off it.
 RELOBJ="${MAKEOBJDIRPREFIX}${TREE}/amd64.amd64/release"
-if [ -d "$RELOBJ/pkgbase-repo" ]; then
-	say "removing a stale pkgbase-repo so make does not skip the target"
-	rm -rf "$RELOBJ/pkgbase-repo" "$RELOBJ/pkgbase-repo-dir"
-fi
 
 # The media staging directories are the same trap one level along: a second run
 # fails on `mkdir bootonly-memstick: File exists` because the first run left
@@ -675,11 +690,74 @@ PHYSG=$(( $(sysctl -n hw.physmem) / 1073741824 ))
 PKGJ=$(( PHYSG / 5 ))
 [ "$PKGJ" -gt "$J" ] && PKGJ=$J
 [ "$PKGJ" -lt 4 ] && PKGJ=4
-say "pkgbase-repo: -j$PKGJ (memory-bound: ~2.7GB per pkg process, so a fifth of RAM on ${PHYSG}G)"
+# `pkgbase-repo' is a DIRECTORY target with no prerequisites, so once the
+# directory exists make reports "up to date" and skips the recipe entirely.
+# A failed or interrupted run leaves that directory behind with a handful of
+# packages in it, and every retry then silently builds nothing and reports
+# success -- the media staging is what eventually fails, several phases later,
+# on a repository with no catalogue. So the directory has to go, UNLESS it can
+# be shown to be this run's own work.
+#
+# A release is TWO media targets over one object directory, and this target
+# takes about nineteen minutes. Building it again for the second target costs
+# that time and produces a SECOND kernel -- newvers.sh embeds a build counter
+# and a timestamp, so two runs over identical source do not yield identical
+# bytes. The release then carries two kernels under one version string, which
+# is the defect that cost a published release its number.
+#
+# So the second target may reuse the first target's repository. The grant is
+# made on proof and nothing else: check_pkgbase_kernel.sh compares the kernel
+# inside the repository's kernel package, byte for byte, against the kernel
+# this run holds in the object directory. A repository left by a failed or
+# older run carries a different kernel and is refused, and removed.
+#
+# This decision sits immediately above the build it guards, and not earlier
+# where the other cleanups are, on purpose: the comparison is against the
+# kernel in the object directory, so anything that could rebuild the kernel
+# between the decision and the skip would break the whole guarantee. Keeping
+# them adjacent means there is nothing in between to check.
+#
+# Reuse changes nothing downstream. The version-naming assertion, the `latest'
+# symlink check and check_release_contract.sh all run against whatever is in
+# the directory, reused or freshly built, so a reused repository faces exactly
+# the gates a rebuilt one does.
+# State the dependency rather than leaving it to be traced. $_kbin is set from
+# the kernel build directory above, and this script exits before reaching here
+# if that directory could not be found -- so it is always set and always this
+# run's kernel. Saying so out loud costs nothing and makes the guarantee
+# checkable by whoever edits the phases between.
+if [ ! -f "${_kbin:-}" ]; then
+	say "no kernel binary at ${_kbin:-<unset>} to decide pkgbase-repo reuse against."
+	say "Reuse rests entirely on that comparison, so there is nothing to decide"
+	say "with and no safe way to guess."
+	exit 1
+fi
+
+REUSE_PKGBASE=no
+if [ -d "$RELOBJ/pkgbase-repo" ]; then
+	if [ "${NESTED_FORCE_PKGBASE_REBUILD:-0}" = 1 ]; then
+		say "pkgbase-repo: rebuild forced by NESTED_FORCE_PKGBASE_REBUILD"
+	elif _pkbk_out=$(sh "$PKBK" -r "$RELOBJ/pkgbase-repo" -k "$_kbin" \
+	    -p "$PKG_NAME_PREFIX" -v "$PKG_VERSION" 2>&1); then
+		REUSE_PKGBASE=yes
+		say "$_pkbk_out"
+	else
+		say "$_pkbk_out"
+	fi
+	if [ "$REUSE_PKGBASE" = no ]; then
+		say "removing a stale pkgbase-repo so make does not skip the target"
+		rm -rf "$RELOBJ/pkgbase-repo" "$RELOBJ/pkgbase-repo-dir"
+	fi
+fi
 
 say "package version: $PKG_VERSION"
-run pkgbase-repo $STAMP make -C "$TREE/release" -j"$PKGJ" pkgbase-repo \
-	WORLDDIR="$TREE" NOPORTS=1
+if [ "$REUSE_PKGBASE" = yes ]; then
+	say "pkgbase-repo: reusing this run's repository, unbuilt"
+else
+	say "pkgbase-repo: -j$PKGJ (memory-bound: ~2.7GB per pkg process, so a fifth of RAM on ${PHYSG}G)"
+	run pkgbase-repo $STAMP make -C "$TREE/release" -j"$PKGJ" pkgbase-repo \
+		WORLDDIR="$TREE" NOPORTS=1
+fi
 
 # The packages must actually be NAMED after this release.
 #
@@ -810,11 +888,39 @@ esac
 # Provenance, beside the artifacts.  Media whose source and module are not
 # recorded is unusable the moment the code moves, and the code will move.
 KOSHA=$(sha256 -q "$KO" 2>/dev/null || sha256sum "$KO" | cut -d' ' -f1)
+
+# The exact string `uname -v' will print on an installed machine. The download
+# page quotes it so a reader can confirm what they booted, and it was typed in
+# by hand -- which means it described whichever release was current when
+# somebody last remembered to edit it. Taken from the kernel in this build
+# instead.
+#
+# Anchored on a release number, not on the word FreeBSD alone: a kernel binary
+# holds plenty of strings beginning "FreeBSD ", and the first one the scan
+# reaches would be published as the thing a reader is told to compare against.
+# Cut at the first colon, because what follows is the builder and the object
+# directory -- fleet detail that does not belong on a public page.
+KERNEL_IDENT=$(strings -a "$_kbin" 2>/dev/null |
+    grep -m1 -E '^FreeBSD [0-9]+\.[0-9]+' | sed 's/:.*//')
+if [ -z "$KERNEL_IDENT" ]; then
+	say "no version string in $_kbin. The build identity would carry an empty"
+	say "kernel line, and the download page would quote nothing at a reader"
+	say "who has been told to compare it against uname -v."
+	exit 1
+fi
 {
 	echo "release:     ${RELEASE_TAG:-$(git -C "$TREE" describe --tags --exact-match HEAD 2>/dev/null || echo untagged)}"
 	echo "commit:      $(git -C "$TREE" rev-parse HEAD)$([ -n "$(git -C "$TREE" status --porcelain)" ] && echo ' (DIRTY TREE)')"
 	echo "branch:      $BRANCH"
 	echo "vmm.ko:      $KOSHA"
+	# The exact string `uname -v' will print on an installed machine. The
+	# download page quotes it so a reader can confirm what they booted, and
+	# it was typed in by hand -- which means it described whichever release
+	# was current when somebody last remembered to edit it. Taken from the
+	# kernel that is actually in this build instead. Cut at the first colon:
+	# what follows is the builder and the object directory, which is fleet
+	# detail and does not belong on a public page.
+	echo "kernel:      $KERNEL_IDENT"
 	echo "prefix:      $PKG_NAME_PREFIX"
 	echo "target:      $TARGET"
 	echo "built:       $(date -u +%Y-%m-%dT%H:%M:%SZ)"
