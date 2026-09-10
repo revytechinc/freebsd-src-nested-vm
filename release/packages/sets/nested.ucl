@@ -1,0 +1,15 @@
+/*
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2026 REVYTECH, Inc.
+ */
+
+comment = "Nested virtualization test harness (metapackage)"
+
+desc = <<EOD
+This metapackage installs the nested virtualization test harness and its
+measurement store.
+
+It installs alongside an existing userland rather than replacing it, so it can
+be added to a machine running the nested virtualization kernel as an overlay.
+EOD

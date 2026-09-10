@@ -84,6 +84,16 @@ SRCS+=	opt_acpi.h		\
 	opt_bhyve_snapshot.h	\
 	opt_ddb.h
 
+# Exported so the in-kernel unit tests in sys/modules/vmx_nested_test can call
+# the production VMCS12 layout accessors directly rather than reimplementing
+# them. kmod.mk localises every symbol by default (EXPORT_SYMS?= NO), which is
+# explicit list, not EXPORT_SYMS=YES: only what a test needs.
+EXPORT_SYMS=	vmcs12_at		\
+		vmcs12_lookup		\
+		vmcs12_read_field	\
+		vmcs12_write_field	\
+		vmcs12_fields_count
+
 SRCS+=	vmm_host.c	\
 	vmm_ioport.c	\
 	vmm_lapic.c	\

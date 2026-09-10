@@ -49,6 +49,7 @@
 
 #include <sys/param.h>
 #include <sys/kernel.h>
+#include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
@@ -80,6 +81,8 @@ struct vcpu;
 
 #include "vmcs.h"
 #include "vmx.h"
+#include "vmx_nested.h"
+#include "vmx_nested_layout.h"
 
 /*
  * Compile-time guarantees about the nested-VMX additions.  Both
@@ -378,6 +381,376 @@ vmxtest_fixed_msr_read(void)
 	VMXTEST_PASS(5);
 }
 
+/*
+ * A zero-length layout table would make every loop below iterate nothing and
+ * report PASS, which is the one result this suite must never produce by
+ * accident: the bounds check is the guest-facing trust boundary, and "we
+ * checked nothing" would print identically to "we checked everything".  An
+ * empty table is also a real defect in its own right -- nested VMREAD and
+ * VMWRITE cannot resolve a single encoding without it -- so this fails rather
+ * than skips.
+ */
+static bool
+vmxtest_layout_present(int test)
+{
+
+	if (vmcs12_fields_count == 0) {
+		VMXTEST_FAIL(test, "layout table is empty; nothing was checked");
+		return (false);
+	}
+	return (true);
+}
+
+/*
+ * Test 6: every VMCS12 layout entry lies inside struct vmcs12.
+ *
+ * This is the security-relevant one.  vmcs12_lookup() is reached with an
+ * encoding supplied by L1 (through emulated VMREAD/VMWRITE), and the offset
+ * it returns is used directly as a memcpy offset into the vmcs12 page.  A
+ * single entry whose offset+width runs past the end of the structure turns a
+ * guest-controlled read into an out-of-bounds kernel read, so the table is a
+ * guest-facing trust boundary and every entry must be inside the page.
+ */
+static void
+vmxtest_vmcs12_layout_bounds(void)
+{
+	const struct vmcs12_layout *f;
+	u_int i;
+
+	if (!vmxtest_layout_present(6))
+		return;
+
+	for (i = 0; i < vmcs12_fields_count; i++) {
+		f = vmcs12_at(i);
+		if (f == NULL) {
+			VMXTEST_FAIL(6, "vmcs12_at(%u) returned NULL with "
+			    "count %u", i, vmcs12_fields_count);
+			return;
+		}
+		if ((size_t)f->offset + f->width > sizeof(struct vmcs12)) {
+			VMXTEST_FAIL(6, "entry %u (encoding 0x%x) offset %u "
+			    "width %u runs past sizeof(struct vmcs12) %zu",
+			    i, f->encoding, f->offset, f->width,
+			    sizeof(struct vmcs12));
+			return;
+		}
+	}
+	VMXTEST_PASS(6);
+}
+
+/*
+ * Test 7: every entry declares one of the three architectural widths.
+ *
+ * vmcs12_read_field() switches on width and returns -1 for anything else, so
+ * a bad width is not itself unsafe -- but it silently makes that field
+ * unreadable, which is a defect worth catching in the table rather than in a
+ * guest that cannot read its own VMCS.
+ */
+static void
+vmxtest_vmcs12_layout_widths(void)
+{
+	const struct vmcs12_layout *f;
+	u_int i;
+
+	if (!vmxtest_layout_present(7))
+		return;
+
+	for (i = 0; i < vmcs12_fields_count; i++) {
+		f = vmcs12_at(i);
+		if (f == NULL) {
+			VMXTEST_FAIL(7, "vmcs12_at(%u) returned NULL", i);
+			return;
+		}
+		if (f->width != VMCS_W_16 && f->width != VMCS_W_32 &&
+		    f->width != VMCS_W_64) {
+			VMXTEST_FAIL(7, "entry %u (encoding 0x%x) has width "
+			    "%u, not 2/4/8", i, f->encoding, f->width);
+			return;
+		}
+	}
+	VMXTEST_PASS(7);
+}
+
+/*
+ * Test 8: no two fields occupy the same bytes, and no encoding appears twice.
+ *
+ * Overlapping entries would make a write to one field silently corrupt
+ * another; a duplicated encoding would make lookup order decide which field
+ * L1 gets.  Both are table bugs that no boot test would reveal.
+ */
+static void
+vmxtest_vmcs12_layout_no_overlap(void)
+{
+	const struct vmcs12_layout *a, *b;
+	u_int i, j;
+
+	if (!vmxtest_layout_present(8))
+		return;
+
+	for (i = 0; i < vmcs12_fields_count; i++) {
+		a = vmcs12_at(i);
+		if (a == NULL) {
+			VMXTEST_FAIL(8, "vmcs12_at(%u) returned NULL", i);
+			return;
+		}
+		for (j = i + 1; j < vmcs12_fields_count; j++) {
+			b = vmcs12_at(j);
+			if (b == NULL) {
+				VMXTEST_FAIL(8, "vmcs12_at(%u) returned NULL",
+				    j);
+				return;
+			}
+			if (a->encoding == b->encoding) {
+				VMXTEST_FAIL(8, "encoding 0x%x appears at "
+				    "both %u and %u", a->encoding, i, j);
+				return;
+			}
+			if (a->offset < b->offset + b->width &&
+			    b->offset < a->offset + a->width) {
+				VMXTEST_FAIL(8, "entries %u (0x%x) and %u "
+				    "(0x%x) overlap at offsets %u/%u",
+				    i, a->encoding, j, b->encoding,
+				    a->offset, b->offset);
+				return;
+			}
+		}
+	}
+	VMXTEST_PASS(8);
+}
+
+/*
+ * Test 9: an encoding L1 invents is refused, and *val is left alone.
+ *
+ * The caller is expected to VMfail into L1 on -1.  If the value were written
+ * anyway, L1 would receive uninitialised stack as though it were VMCS data.
+ */
+static void
+vmxtest_vmcs12_unknown_encoding(void)
+{
+	struct vmcs12 *v;
+	uint64_t val = 0xdeadbeefcafef00dULL;
+
+	if (vmcs12_lookup(0xfffffffeU) != NULL) {
+		VMXTEST_FAIL(9, "lookup of a bogus encoding returned an entry");
+		return;
+	}
+
+	v = malloc(sizeof(*v), M_TEMP, M_WAITOK | M_ZERO);
+	if (vmcs12_read_field(v, 0xfffffffeU, &val) != -1) {
+		VMXTEST_FAIL(9, "read of a bogus encoding did not fail");
+		free(v, M_TEMP);
+		return;
+	}
+	if (val != 0xdeadbeefcafef00dULL) {
+		VMXTEST_FAIL(9, "failed read still wrote *val (0x%lx)", val);
+		free(v, M_TEMP);
+		return;
+	}
+	free(v, M_TEMP);
+	VMXTEST_PASS(9);
+}
+
+/*
+ * Test 10: NULL arguments are refused rather than dereferenced.
+ *
+ * vmcs12_read_field() guards both the vmcs12 and the out-pointer, so both are
+ * exercised.  If a future change dropped either guard this test panics rather
+ * than printing FAIL -- unavoidable when the thing under test is whether a
+ * pointer is dereferenced.  That is tolerable only because this module is
+ * never loaded by a running system on its own; a panic here is a loud,
+ * diagnosable result on a machine that was booted to run it.
+ */
+static void
+vmxtest_vmcs12_null_args(void)
+{
+	const struct vmcs12_layout *f;
+	struct vmcs12 *v;
+	uint64_t val = 0;
+
+	/* Any real encoding will do; take the first table entry. */
+	f = vmcs12_at(0);
+	if (f == NULL) {
+		VMXTEST_SKIP(10, "layout table is empty");
+		return;
+	}
+	if (vmcs12_read_field(NULL, f->encoding, &val) != -1) {
+		VMXTEST_FAIL(10, "read with a NULL vmcs12 did not fail");
+		return;
+	}
+	v = malloc(sizeof(*v), M_TEMP, M_WAITOK | M_ZERO);
+	if (vmcs12_read_field(v, f->encoding, NULL) != -1) {
+		VMXTEST_FAIL(10, "read with a NULL value pointer did not fail");
+		free(v, M_TEMP);
+		return;
+	}
+	free(v, M_TEMP);
+	VMXTEST_PASS(10);
+}
+
+/*
+ * Test 11: a value written to a field reads back from that field.
+ *
+ * Round-tripping every entry at its own width checks the table's offsets and
+ * widths against the accessors that use them, which is the pair that has to
+ * agree for L1 to see its own VMCS correctly.
+ *
+ * Every entry is written, including the ones test 12 asserts are read-only,
+ * and that is deliberate rather than an oversight: vmcs12_write_field() is the
+ * unpoliced accessor L0 uses to fill in exit information, and the read-only
+ * rule is enforced a layer up in vmx_nested_vmwrite() where L1's writes
+ * arrive.  The exit-information fields need their offsets checked as much as
+ * any other -- L1 reads them.  If enforcement is ever pushed down into the
+ * accessor, this test is the one that will notice, and the fix then is to skip
+ * VMCS12_F_READONLY entries here, not to relax test 12.
+ */
+static void
+vmxtest_vmcs12_roundtrip(void)
+{
+	const struct vmcs12_layout *f;
+	struct vmcs12 *v;
+	uint64_t wrote, read_back, mask;
+	u_int i;
+
+	if (!vmxtest_layout_present(11))
+		return;
+
+	v = malloc(sizeof(*v), M_TEMP, M_WAITOK | M_ZERO);
+	/*
+	 * Two sweeps. The first writes and reads each field back
+	 * immediately, which catches a width or mask error. The second
+	 * re-reads every field once ALL of them have been written, which is
+	 * the only way to catch one field's write landing on another's
+	 * storage -- an immediate read-back cannot see that, because the
+	 * value it finds is the one it just put there.
+	 */
+	for (i = 0; i < vmcs12_fields_count; i++) {
+		f = vmcs12_at(i);
+		if (f == NULL) {
+			VMXTEST_FAIL(11, "vmcs12_at(%u) returned NULL", i);
+			goto out;
+		}
+		/*
+		 * A pattern unique to THIS field, not merely one that
+		 * differs in every byte. With one shared pattern a read
+		 * that resolves to the wrong entry of the same width
+		 * returns the pattern and the test passes -- so the test
+		 * would not notice the offset arithmetic sending encoding
+		 * X to an earlier entry.
+		 */
+		wrote = 0x0123456789abcdefULL ^ ((uint64_t)f->encoding << 32) ^ i;
+		mask = (f->width == VMCS_W_64) ? ~0ULL :
+		    ((1ULL << (f->width * 8)) - 1);
+
+		if (vmcs12_write_field(v, f->encoding, wrote) != 0) {
+			VMXTEST_FAIL(11, "write of encoding 0x%x failed",
+			    f->encoding);
+			goto out;
+		}
+		if (vmcs12_read_field(v, f->encoding, &read_back) != 0) {
+			VMXTEST_FAIL(11, "read of encoding 0x%x failed",
+			    f->encoding);
+			goto out;
+		}
+		if (read_back != (wrote & mask)) {
+			VMXTEST_FAIL(11, "encoding 0x%x width %u: wrote "
+			    "0x%lx, read 0x%lx, expected 0x%lx",
+			    f->encoding, f->width, wrote, read_back,
+			    wrote & mask);
+			goto out;
+		}
+	}
+
+	/*
+	 * Second sweep: every field has now been written, so a field whose
+	 * storage overlaps another's no longer reads back what it was given.
+	 */
+	for (i = 0; i < vmcs12_fields_count; i++) {
+		f = vmcs12_at(i);
+		if (f == NULL) {
+			VMXTEST_FAIL(11, "vmcs12_at(%u) returned NULL", i);
+			goto out;
+		}
+		wrote = 0x0123456789abcdefULL ^ ((uint64_t)f->encoding << 32) ^ i;
+		mask = (f->width == VMCS_W_64) ? ~0ULL :
+		    ((1ULL << (f->width * 8)) - 1);
+
+		if (vmcs12_read_field(v, f->encoding, &read_back) != 0) {
+			VMXTEST_FAIL(11, "re-read of encoding 0x%x failed",
+			    f->encoding);
+			goto out;
+		}
+		if (read_back != (wrote & mask)) {
+			VMXTEST_FAIL(11, "encoding 0x%x was overwritten by "
+			    "another field: expected 0x%lx, read 0x%lx",
+			    f->encoding, wrote & mask, read_back);
+			goto out;
+		}
+	}
+	free(v, M_TEMP);
+	VMXTEST_PASS(11);
+	return;
+out:
+	free(v, M_TEMP);
+}
+
+/*
+ * Test 12: the fields L1 must not be able to write are still marked read-only.
+ *
+ * vmx_nested_vmwrite() refuses a write on one signal alone -- the entry's
+ * VMCS12_F_READONLY flag -- while vmcs12_write_field() below it writes
+ * anything it is given, because L0 has to fill the exit-information fields
+ * itself.  So the flag in the table is the whole boundary.  An entry that
+ * lost it would let L1 forge its own exit reason and exit qualification,
+ * which L0 then reads back to decide how to handle the exit, and no boot or
+ * round-trip test would notice: the guest would simply be believed.
+ *
+ * The expected set is written out rather than derived so that removing a
+ * flag from the table fails here instead of silently agreeing with itself.
+ */
+static const uint32_t vmxtest_readonly_encodings[] = {
+	VMCS_GUEST_PHYSICAL_ADDRESS,
+	VMCS_INSTRUCTION_ERROR,
+	VMCS_EXIT_REASON,
+	VMCS_EXIT_INTR_INFO,
+	VMCS_EXIT_INTR_ERRCODE,
+	VMCS_IDT_VECTORING_INFO,
+	VMCS_IDT_VECTORING_ERROR,
+	VMCS_EXIT_INSTRUCTION_LENGTH,
+	VMCS_EXIT_INSTRUCTION_INFO,
+	VMCS_EXIT_QUALIFICATION,
+	VMCS_IO_RCX,
+	VMCS_IO_RSI,
+	VMCS_IO_RDI,
+	VMCS_IO_RIP,
+	VMCS_GUEST_LINEAR_ADDRESS,
+};
+
+static void
+vmxtest_vmcs12_readonly_flags(void)
+{
+	const struct vmcs12_layout *f;
+	u_int i;
+
+	if (!vmxtest_layout_present(12))
+		return;
+
+	for (i = 0; i < nitems(vmxtest_readonly_encodings); i++) {
+		f = vmcs12_lookup(vmxtest_readonly_encodings[i]);
+		if (f == NULL) {
+			VMXTEST_FAIL(12, "encoding 0x%x is not in the layout "
+			    "table at all", vmxtest_readonly_encodings[i]);
+			return;
+		}
+		if ((f->flags & VMCS12_F_READONLY) == 0) {
+			VMXTEST_FAIL(12, "encoding 0x%x is no longer marked "
+			    "read-only; L1 could write it",
+			    vmxtest_readonly_encodings[i]);
+			return;
+		}
+	}
+	VMXTEST_PASS(12);
+}
+
 static void
 vmxtest_run_all(void)
 {
@@ -386,15 +759,22 @@ vmxtest_run_all(void)
 	vmxtest_fail = 0;
 	vmxtest_skip = 0;
 
-	printf("vmx_nested_test: starting 5 sub-tests\n");
+	printf("vmx_nested_test: starting 12 sub-tests\n");
 
 	vmxtest_cap_msr_read();
 	vmxtest_nested_gate();
 	vmxtest_vmcs12_alloc();
 	vmxtest_cr4_vmxe();
 	vmxtest_fixed_msr_read();
+	vmxtest_vmcs12_layout_bounds();
+	vmxtest_vmcs12_layout_widths();
+	vmxtest_vmcs12_layout_no_overlap();
+	vmxtest_vmcs12_unknown_encoding();
+	vmxtest_vmcs12_null_args();
+	vmxtest_vmcs12_roundtrip();
+	vmxtest_vmcs12_readonly_flags();
 
-	printf("vmx_nested_test: %d/5 PASS (%d FAIL, %d SKIP)\n",
+	printf("vmx_nested_test: %d/12 PASS (%d FAIL, %d SKIP)\n",
 	    vmxtest_pass, vmxtest_fail, vmxtest_skip);
 }
 
@@ -423,5 +803,17 @@ static moduledata_t vmx_nested_test_mod = {
 };
 
 MODULE_VERSION(vmx_nested_test, 1);
+/*
+ * The layout tests call into vmm.ko's VMCS12 accessors, so vmm must be loaded
+ * before this module and must be searched when this module's symbols are
+ * resolved. Without the dependency the kernel linker looks only at the kernel
+ * and at declared dependencies, finds none of vmcs12_at, vmcs12_lookup,
+ * vmcs12_read_field, vmcs12_write_field or vmcs12_fields_count, and refuses
+ * the module with "symbol vmcs12_fields_count undefined" -- naming whichever
+ * it happened to reach first and giving no hint that the cause is a missing
+ * dependency rather than a missing export. Exporting the symbols from vmm is
+ * necessary but not sufficient; both halves are needed.
+ */
+MODULE_DEPEND(vmx_nested_test, vmm, 1, 1, 1);
 DECLARE_MODULE(vmx_nested_test, vmx_nested_test_mod, SI_SUB_PSEUDO,
     SI_ORDER_ANY);

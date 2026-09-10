@@ -20,7 +20,7 @@
 #   - if the dump helper is built, also runs abisnap.sh --check
 
 
-PACKAGE=	tests
+PACKAGE=	nested-tests
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/abisnap
 BINDIR=		${TESTSDIR}
 
