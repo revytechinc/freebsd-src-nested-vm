@@ -197,6 +197,52 @@ for p in CloudBSD-kernel-generic CloudBSD-bhyve CloudBSD-lib9p; do
 		echo "  $p is $_v, wanted $WANT"; exit 1
 	fi
 done
+# A long build does not stop in the shutdown window, and the reboot is then
+# FORCED rather than clean.
+#
+# Measured: a fleet upgrade landed on a host running a poudriere bulk, and
+# rc.shutdown gave up on it --
+#
+#   rc.shutdown: 90 second watchdog timeout expired. Shutdown terminated.
+#
+# -- so the machine went down mid-write with jails mounted, and somebody
+# else's build was killed three packages from the end. It restarted fine, but
+# a forced shutdown is a different risk from a clean one and this script chose
+# it without asking or saying so.
+#
+# Refuses rather than waits: how long a bulk has left is not knowable from
+# here, and the person running it can stop it in a second. Naming what is
+# running is the point -- "refusing to reboot" with no reason is the same
+# unhelpful silence in the other direction.
+# `poudriere[' rather than `poudriere'. The bulk workers title themselves
+# `sh: poudriere[jail-set][NN]: build_pkg (...)', so the bracket matches the
+# real thing and not a tail(1) of a log, an editor on a poudriere file, or a
+# shell whose arguments happen to mention it. A false positive here refuses
+# at the LAST step, after the packages are already installed -- the
+# half-applied state this script is otherwise careful to avoid.
+#
+# The status is kept apart from the output, because `doas pgrep' returns
+# non-zero and prints nothing both when there is no build AND when it could
+# not look. Those are different answers and only one of them means it is safe
+# to reboot.
+_busy=$(doas pgrep -lf 'poudriere\[' 2>/dev/null); _prc=$?
+case "$_prc" in
+0|1)	;;
+*)	echo "  cannot tell whether a build is running here (pgrep exited $_prc)."
+	echo "  The packages are installed. Refusing to reboot on a machine whose"
+	echo "  state could not be established -- a forced shutdown mid-build is"
+	echo "  precisely what this check exists to avoid."
+	exit 1 ;;
+esac
+if [ -n "$_busy" ]; then
+	echo "  the packages are installed, but this machine is running a build:"
+	printf '%s\n' "$_busy" | cut -c1-100 | sed 's/^/    /'
+	echo "  A reboot now would be force-terminated after the 90 second"
+	echo "  shutdown watchdog, taking that build down mid-write. Stop it and"
+	echo "  re-run, or reboot by hand once it has finished."
+	exit 1
+fi
+
 # Again, immediately before the reboot. The state could have changed while the
 # upgrade ran, and this is the moment the answer actually matters.
 if ! check_be; then
