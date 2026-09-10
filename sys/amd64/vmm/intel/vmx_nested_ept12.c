@@ -4,7 +4,7 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
- * T23: EPT12 nested translation.  L1's EPT12 root pointer is
+ * EPT12 nested translation.  L1's EPT12 root pointer is
  * installed by VMWRITE to the EPT_POINTER_FULL field; L0 uses
  * EPT12 as the inner page table for L2 (L2 GPA -> EPT12 -> L1 GPA
  * -> EPT (L0) -> HPA).

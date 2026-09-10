@@ -74,7 +74,7 @@
 #define	PROCBASED2_ENABLE_INVPCID		(1 << 12)
 #define	PROCBASED2_ENABLE_VM_FUNCTIONS		(1 << 13)
 /*
- * VMCS shadowing (Intel SDM Vol 3 §25.4.2).  Enabling this bit
+ * VMCS shadowing.  Enabling this bit
  * requires VMCS_LINK_POINTER to point at a valid shadow VMCS -- we
  * deliberately leave the global procbased_ctls2 shadowing-free and
  * only OR this bit per-vCPU after the L1 has issued VMPTRLD with a

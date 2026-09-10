@@ -43,7 +43,7 @@ int vmx_wrmsr(struct vmx_vcpu *vcpu, u_int num, uint64_t val, bool *retu);
 uint32_t vmx_revision(void);
 
 /*
- * Nested-VMX MSR virtualization (Wave 3 / T12-T16).
+ * Nested-VMX MSR virtualization.
  *
  * When a VM is created with VMMAPI_OPEN_CREATE_NESTED, the L1 guest
  * must be able to read the same VMX capability MSR layout as L0

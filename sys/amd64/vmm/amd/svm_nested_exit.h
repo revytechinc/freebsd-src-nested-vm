@@ -4,7 +4,7 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
- * General nested #VMEXIT synthesis infrastructure for AMD SVM (T25a).
+ * General nested #VMEXIT synthesis infrastructure for AMD SVM.
  *
  * When L2 takes a #VMEXIT while L1 is parked, L0 cannot blindly
  * return control to L1 — L1's view of "VMEXIT" is the same view L0
@@ -25,7 +25,7 @@ struct svm_vcpu;
  *
  * 'vmcb12' is the L1-stated VMCB (mapped into kernel memory by the
  * caller via vm_gpa_hold). May be NULL when the dispatcher is
- * exercised in isolation by the unit test (T11 / T30).
+ * exercised in isolation by the unit test.
  *
  * 'exitcode' is the L2 hardware exit code (one of VMCB_EXIT_*).
  * 'exitinfo1' and 'exitinfo2' are the L2 hardware qualification
@@ -36,7 +36,7 @@ struct svm_vcpu;
  *   - vcpu->nested_in_l2 is cleared (L1 resumes).
  *   - the L1 VMCB12 has its ExitCode, ExitInfo1, ExitInfo2 and,
  *     where applicable, ExitIntInfo fields updated.
- *   - L1 ASID TLB entries are flushed (T29b) to drop L2
+ *   - L1 ASID TLB entries are flushed to drop L2
  *     translations.
  */
 /*

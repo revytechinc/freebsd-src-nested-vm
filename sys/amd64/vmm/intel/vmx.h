@@ -133,7 +133,7 @@ struct vmx_vcpu {
 	struct vcpu	*vcpu;
 	struct vmcs	*vmcs;
 /*
-	 * Nested-VMX (T15): a 4KB VMCS12 region used by L1's
+	 * Nested-VMX: a 4KB VMCS12 region used by L1's
 	 * VMPTRLD / VMREAD / VMWRITE when the VMCS-shadowing control
 	 * is active.  Allocated by vmx_vcpu_init() when the owning
 	 * VM has nested_enabled set; freed by vmx_vcpu_cleanup().
@@ -150,7 +150,7 @@ struct vmx_vcpu {
 	struct apic_page *apic_page;
 	struct pir_desc	*pir_desc;
 	/*
-	 * Wave 4 (T18-T23b): per-vCPU nested-VMX state.  Allocated
+	 * per-vCPU nested-VMX state.  Allocated
 	 * lazily by vmx_vcpu_init() when the owning VM has
 	 * nested_enabled set; read-only access via vmx_nested_state().
 	 * NULL for non-nested VMs and for nested-enabled VMs that

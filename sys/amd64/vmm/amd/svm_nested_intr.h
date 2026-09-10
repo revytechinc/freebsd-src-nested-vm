@@ -4,7 +4,7 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
- * Nested interrupt controller (T25b) prototype declarations for
+ * Nested interrupt controller prototype declarations for
  * sys/amd64/vmm/amd/svm_nested_intr.c.
  *
  * The per-L2-vCPU PIR (pending interrupt register) helpers
@@ -34,7 +34,7 @@ void	 svm_nested_inject_exception(struct svm_vcpu *vcpu, uint8_t vector,
 
 /*
  * Drain the per-L2-vCPU PIR into the VMCB EventInjection field on
- * L2 entry (T25 VMRUN). Returns the vector delivered, or -1 if the
+ * L2 entry (VMRUN). Returns the vector delivered, or -1 if the
  * PIR was empty.
  */
 int	 svm_nested_drain_pir(struct svm_vcpu *vcpu);
