@@ -55,6 +55,37 @@ INSTALLER_URL=${INSTALLER_URL:-https://nested.cloudbsd.cat/install.sh}
 if [ -z "${PKG_REPO_URL:-}" ]; then
 	PKG_REPO_URL='https://nested.cloudbsd.cat/pkg/${ABI}/latest'
 fi
+# The signing fingerprint, and where pkg looks for it. The published route
+# takes this BEFORE it configures anything, so this gate does too -- a gate
+# that installs by a simpler route than the page prints is not testing the
+# page.
+FINGERPRINT_URL=${FINGERPRINT_URL:-https://nested.cloudbsd.cat/cloudbsd-fingerprint}
+FINGERPRINT_DIR=${FINGERPRINT_DIR:-/usr/share/keys/pkg/fingerprints/CloudBSD}
+# Optional, and the only thing that makes the fingerprint check mean anything.
+#
+# Fetching a key from the same origin as the packages and then verifying the
+# packages against it establishes self-consistency and nothing else -- whoever
+# controls that host supplies both halves. That is what the published route
+# does and this gate tests the published route, so it is not a defect to fix
+# here. But a gate runs on our own infrastructure and CAN hold an anchor the
+# reader has no way to hold: set EXPECT_FINGERPRINT to the sha256 of the
+# signing key's public half and the fetched file is checked against it.
+# Unset, the gate confirms the file's SHAPE and says so rather than implying
+# more.
+EXPECT_FINGERPRINT=${EXPECT_FINGERPRINT:-}
+# Refused rather than used if it is not a digest. An anchor that cannot match
+# anything is worse than no anchor: the step passes or fails for a reason that
+# has nothing to do with the key.
+if [ -n "$EXPECT_FINGERPRINT" ]; then
+	case "$EXPECT_FINGERPRINT" in
+	*[!0-9a-f]*|"")
+		echo "$PROGRAM: EXPECT_FINGERPRINT is not a hex digest" >&2; exit 2 ;;
+	esac
+	case "${#EXPECT_FINGERPRINT}" in
+	64)	;;
+	*)	echo "$PROGRAM: EXPECT_FINGERPRINT is ${#EXPECT_FINGERPRINT} characters, not 64" >&2; exit 2 ;;
+	esac
+fi
 BHYVE_PKG_URL=${BHYVE_PKG_URL:-https://nested.cloudbsd.cat/pkg/FreeBSD:16:amd64/latest/CloudBSD-bhyve.pkg}
 BRIDGE=${BRIDGE:-ix0bridge}
 UEFI=${UEFI:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}
@@ -539,12 +570,37 @@ if [ "$INSTALL_METHOD" = be ]; then
 	# decoration: bectl create copies the running system, so a repository
 	# added afterwards would not be inside the boot environment that pkg -r
 	# is about to install into.
-	pub_step "step 1, add the CloudBSD repository" \
-	    "printf 'CloudBSD: {\\n  url: \"%s\",\\n  mirror_type: \"none\",\\n  enabled: yes,\\n  priority: 10\\n}\\n' '$PKG_REPO_URL' > /etc/pkg/CloudBSD.conf" 60
-	pub_step "step 1a, the repository file says what the page says" \
-	    "grep -q 'url: \"$PKG_REPO_URL\"' /etc/pkg/CloudBSD.conf && grep -q 'enabled: yes' /etc/pkg/CloudBSD.conf" 60
-	pub_step "step 2, pkg update" \
+	pub_step "step 1, take the signing fingerprint" \
+	    "mkdir -p '$FINGERPRINT_DIR/trusted' && fetch -o '$FINGERPRINT_DIR/trusted/CloudBSD' '$FINGERPRINT_URL' && grep -q '^fingerprint:' '$FINGERPRINT_DIR/trusted/CloudBSD'" 120
+	# Identity, not just shape -- when an anchor was supplied.
+	if [ -n "$EXPECT_FINGERPRINT" ]; then
+		# Extracted and compared as a STRING. Interpolating it into a
+		# grep pattern makes it a regular expression, where a `.' is any
+		# character -- so a value one digit off could still match, which
+		# is the opposite of what an anchor is for.
+		pub_step "step 1a, the fingerprint is the one we expect" \
+		    "test \"\$(sed -n 's/^fingerprint: *\"\\(.*\\)\"/\\1/p' '$FINGERPRINT_DIR/trusted/CloudBSD')\" = '$EXPECT_FINGERPRINT'" 60
+	fi
+	pub_step "step 2, add the CloudBSD repository" \
+	    "printf 'CloudBSD: {\\n  url: \"%s\",\\n  mirror_type: \"none\",\\n  signature_type: \"fingerprints\",\\n  fingerprints: \"%s\",\\n  enabled: yes,\\n  priority: 10\\n}\\n' '$PKG_REPO_URL' '$FINGERPRINT_DIR' > /etc/pkg/CloudBSD.conf" 60
+	pub_step "step 2a, the repository file says what the page says" \
+	    "grep -q 'url: \"$PKG_REPO_URL\"' /etc/pkg/CloudBSD.conf && grep -q 'enabled: yes' /etc/pkg/CloudBSD.conf && grep -q 'signature_type: \"fingerprints\"' /etc/pkg/CloudBSD.conf" 60
+	pub_step "step 2b, pkg update" \
 	    "env IGNORE_OSVERSION=yes pkg update" 600
+	# A REJECTED SIGNATURE IS SILENT. pkg prints "No trusted public keys
+	# found", reports the repository up to date, and exits 0 -- measured.
+	# So the exit status of the step above establishes nothing about
+	# verification, and without this the gate certifies an install that
+	# verified nothing, which is exactly what two fleet hosts turned out to
+	# be doing.
+	#
+	# The count works HERE because this is a stock machine with an empty
+	# package database: a refused catalogue leaves nothing behind. On a host
+	# that already holds a good catalogue the previous one survives the
+	# refusal and the count stays high, so this is not a check to lift
+	# somewhere else unmodified.
+	pub_step "step 3, the repository actually offers packages" \
+	    "test \$(pkg rquery -r CloudBSD %n 2>/dev/null | wc -l) -gt 100" 300
 
 	pub_step "bectl create nested" "bectl create nested" 180
 	pub_step "bectl mount nested /mnt" "bectl mount nested /mnt" 180
@@ -581,6 +637,15 @@ the boot environment; its bookkeeping does not follow them."
 
 	guest_probe "unlock bhyve inside the boot environment" \
 	    "pkg -r /mnt unlock -y CloudBSD-bhyve" 180
+	# The trust material has to be INSIDE the boot environment, not merely
+	# on the host that made it. bectl create copies the running root, so a
+	# fingerprint written before that copy is carried in -- which is the
+	# ordering above. Asserted rather than relied on, because if it is ever
+	# missing `pkg -r' installs from an unverified repository and says
+	# nothing: the failure this whole route is here to detect, one level
+	# down and invisible.
+	pub_step "step 4a, the fingerprint is inside the boot environment" \
+	    "test -s /mnt${FINGERPRINT_DIR}/trusted/CloudBSD" 60
 	if step_ok; then
 		log "  ok: unlock bhyve inside the boot environment (harmless on a
 stock host, so the page's 'skip it' is optional rather than required)"
@@ -732,12 +797,37 @@ if [ "$INSTALL_METHOD" = manual ]; then
 	# fault. printf writes the identical file, and the file is what the
 	# instruction is actually for, so the content is asserted immediately
 	# afterwards rather than assumed.
-	pub_step "step 1, add the CloudBSD repository" \
-	    "printf 'CloudBSD: {\\n  url: \"%s\",\\n  mirror_type: \"none\",\\n  enabled: yes,\\n  priority: 10\\n}\\n' '$PKG_REPO_URL' > /etc/pkg/CloudBSD.conf" 60
-	pub_step "step 1a, the repository file says what the page says" \
-	    "grep -q 'url: \"$PKG_REPO_URL\"' /etc/pkg/CloudBSD.conf && grep -q 'enabled: yes' /etc/pkg/CloudBSD.conf" 60
-	pub_step "step 2, pkg update" \
+	pub_step "step 1, take the signing fingerprint" \
+	    "mkdir -p '$FINGERPRINT_DIR/trusted' && fetch -o '$FINGERPRINT_DIR/trusted/CloudBSD' '$FINGERPRINT_URL' && grep -q '^fingerprint:' '$FINGERPRINT_DIR/trusted/CloudBSD'" 120
+	# Identity, not just shape -- when an anchor was supplied.
+	if [ -n "$EXPECT_FINGERPRINT" ]; then
+		# Extracted and compared as a STRING. Interpolating it into a
+		# grep pattern makes it a regular expression, where a `.' is any
+		# character -- so a value one digit off could still match, which
+		# is the opposite of what an anchor is for.
+		pub_step "step 1a, the fingerprint is the one we expect" \
+		    "test \"\$(sed -n 's/^fingerprint: *\"\\(.*\\)\"/\\1/p' '$FINGERPRINT_DIR/trusted/CloudBSD')\" = '$EXPECT_FINGERPRINT'" 60
+	fi
+	pub_step "step 2, add the CloudBSD repository" \
+	    "printf 'CloudBSD: {\\n  url: \"%s\",\\n  mirror_type: \"none\",\\n  signature_type: \"fingerprints\",\\n  fingerprints: \"%s\",\\n  enabled: yes,\\n  priority: 10\\n}\\n' '$PKG_REPO_URL' '$FINGERPRINT_DIR' > /etc/pkg/CloudBSD.conf" 60
+	pub_step "step 2a, the repository file says what the page says" \
+	    "grep -q 'url: \"$PKG_REPO_URL\"' /etc/pkg/CloudBSD.conf && grep -q 'enabled: yes' /etc/pkg/CloudBSD.conf && grep -q 'signature_type: \"fingerprints\"' /etc/pkg/CloudBSD.conf" 60
+	pub_step "step 2b, pkg update" \
 	    "env IGNORE_OSVERSION=yes pkg update" 600
+	# A REJECTED SIGNATURE IS SILENT. pkg prints "No trusted public keys
+	# found", reports the repository up to date, and exits 0 -- measured.
+	# So the exit status of the step above establishes nothing about
+	# verification, and without this the gate certifies an install that
+	# verified nothing, which is exactly what two fleet hosts turned out to
+	# be doing.
+	#
+	# The count works HERE because this is a stock machine with an empty
+	# package database: a refused catalogue leaves nothing behind. On a host
+	# that already holds a good catalogue the previous one survives the
+	# refusal and the count stays high, so this is not a check to lift
+	# somewhere else unmodified.
+	pub_step "step 3, the repository actually offers packages" \
+	    "test \$(pkg rquery -r CloudBSD %n 2>/dev/null | wc -l) -gt 100" 300
 	# One transaction, all four, by NAME from the repository configured above.
 	#
 	# The page printed `pkg add -f <url>/CloudBSD-bhyve.pkg`, and that URL has
@@ -751,9 +841,9 @@ if [ "$INSTALL_METHOD" = manual ]; then
 	# troubleshooting section says that is what allows pkg to settle the file
 	# ownership between these packages and the FreeBSD ones they replace. The
 	# page said "two packages, nothing else changed"; two is not enough.
-	pub_step "step 3, install the nested-virt kernel and bhyve toolset" \
+	pub_step "step 4, install the nested-virt kernel and bhyve toolset" \
 	    "env IGNORE_OSVERSION=yes pkg install -y -f CloudBSD-kernel-generic CloudBSD-bhyve CloudBSD-lib9p CloudBSD-acpi" "$INSTALL_TIMEOUT"
-	pub_step "step 4, load vmm at boot" \
+	pub_step "step 6, load vmm at boot" \
 	    "echo 'vmm_load=\"YES\"' >> /boot/loader.conf" 60
 	pub_step "step 5, lock bhyve against a base upgrade" \
 	    "pkg lock -y CloudBSD-bhyve" 60
