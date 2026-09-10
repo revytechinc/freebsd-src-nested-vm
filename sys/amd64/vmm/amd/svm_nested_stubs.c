@@ -172,9 +172,14 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	struct vmcb_ctrl *ctrl;
 	uint64_t gpa;
 	void *cookie;
-	uint64_t iopm_pa, msrpm_pa;
-	uint32_t intcpt1;
-	int i;
+	uint64_t iopm_pa, msrpm_pa, n_cr3;
+	uint32_t intcpt[nitems(((struct vmcb_ctrl *)NULL)->intercept)];
+	uint32_t intcpt1, tlb_ctrl;
+	bool np_enable;
+	unsigned int i;
+
+	_Static_assert(nitems(intcpt) == nitems(ns->l0_intercept),
+	    "VMCB12 and L0 intercept snapshots must hold the same count");
 
 	if (vcpu == NULL)
 		return (1);
@@ -193,24 +198,43 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 		return (1);
 	}
 
-	if (vmcb12->ctrl.np_enable != 0 && svm_nested_npt_init(vcpu) != 0) {
+	/*
+	 * Snapshot every L1-controlled control field this function reads more
+	 * than once, ONCE, before the first read. VMCB12 stays mapped writable
+	 * for the whole L2 run, so a second L1 vCPU can mutate any of them
+	 * between one read and the next. Use only these locals hereafter --
+	 * every re-read of vmcb12->ctrl below is a decision made on a value
+	 * that may no longer be the one that was checked.
+	 *
+	 * Two such races have already been found here, and they are the reason
+	 * for the rule rather than for three exceptions to it:
+	 *
+	 *   - Validating one fetch of the IOPM/MSRPM base and then holding
+	 *     another let L1 slip a misaligned base past the alignment check
+	 *     into vm_gpa_hold(), whose page-crossing guard panic()s: a
+	 *     whole-host DoS from any multi-vCPU nested L1.
+	 *
+	 *   - np_enable decides both whether the shadow nested page table is
+	 *     allocated, above, and whether VMCB02 is pointed at it, far below.
+	 *     Read 0 the first time and 1 the second and VMCB02 runs L2 with
+	 *     nested paging enabled and N_CR3 = 0, so hardware walks whatever
+	 *     physical page zero holds as L2's page table and maps arbitrary
+	 *     host frames into the guest.
+	 */
+	for (i = 0; i < nitems(intcpt); i++)
+		intcpt[i] = vmcb12->ctrl.intercept[i];
+	intcpt1 = intcpt[VMCB_CTRL1_INTCPT];
+	iopm_pa = vmcb12->ctrl.iopm_base_pa;
+	msrpm_pa = vmcb12->ctrl.msrpm_base_pa;
+	np_enable = vmcb12->ctrl.np_enable != 0;
+	n_cr3 = vmcb12->ctrl.n_cr3;
+	tlb_ctrl = vmcb12->ctrl.tlb_ctrl;
+
+	if (np_enable && svm_nested_npt_init(vcpu) != 0) {
 		svm_nested_vmrun_invalid(vmcb12);
 		vm_gpa_release(cookie);
 		return (2);
 	}
-
-	/*
-	 * Snapshot the L1-controlled IOPM/MSRPM bases and the intercept word
-	 * ONCE. VMCB12 stays mapped writable for the whole L2 run, so a second
-	 * L1 vCPU can mutate these between the checks below and the holds that
-	 * follow. Validating one fetch and then holding another let L1 slip a
-	 * misaligned base past the alignment check into vm_gpa_hold(), whose
-	 * page-crossing guard panic()s -- a race-reachable whole-host DoS from
-	 * any multi-vCPU nested L1. Use only these locals hereafter.
-	 */
-	intcpt1 = vmcb12->ctrl.intercept[VMCB_CTRL1_INTCPT];
-	iopm_pa = vmcb12->ctrl.iopm_base_pa;
-	msrpm_pa = vmcb12->ctrl.msrpm_base_pa;
 
 	if (!svm_nested_vmcb12_consistent(vmcb12) ||
 	    ((intcpt1 & VMCB_INTCPT_IO) != 0 && (iopm_pa & PAGE_MASK) != 0) ||
@@ -249,7 +273,7 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	ns->l1_state = vmcb->state;
 	ns->l1_state.rip = l1_next_rip;
 	ns->l1_intr_shadow = ctrl->intr_shadow;
-	for (i = 0; i < 5; i++)
+	for (i = 0; i < nitems(ns->l0_intercept); i++)
 		ns->l0_intercept[i] = ctrl->intercept[i];
 	ns->l0_tsc_offset = ctrl->tsc_offset;
 	ns->l0_ncr3 = ctrl->n_cr3;
@@ -283,9 +307,8 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	 * shares L0's ASID with a forced TLB flush on every L1<->L2 switch.
 	 */
 	vmcb->state = vmcb12->state;
-	for (i = 0; i < 5; i++)
-		ctrl->intercept[i] = ns->l0_intercept[i] |
-		    vmcb12->ctrl.intercept[i];
+	for (i = 0; i < nitems(intcpt); i++)
+		ctrl->intercept[i] = ns->l0_intercept[i] | intcpt[i];
 	ctrl->intercept[VMCB_CTRL2_INTCPT] |= VMCB_INTCPT_VMRUN |
 	    VMCB_INTCPT_VMLOAD | VMCB_INTCPT_VMSAVE | VMCB_INTCPT_STGI |
 	    VMCB_INTCPT_CLGI | VMCB_INTCPT_SKINIT;
@@ -326,11 +349,10 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	 * cached nested translations hardware would drop). Otherwise L2
 	 * GPAs are L1 GPAs and L0's own table is the right one.
 	 */
-	if (vmcb12->ctrl.np_enable != 0) {
-		if (vmcb12->ctrl.tlb_ctrl != VMCB_TLB_FLUSH_NOTHING ||
-		    vmcb12->ctrl.n_cr3 != ns->l1_ncr3) {
+	if (np_enable) {
+		if (tlb_ctrl != VMCB_TLB_FLUSH_NOTHING || n_cr3 != ns->l1_ncr3) {
 			svm_nested_npt_flush(vcpu);
-			ns->l1_ncr3 = vmcb12->ctrl.n_cr3;
+			ns->l1_ncr3 = n_cr3;
 		}
 		ctrl->n_cr3 = ns->npt02_pa;
 	}
