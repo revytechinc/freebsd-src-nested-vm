@@ -44,6 +44,7 @@ ${PACKAGE}FILES+=	gen_gate_report.sh
 ${PACKAGE}FILES+=	gen_gate_report.py
 ${PACKAGE}FILES+=	publish_release.sh
 ${PACKAGE}FILES+=	check_pkgbase_kernel.sh
+${PACKAGE}FILES+=	check_release_kernels.sh
 ${PACKAGE}FILES+=	check_pkgbase_kernel_test.sh
 ${PACKAGE}FILES+=	upgrade_to_published.sh
 
