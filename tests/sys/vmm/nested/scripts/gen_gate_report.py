@@ -153,7 +153,11 @@ def main(argv):
     sys.stderr.write("wrote %s: %d gates, %d pass, %d fail, %d unknown\n"
                      % (out, len(gates), counts["pass"], counts["fail"],
                         counts["unknown"]))
-    return 1 if counts["fail"] else 0
+    # An UNKNOWN gate is one that produced no verdict -- it was interrupted,
+    # it never started, or its log was truncated. That is "could not look",
+    # and reporting it as success is how a release round comes to be certified
+    # by gates that did not run. Non-zero for either.
+    return 1 if counts["fail"] or counts["unknown"] else 0
 
 
 if __name__ == "__main__":
