@@ -34,7 +34,46 @@ MEM=${MEM:-4G}
 CPUS=${CPUS:-2}
 BOOTROM=${BOOTROM:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}
 BOOT_TIMEOUT=${BOOT_TIMEOUT:-420}
-LABEL=${LABEL:-$(uname -v | sed 's/.*#/#/;s/ .*//')}
+# The commit the running kernel was built from, not the `#N' build counter.
+#
+# A counter says nothing about which source produced the result: it is
+# per-object-directory, so two hosts building the same commit get different
+# numbers and one host rebuilding the same commit gets a new one. Benchmark
+# rows labelled that way cannot be compared across machines, which is most of
+# what these rows are for.
+#
+# It also removes the last thing depending on the counter. WITH_REPRODUCIBLE_BUILD
+# fixes it at #0 -- which would collapse every build's rows under one label --
+# and that option is the one that stops `uname -v' publishing the builder's
+# object directory to every installed machine. With this line gone, turning it
+# on costs nothing.
+# ROWS PRODUCED BEFORE THIS CHANGE CARRY `#N' IN THIS COLUMN. The two
+# generations are not the same axis and must not be joined on it; anything
+# reading stored results has to tell them apart by shape.
+LABEL=${LABEL:-$(uname -v | sed 's/:.*//' | sed 's/.*-//')}
+# Hex AND a plausible length. "the last hyphen-delimited field that happens to
+# be hex" accepts a purely numeric one -- a branch string ending in something
+# like -123456 would be taken for a commit, and two builds could then share a
+# label, which is the merging this is meant to prevent.
+case "$LABEL" in
+*[!0-9a-f]*)	LABEL='' ;;
+esac
+case "${#LABEL}" in
+7|8|9|1[0-9]|2[0-9]|3[0-9]|40)	;;
+*)				LABEL='' ;;
+esac
+# And at least one hex LETTER. A field of nothing but digits is far more likely
+# to be a count than a hash -- a branch string ending in -123456 satisfies both
+# tests above. A real hash that happens to be all digits falls back to the
+# version line instead, which is a longer label but still a distinct one; that
+# is the safe direction to be wrong in.
+case "$LABEL" in
+*[a-f]*)	;;
+*)		LABEL='' ;;
+esac
+# Falls back to the whole version line rather than to nothing: a label is what
+# tells two result sets apart, and an empty one silently merges them.
+[ -n "$LABEL" ] || LABEL=$(uname -v | sed 's/:.*//' | tr ' ' '-')
 
 A=/dev/nmdm${VMNAME}A
 B=/dev/nmdm${VMNAME}B
