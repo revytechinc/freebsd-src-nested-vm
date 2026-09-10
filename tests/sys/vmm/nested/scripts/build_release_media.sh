@@ -21,7 +21,7 @@
 # The commit is an argument here for exactly that reason.
 #
 # Usage:
-#   build_release_media.sh [-c commit] [-r release] [-t tree] <target>
+#   build_release_media.sh [-c commit] [-o objdir] [-r release] [-t tree] <target>
 #
 #   <target>   real-release (installer media) or vm-release (VM images)
 #   -c  commit or ref to build. Default: whatever the tree is already at.
@@ -50,12 +50,13 @@ COMMIT=""
 RELEASE_TAG="${RELEASE_TAG:-}"
 TREE=""
 
-while getopts c:r:t: o; do
+while getopts c:o:r:t: o; do
 	case "$o" in
+	o)	OBJPREFIX=$OPTARG ;;
 	c)	COMMIT=$OPTARG ;;
 	r)	RELEASE_TAG=$OPTARG ;;
 	t)	TREE=$OPTARG ;;
-	*)	echo "usage: $PROGRAM [-c commit] [-r release] [-t tree] <real-release|vm-release>" >&2
+	*)	echo "usage: $PROGRAM [-c commit] [-o objdir] [-r release] [-t tree] <real-release|vm-release>" >&2
 		exit 2 ;;
 	esac
 done
@@ -64,7 +65,7 @@ shift $((OPTIND - 1))
 TARGET=${1:-}
 case "$TARGET" in
 real-release|vm-release)	;;
-*)	echo "usage: $PROGRAM [-c commit] [-r release] [-t tree] <real-release|vm-release>" >&2
+*)	echo "usage: $PROGRAM [-c commit] [-o objdir] [-r release] [-t tree] <real-release|vm-release>" >&2
 	exit 2 ;;
 esac
 
@@ -88,7 +89,70 @@ git -C "$TREE" rev-parse --git-dir >/dev/null 2>&1 || {
 
 BRANCH=$(git -C "$TREE" rev-parse --abbrev-ref HEAD)
 LOGD=${LOGD:-$TREE/../rel-media-logs}
-export MAKEOBJDIRPREFIX=${MAKEOBJDIRPREFIX:-$HOME/obj-relmedia}
+# Where this builds is a DECISION, not a default.
+#
+# This used to fall back to $HOME/obj-relmedia. No release has ever been built
+# there: the object directory the releases actually use was passed in the
+# environment of whatever launched them, and that fact lived nowhere else --
+# so the script's own documented default was wrong and nothing on disk said so.
+#
+# The two ways that ends are both bad and one of them is silent. Where the
+# fallback is unwritable the build dies partway through buildworld, which is at
+# least loud. Where it is writable, the build goes COLD in a directory with no
+# relationship to the warm one, takes hours instead of minutes, and produces a
+# DIFFERENT KERNEL -- newvers.sh embeds a build counter -- while every check
+# downstream passes. That is a release nobody asked for that looks like the one
+# they did.
+#
+# So: take it from -o, or from the environment, or DERIVE it from what already
+# exists for this tree. Never invent one.
+if [ -z "${OBJPREFIX:-}" ] && [ -n "${MAKEOBJDIRPREFIX:-}" ]; then
+	OBJPREFIX=$MAKEOBJDIRPREFIX
+fi
+if [ -z "${OBJPREFIX:-}" ]; then
+	# An object directory already holding this tree's build is the one a
+	# warm rebuild means. Exactly one is an answer; none and several are
+	# both questions, and this script asks them rather than guessing.
+	# $TREE is already absolute and canonical by this point -- it is
+	# resolved with `cd ... && pwd -P' above, and the script exits if that
+	# fails. That matters here: make builds under
+	# <prefix><absolute-tree-path>, so probing with a relative TREE would
+	# find nothing and report a warm objdir as absent.
+	_found=""
+	_n=0
+	for _cand in "$HOME"/obj-*; do
+		# An unmatched glob leaves the pattern itself as the word. The
+		# -d test below happens to filter it, but only by accident, and
+		# an accident is not something to leave in a loop that decides
+		# where a release is built.
+		[ -e "$_cand" ] || continue
+		[ -d "$_cand$TREE/${TARGET_ARCH:-amd64}.${TARGET_ARCH:-amd64}" ] || continue
+		_found="$_found$_cand
+"
+		_n=$((_n + 1))
+	done
+	if [ "$_n" = 1 ]; then
+		OBJPREFIX=$(printf '%s' "$_found" | sed -n 1p)
+		echo "$PROGRAM: building in $OBJPREFIX, the only object directory holding this tree" >&2
+	elif [ "$_n" = 0 ]; then
+		echo "$PROGRAM: no object directory under $HOME holds a build of $TREE." >&2
+		echo "$PROGRAM: A cold build takes hours and produces a different kernel from" >&2
+		echo "$PROGRAM: any warm one, so it is asked for rather than fallen into:" >&2
+		echo "$PROGRAM:     $PROGRAM -o <objdir> ..." >&2
+		exit 2
+	else
+		echo "$PROGRAM: $_n object directories hold a build of $TREE:" >&2
+		printf '%s' "$_found" | sed 's/^/    /' >&2
+		echo "$PROGRAM: which one this release comes from is not decidable from here." >&2
+		echo "$PROGRAM: Name it: $PROGRAM -o <objdir> ..." >&2
+		exit 2
+	fi
+fi
+case "$OBJPREFIX" in
+/*)	;;
+*)	echo "$PROGRAM: the object directory must be absolute: $OBJPREFIX" >&2; exit 2 ;;
+esac
+export MAKEOBJDIRPREFIX=$OBJPREFIX
 
 # Read the width from the machine; the fleet is not uniform and a literal is
 # how half of a 64-core builder sat idle through every previous build.
