@@ -117,10 +117,27 @@ stage_previous() {
 				_fetched=yes
 				break
 			fi
-			# The FIRST 120 bytes: fetch puts the cause at the
-			# start and progress after it, so the tail is the half
-			# that says nothing about why.
-			log "  attempt $_try failed: $(tr '\n' ' ' < "$_ferr" | head -c 120)"
+			# The first 120 CHARACTERS, not bytes. fetch puts the
+			# cause at the start and progress after it, so the tail
+			# is the half that says nothing about why -- but a
+			# byte-boundary cut through a multi-byte character
+			# leaves an invalid trailing byte in the log.
+			#
+			# The locale is set explicitly and is not decoration:
+			# `cut -c' counts characters only in a multi-byte
+			# locale, and under LC_ALL=C -- which is what a cron or
+			# CI context usually hands a script -- it is byte
+			# slicing again. Measured on a fleet host across a
+			# two-byte character: head -c and LC_ALL=C cut -c both
+			# emit a lone 0xC3; LC_ALL=C.UTF-8 cut -c keeps it
+			# whole.
+			#
+			# A host without C.UTF-8 falls back to byte behaviour
+			# silently. That costs a mangled tail on one log line
+			# and never a wrong verdict, so it is not worth a
+			# preflight.
+			log "  attempt $_try failed: $(tr '\n' ' ' < "$_ferr" |
+			    LC_ALL=C.UTF-8 cut -c1-120)"
 			[ "$_try" = 3 ] || sleep $(( _try * 10 ))
 		done
 		if [ "$_fetched" = no ]; then
