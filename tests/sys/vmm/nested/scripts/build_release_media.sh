@@ -908,6 +908,50 @@ if [ -z "$KERNEL_IDENT" ]; then
 	say "who has been told to compare it against uname -v."
 	exit 1
 fi
+
+# And it must be THIS build's version line, not merely the first string that
+# looks like one. newvers.sh writes the branch and the commit into it, and this
+# run knows which commit it is building -- so the match is checkable rather
+# than assumed.
+#
+# Fail closed on an empty answer: a `case' against an empty pattern matches
+# anything, which would turn this guard into a rubber stamp.
+_head=$(git -C "$TREE" rev-parse HEAD 2>/dev/null) || _head=""
+if [ -z "$_head" ]; then
+	say "cannot read this build's commit from $TREE, so the kernel's version"
+	say "line cannot be checked against it. Refusing rather than accepting"
+	say "whatever string came first."
+	exit 1
+fi
+
+# Any hex run in the line that is a PREFIX of the full commit, rather than
+# generating an abbreviation and looking for it. Two reasons: newvers.sh picks
+# its own abbreviation length and git widens it as a repository grows, so a
+# fixed width fails one day for a reason unrelated to what is being checked;
+# and the line can carry suffixes -- `-dirty' among them -- which make "the
+# last hyphen-delimited field" the wrong token.
+_kmatch=no
+for _tok in $(printf '%s' "$KERNEL_IDENT" | tr -cs '0-9a-f' ' '); do
+	# Shorter than an abbreviated hash is some other number in the line.
+	[ "${#_tok}" -ge 7 ] || continue
+	case "$_head" in
+	"$_tok"*)	_kmatch=yes; break ;;
+	esac
+done
+if [ "$_kmatch" = no ]; then
+	say "the kernel's version line does not name the commit being released:"
+	say "    $KERNEL_IDENT"
+	say "    releasing $_head"
+	say "The kernel in the object directory was built from a different commit"
+	say "-- a stale object directory, or two runs sharing one. The media and"
+	say "the packages would name one commit while carrying a kernel from"
+	say "another, which is how a release comes to hold two kernels."
+	say ""
+	say "Note what this establishes and what it does not: it compares COMMITS,"
+	say "so a kernel built before uncommitted edits to the same commit still"
+	say "passes. The build identity records (DIRTY TREE) for that case."
+	exit 1
+fi
 {
 	echo "release:     ${RELEASE_TAG:-$(git -C "$TREE" describe --tags --exact-match HEAD 2>/dev/null || echo untagged)}"
 	echo "commit:      $(git -C "$TREE" rev-parse HEAD)$([ -n "$(git -C "$TREE" status --porcelain)" ] && echo ' (DIRTY TREE)')"
