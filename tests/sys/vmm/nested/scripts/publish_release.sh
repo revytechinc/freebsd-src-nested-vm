@@ -441,7 +441,81 @@ if ! would "rsync media -> $HOST:$RELDIR/"; then
 			fi
 			exit 1
 		fi
-		rm -rf '$RELDIR.replacing'"; then
+		rm -rf '$RELDIR.replacing'
+		# The rotated manifest describes the release now sitting in
+		# .previous, but its urls were written when that release WAS
+		# the current directory -- so they point at whatever is there
+		# now. A machine reading .previous/release.json therefore
+		# fetches the NEW release's bytes and checks them against the
+		# OLD release's checksums: twelve guaranteed failures, and a
+		# caller silently handed a different release than it asked for.
+		#
+		# Rewrite the directory segment, then check the result before
+		# putting it in place: non-empty, and carrying no url that
+		# still names the current directory. Written to a temporary
+		# file and moved, because a manifest half-rewritten is worse
+		# than one left alone -- and if the check fails, the original
+		# is kept and the failure is said out loud rather than leaving
+		# a rollback nobody can verify against.
+		_pj='$RELDIR.previous/release.json'
+		if [ -f \"\$_pj\" ]; then
+			_pb=\$(basename '$RELDIR')
+			# The basename reaches a sed expression and two grep
+			# patterns. Anything outside a plain name is refused
+			# outright and the manifest left alone -- a directory
+			# called something exotic is a question, not a case to
+			# quote around.
+			case \"\$_pb\" in
+			*[!0-9A-Za-z._-]*)
+				echo \"WARNING: release directory \$_pb carries characters this\"
+				echo \"         cannot safely match on; rotated manifest untouched\"
+				_pb='' ;;
+			esac
+			# A dot matches any character in a pattern, so
+			# 16.0-CURRENT-amd64 would also match 16X0-CURRENT-amd64 --
+			# and the counts below are the only thing standing between a
+			# wrong manifest and a live rollback directory. Turned into a
+			# bracket expression rather than backslash-escaped: this text
+			# passes through two shells before sed sees it, and a
+			# backslash does not survive that reliably.
+			_pbre=\$(printf '%s' \"\$_pb\" | sed 's/[.]/[.]/g')
+			# Count what has to move, then require that all of it did.
+			# Checking only that the old shape is gone would accept a
+			# manifest where some other url form still names the
+			# current directory.
+			_nu=0
+			[ -z \"\$_pb\" ] || _nu=\$(grep -c /\$_pbre/ \"\$_pj\") || _nu=0
+			if [ \"\$_nu\" = 0 ]; then
+				# Nothing names the current directory, so there is
+				# nothing to repoint. Leave it alone: a manifest
+				# already correct, or written in some other shape,
+				# is not a manifest to delete.
+				echo 'rotated manifest names no current-release url; left as it is'
+			else
+				_np=0
+				_nl=1
+				if sed \"s|/\$_pbre/|/\$_pb.previous/|g\" \"\$_pj\" > \"\$_pj.tmp\" &&
+				   [ -s \"\$_pj.tmp\" ]; then
+					_np=\$(grep -c /\$_pbre[.]previous/ \"\$_pj.tmp\") || _np=0
+					_nl=\$(grep -c /\$_pbre/ \"\$_pj.tmp\") || _nl=0
+				fi
+				if [ \"\$_np\" = \"\$_nu\" ] && [ \"\$_nl\" = 0 ]; then
+					mv \"\$_pj.tmp\" \"\$_pj\"
+					echo \"rotated manifest: \$_np urls now name \$_pb.previous\"
+				else
+					# REMOVED rather than left wrong. The rotation has
+					# already happened, so failing the publish here
+					# would report failure over a release that is
+					# live. What must not survive is a manifest
+					# listing the OLD release's checksums beside urls
+					# that serve the NEW release's bytes: absent is
+					# honest, wrong is not.
+					rm -f \"\$_pj.tmp\" \"\$_pj\"
+					echo \"WARNING: could not repoint the rotated manifest; REMOVED it\"
+					echo \"         the rollback media is in place; its manifest is not\"
+				fi
+			fi
+		fi"; then
 		echo "$PROGRAM: could not put the new media in place; the previous release" >&2
 		echo "$PROGRAM: was restored and nothing was published" >&2
 		exit 1

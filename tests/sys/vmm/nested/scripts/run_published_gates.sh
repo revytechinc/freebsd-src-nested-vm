@@ -94,8 +94,37 @@ stage_previous() {
 	case "$1" in
 	http://*|https://*)
 		log "fetching the previous release: $1"
-		if ! fetch -o "$WORK/prev-release.raw.xz" "$1"; then
-			log "could not fetch $1"
+		# Retried, because a single name-resolution blip has now cost
+		# this gate three runs. It fails as `Transient resolver
+		# failure' partway through a session in which the host is also
+		# running bhyve guests, and a manual attempt a minute later
+		# always succeeds -- so one attempt decides the gate on
+		# something that has nothing to do with the release.
+		#
+		# Three tries with a growing pause, and the reason kept from
+		# the last one. Still a hard failure if all three fail: an
+		# unreachable previous release is a real answer, just not one
+		# to conclude from a first attempt.
+		_fetched=no
+		_ferr="$WORK/prev-fetch.err"
+		for _try in 1 2 3; do
+			# Each attempt starts from nothing. A failed fetch can
+			# leave a partial file, and a later attempt resuming
+			# onto it would report success over a truncated image
+			# -- which xz would then blame for being corrupt.
+			rm -f "$WORK/prev-release.raw.xz"
+			if fetch -o "$WORK/prev-release.raw.xz" "$1" 2>"$_ferr"; then
+				_fetched=yes
+				break
+			fi
+			# The FIRST 120 bytes: fetch puts the cause at the
+			# start and progress after it, so the tail is the half
+			# that says nothing about why.
+			log "  attempt $_try failed: $(tr '\n' ' ' < "$_ferr" | head -c 120)"
+			[ "$_try" = 3 ] || sleep $(( _try * 10 ))
+		done
+		if [ "$_fetched" = no ]; then
+			log "could not fetch $1 in three attempts"
 			return 1
 		fi
 		# Check what arrived, not whether the transfer succeeded. The
