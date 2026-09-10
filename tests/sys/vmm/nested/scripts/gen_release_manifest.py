@@ -25,6 +25,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -58,6 +59,49 @@ UNIT_BYTES = "B"
 def quantity(value, unit):
     """A number that says what it measures."""
     return {"value": value, "unit": unit}
+
+
+def uncompressed_size(path):
+    """How large a compressed VM image becomes once written out.
+
+    The download page tells a reader both figures, because the one that decides
+    whether they have room is the one the file does NOT advertise: a 670 MiB
+    download expands to about 6 GiB. That second number was typed by hand and
+    had no source, which is the same defect as a hand-typed checksum with a
+    slower fuse -- nobody re-measures it, and it quietly describes a previous
+    release.
+
+    `xz --robot -l` reports it from the stream footer without decompressing, so
+    this costs a syscall rather than six gigabytes of I/O.
+
+    Returns None when it cannot be established. A missing figure makes the page
+    omit that half of the line; a WRONG figure would send somebody to free up
+    the wrong amount of disk, so guessing is not on the table.
+    """
+    try:
+        out = subprocess.run(["xz", "--robot", "-l", path],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             check=True).stdout.decode("ascii", "replace")
+    except (OSError, subprocess.CalledProcessError) as e:
+        print("warning: cannot read the uncompressed size of %s: %s"
+              % (path, e), file=sys.stderr)
+        return None
+    for line in out.splitlines():
+        f = line.split("\t")
+        # totals: streams, blocks, compressed, uncompressed, ...
+        if f[0] == "totals" and len(f) > 4:
+            try:
+                n = int(f[4])
+            except ValueError:
+                break
+            # Zero is what an empty or unreadable stream reports, and it would
+            # render as "0 B" beside a 670 MiB download -- a figure a reader
+            # would rightly disbelieve, on a page whose whole argument is that
+            # its numbers are measured.
+            return n if n > 0 else None
+    print("warning: xz --robot -l %s printed no totals line" % path,
+          file=sys.stderr)
+    return None
 
 
 def classify(name):
@@ -165,6 +209,10 @@ def main():
             "size": quantity(os.path.getsize(path), UNIT_BYTES),
             "sha256": sha256_of(path),
         }
+        if name.endswith(".xz"):
+            unpacked = uncompressed_size(path)
+            if unpacked is not None:
+                entry["uncompressed_size"] = quantity(unpacked, UNIT_BYTES)
         fs = filesystem(name)
         if fs:
             entry["filesystem"] = fs
@@ -181,6 +229,9 @@ def main():
         "commit": ident["commit"],
         "branch": ident.get("branch", ""),
         "vmm_ko_sha256": ident.get("vmm.ko", ""),
+        # What `uname -v` prints on a machine running this build, so the page
+        # that tells a reader to check it does not carry its own copy.
+        "kernel_ident": ident.get("kernel", ""),
         "built": ident.get("built", ""),
         "abi": args.abi,
         "pkg_repo": package_repo(args.pkg_dir, ident.get("release", "")),
