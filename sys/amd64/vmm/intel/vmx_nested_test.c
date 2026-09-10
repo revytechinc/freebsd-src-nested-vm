@@ -567,10 +567,30 @@ vmxtest_vmcs12_null_args(void)
 	struct vmcs12 *v;
 	uint64_t val = 0;
 
+	/*
+	 * An empty layout table is the same state everywhere in this suite, so
+	 * it gets the same verdict everywhere: tests 6, 7, 8, 11 and 12 all
+	 * FAIL through vmxtest_layout_present(), and skipping here made this
+	 * the one test that called it something else.  A reader scanning a run
+	 * would see one SKIP among the failures and take it for a test that
+	 * merely did not apply, rather than one more symptom of the single
+	 * defect behind all six.  Same state, one verdict.
+	 */
+	if (!vmxtest_layout_present(10))
+		return;
 	/* Any real encoding will do; take the first table entry. */
 	f = vmcs12_at(0);
+	/*
+	 * Unreachable, and kept anyway.  vmcs12_at() returns NULL only when the
+	 * index is >= vmcs12_fields_count, and the check above has already
+	 * failed the test when that count is zero -- so the two agree today by
+	 * construction.  They agree because of how the helper is implemented,
+	 * though, and this line dereferences the pointer: guarding a proxy for
+	 * the thing you are about to dereference is a dependency on someone
+	 * else not changing the proxy.  A dead branch is cheaper than that.
+	 */
 	if (f == NULL) {
-		VMXTEST_SKIP(10, "layout table is empty");
+		VMXTEST_FAIL(10, "vmcs12_at(0) is NULL with a non-empty table");
 		return;
 	}
 	if (vmcs12_read_field(NULL, f->encoding, &val) != -1) {
