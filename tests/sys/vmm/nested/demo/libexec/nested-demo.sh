@@ -23,9 +23,14 @@
 # Requirements: a CloudBSD "nested" kernel + nested bhyve (install via
 #   https://nested.cloudbsd.cat/install.sh), run as root, ~10 GB free space.
 #
-# Everything this script creates is namespaced "nesteddemo-" and cleaned up on
-# exit (pass --keep to leave artifacts behind).  It never touches VMs, taps,
-# bridges or md devices it did not create.
+# The VM and the per-run files this script creates are namespaced "nesteddemo-",
+# and it never touches VMs, taps, bridges or md devices it did not create.  On
+# exit it destroys the VM and deletes the throwaway run disk and the per-run
+# bhyveload/bhyve logs; pass --keep to retain the run disk too.  Three files
+# stay behind in $WORKDIR (default /var/tmp/nesteddemo): the console log that
+# the verdict points at, and the demo image -- nested-demo.raw.xz as downloaded
+# plus the decompressed nested-demo.raw -- which are cached deliberately, so a
+# second run skips the download.  Delete them to reclaim the space.
 #
 # POSIX /bin/sh.
 #
