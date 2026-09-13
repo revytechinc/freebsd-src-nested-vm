@@ -149,17 +149,50 @@ def read_identity(path):
     return out
 
 
+# `pkg repo` writes its own catalogue into the same directory as the packages,
+# and those files are named *.pkg too. Counting every *.pkg therefore counts the
+# index of the packages as two more packages: a repository of 525 installable
+# packages reported as 527, which is what the site published.
+#
+# The discrepancy was visible for days as "the manifest says 527, the repository
+# serves 525" and read like two packages had gone missing in publishing. Nothing
+# was missing. Listing the directory is what settled it -- 527 *.pkg entries, of
+# which data.pkg and packagesite.pkg are metadata and pkg-2.8.4.pkg is the pkg
+# tool itself, which IS installable and does belong in the count.
+# Two different questions, so two different sets. Using one for both let a
+# directory holding packages and nothing but meta.pkg answer "yes, a
+# repository" -- no catalogue, nothing installable, and a confident count.
+#
+# EXCLUDE: *.pkg files that are not packages, so the count is of packages.
+# CATALOGUE: what pkg needs before anything can be installed from a directory.
+# packagesite.pkg is the index itself; without it there is no repository, and
+# data.pkg alone is not enough.
+REPO_METADATA = frozenset(("data.pkg", "packagesite.pkg", "meta.pkg"))
+CATALOGUE = frozenset(("packagesite.pkg",))
+
+
 def package_repo(pkgdir, fallback_version):
     if not pkgdir or not os.path.isdir(pkgdir):
-        return {"version": fallback_version, "packages": None}
+        return {"version": fallback_version, "packages": None,
+                "packages_note": "no package directory to read"}
     version = fallback_version
     latest = os.path.join(pkgdir, "latest")
     if os.path.islink(latest):
         version = os.path.basename(os.readlink(latest))
     verdir = os.path.join(pkgdir, version) if version else None
-    count = None
-    if verdir and os.path.isdir(verdir):
-        count = sum(1 for f in os.listdir(verdir) if f.endswith(".pkg"))
+    # `packages` stays None whenever no honest count exists, and `packages_note`
+    # says WHICH kind of None it is. A reader of the manifest could otherwise
+    # not tell "there was no directory to look at" from "I looked and this is
+    # not a repository" -- two states this code treats as different and used to
+    # report identically.
+    if not verdir or not os.path.isdir(verdir):
+        return {"version": version, "packages": None,
+                "packages_note": "no package directory to read"}
+    names = os.listdir(verdir)
+    if not CATALOGUE.issubset(names):
+        return {"version": version, "packages": None,
+                "packages_note": "no catalogue; nothing can install from this"}
+    count = sum(1 for f in names if f.endswith(".pkg") and f not in REPO_METADATA)
     return {"version": version, "packages": count}
 
 

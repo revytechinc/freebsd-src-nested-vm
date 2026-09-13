@@ -211,7 +211,23 @@ done
 # nothing checked is how four packages reached a webroot once.
 CONTRACT="$SCRIPTDIR/check_release_contract.sh"
 [ -x "$CONTRACT" ] || { echo "$PROGRAM: $CONTRACT missing; refusing to publish unchecked" >&2; exit 2; }
-if ! sh "$CONTRACT" -r "$PKG" -v "$VERSION"; then
+# -m is passed ALWAYS, not when the manifest happens to be there. Rule 4
+# compares what release.json DECLARES against what the repository HOLDS, and
+# the count was wrong for days precisely because two parts of this pipeline
+# each counted correctly by their own rule and nothing compared them. A check
+# that is skipped when its input is absent is the same gate nobody invokes.
+#
+# release.json is already required to publish -- it travels with the media and
+# names the commit -- so its absence here is a refusal rather than a reason to
+# check less. The flag and its value are separate quoted arguments: packing
+# them into one scalar and expanding it unquoted lets word-splitting on $ART
+# put extra options into the gate's own argv.
+if [ ! -f "$ART/release.json" ]; then
+	echo "$PROGRAM: $ART/release.json is missing; refusing to publish a" >&2
+	echo "  repository whose declared package count nothing can check" >&2
+	exit 1
+fi
+if ! sh "$CONTRACT" -r "$PKG" -v "$VERSION" -m "$ART/release.json"; then
 	echo "$PROGRAM: the package repository does not satisfy the release contract" >&2
 	exit 1
 fi

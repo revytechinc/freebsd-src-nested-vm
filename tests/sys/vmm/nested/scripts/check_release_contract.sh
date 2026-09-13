@@ -42,6 +42,7 @@ PROGRAM="${0##*/}"
 REPO=""
 VERSION=""
 BASELINE=""
+MANIFEST=""
 
 # The packages this project exists to ship. A release without these is not a
 # nested-virtualisation release whatever else it contains, so they are named
@@ -49,12 +50,14 @@ BASELINE=""
 # release in the first place.
 REQUIRED="CloudBSD-kernel-generic CloudBSD-bhyve CloudBSD-lib9p CloudBSD-acpi CloudBSD-runtime"
 
-while getopts r:v:b: o; do
+while getopts r:v:b:m: o; do
 	case "$o" in
 	r)	REPO=$OPTARG ;;
 	v)	VERSION=$OPTARG ;;
 	b)	BASELINE=$OPTARG ;;
+	m)	MANIFEST=$OPTARG ;;
 	*)	echo "usage: $PROGRAM -r <repo-dir> [-v version] [-b baseline-dir]" >&2
+		echo "       [-m release.json]" >&2
 		exit 2 ;;
 	esac
 done
@@ -165,6 +168,53 @@ if [ -n "$BASELINE" ] && [ -d "$BASELINE" ]; then
 	fi
 else
 	note "no baseline given; checked only that required packages and the catalogue are present"
+fi
+
+# --- rule 4: the manifest agrees with the repository ---------------------
+#
+# This rule exists because the knowledge was already here and was not shared.
+# The comment above spells out that a naive *.pkg count includes the catalogue,
+# and this script has always counted correctly. The manifest generator globbed
+# *.pkg and did not, so release.json published 527 for a repository serving 525.
+# Two components of one pipeline disagreed about what a package is, each was
+# internally consistent, and nothing compared them -- so the difference surfaced
+# days later as a mystery about packages going missing in publishing.
+#
+# Comparing them is the whole rule. Neither number moves; they just have to meet.
+if [ -n "$MANIFEST" ]; then
+	if [ ! -r "$MANIFEST" ]; then
+		fail "manifest not readable: $MANIFEST"
+	else
+		# Captured, then tested: a pipeline takes its status from the
+		# last command, so `python3 ... | tr` would report tr's.
+		_mcount=$(python3 - "$MANIFEST" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+v = (d.get("pkg_repo") or {}).get("packages")
+print("" if v is None else v)
+PYEOF
+		) || _mcount=__unreadable__
+		case "$_mcount" in
+		__unreadable__)
+			fail "could not read pkg_repo.packages from $MANIFEST" ;;
+		"")
+			# null is the generator saying it could not count, which
+			# is honest. It is still not publishable: the download
+			# page renders this.
+			fail "manifest declares no package count for $VERSION" ;;
+		*[!0-9]*)
+			fail "manifest package count is not a number: $_mcount" ;;
+		"$NPKG")
+			note "manifest agrees with the repository: $NPKG packages" ;;
+		*)
+			fail "manifest says $_mcount packages, the repository holds $NPKG"
+			note "a *.pkg glob counts packagesite.pkg and data.pkg -- the" 
+			note "catalogue is not a package; see rule 4 in this script" ;;
+		esac
+	fi
 fi
 
 if [ "$FAILED" -gt 0 ]; then
