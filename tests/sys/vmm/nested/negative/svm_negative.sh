@@ -82,7 +82,15 @@ SKINIT|VMEXIT_INVALID|SKINIT base unaligned
 SKINIT|VMEXIT_INVALID|SKINIT attempted from ring > 0
 SKINIT|VMEXIT_INVALID|SKINIT image digest mismatch (escape)
 MATRIX_EOF
-	echo "PASS: svm_negative enumerated $count (instruction, fault) pairs"
+	# SKIP, and the exit status stays 0, which is this file's own
+	# convention -- the "vmm(4) not loaded" path above reports the same way.
+	# These are plain sh scripts, not atf test programs, and they are in no
+	# Kyuafile, so there is no harness skip primitive to call. Exiting
+	# non-zero instead would report unimplemented work as a failure, which
+	# is a different and equally wrong claim.
+	echo "SKIP: svm_negative listed $count (instruction, fault) pairs and"
+	echo "      executed none of them -- no SVM instruction was issued"
+	echo "      and no fault was observed"
 }
 
 svm_negative_main()

@@ -93,7 +93,15 @@ VMXON|VMFailValid|misaligned VMXON region
 VMXON|VMFailValid|CR4.VMXE not set
 VMXOFF|VMFailValid|VMXOFF outside VMX root operation
 MATRIX_EOF
-	echo "PASS: vmx_negative enumerated $count (instruction, fault) pairs"
+	# SKIP, and the exit status stays 0, which is this file's own
+	# convention -- the "vmm(4) not loaded" path above reports the same way.
+	# These are plain sh scripts, not atf test programs, and they are in no
+	# Kyuafile, so there is no harness skip primitive to call. Exiting
+	# non-zero instead would report unimplemented work as a failure, which
+	# is a different and equally wrong claim.
+	echo "SKIP: vmx_negative listed $count (instruction, fault) pairs and"
+	echo "      executed none of them -- no VMX instruction was issued"
+	echo "      and no fault was observed"
 }
 
 vmx_negative_main()

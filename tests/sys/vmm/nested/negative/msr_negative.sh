@@ -74,7 +74,15 @@ msr_matrix_run()
 0x90000001|TSC_AUX|GeneralProtection|reserved bits in TSC_AUX value
 0x00000017|CLOCK_SOURCE|GeneralProtection|reserved bits in value
 MATRIX_EOF
-	echo "PASS: msr_negative enumerated $count (msr, fault) pairs"
+	# SKIP, and the exit status stays 0, which is this file's own
+	# convention -- the "vmm(4) not loaded" path above reports the same way.
+	# These are plain sh scripts, not atf test programs, and they are in no
+	# Kyuafile, so there is no harness skip primitive to call. Exiting
+	# non-zero instead would report unimplemented work as a failure, which
+	# is a different and equally wrong claim.
+	echo "SKIP: msr_negative listed $count (msr, fault) pairs and executed"
+	echo "      none of them -- no MSR access was attempted and no fault"
+	echo "      was observed"
 }
 
 msr_negative_main()

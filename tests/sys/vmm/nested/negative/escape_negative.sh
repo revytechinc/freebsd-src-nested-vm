@@ -81,7 +81,15 @@ HSAVE_PA pointing to L0 host RAM|VMEXIT_INVALID|escape via HSAVE_PA
 SKINIT measured region overlapping L0|VMEXIT_INVALID|escape via SKINIT
 VMCB with L0 MSR shadow bits set|VMEXIT_INVALID|attempt to bypass MSR bitmap
 MATRIX_EOF
-	echo "PASS: escape_negative enumerated $count L1->L0 escape attempts blocked"
+	# SKIP, and the exit status stays 0, which is this file's own
+	# convention -- the "vmm(4) not loaded" path above reports the same way.
+	# These are plain sh scripts, not atf test programs, and they are in no
+	# Kyuafile, so there is no harness skip primitive to call. Exiting
+	# non-zero instead would report unimplemented work as a failure, which
+	# is a different and equally wrong claim.
+	echo "SKIP: escape_negative listed $count L1->L0 escape vectors and"
+	echo "      attempted none of them -- nothing here establishes that"
+	echo "      any of them is blocked"
 }
 
 escape_negative_main()
