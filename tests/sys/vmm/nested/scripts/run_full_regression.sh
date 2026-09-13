@@ -106,16 +106,47 @@ if [ -n "$_PKG" ]; then
 	# not enumerate every knob pkg reads.
 	PKG_DBDIR=/var/db/pkg
 	export PKG_DBDIR
-	# PKG_ROOTDIR is the same hole one level up, and it is the worse of the
-	# two. Measured: `PKG_ROOTDIR=/tmp/nosuchroot pkg check -s
-	# CloudBSD-bhyve' EXITS 0 and prints "Checking CloudBSD-bhyve: . done".
-	# A clean pass, for a root that does not exist -- so an inherited
-	# variable does not merely answer about another machine, it answers
-	# about no machine and calls it good. Everything in this section
-	# believes that answer.
+	# PKG_ROOTDIR and PKG_CHROOTDIR are neutralised too, for a weaker reason
+	# than PKG_DBDIR, and the difference is written down so the next reader
+	# does not re-derive it.
+	#
+	# An earlier version of this comment claimed an inherited PKG_ROOTDIR
+	# made `pkg check -s' pass cleanly against a root that does not exist.
+	# It does not, and the error was method rather than fact: the probe had
+	# no control, and the package used as its subject was genuinely clean,
+	# so exit 0 was the correct answer either way. Re-measured against an
+	# EXISTING empty root with a clean package as the subject -- the only
+	# pairing whose two outcomes differ -- neither variable is read from the
+	# environment. PKG_DBDIR is the only one of the three that is.
+	#
+	# Both are still neutralised -- PKG_ROOTDIR pinned to /, PKG_CHROOTDIR
+	# required to be unset, which is not the same operation and is worth
+	# saying rather than glossing as "both set". Neither costs anything,
+	# and the cost of being wrong is not symmetric. PKG_CHROOTDIR is the one that matters:
+	# a chroot happens BEFORE path lookup, so if a later pkg ever reads it,
+	# the PKG_DBDIR pin above becomes a path inside somebody else's tree
+	# rather than a pin to this host's database, and every verdict in this
+	# section would describe that tree. PKG_ROOTDIR could not do that to
+	# an absolute PKG_DBDIR.
+	#
+	# The command-line -r and -c ARE honoured. Nothing here takes pkg flags
+	# from a caller, which is what makes that irrelevant rather than
+	# unguarded.
 	PKG_ROOTDIR=/
 	export PKG_ROOTDIR
+	# Tested for being SET, with ${x+x}, not for being non-empty: an unset
+	# that failed on a readonly variable holding "" would pass a -n test
+	# while the variable is still in pkg's environment, which is the one
+	# outcome this guard exists to catch. Verified under bash, which is this
+	# script's interpreter: the readonly-empty case reaches the FATAL below.
+	# A POSIX sh exits outright on unset-of-a-readonly instead, which is
+	# also fail-closed, just less legible.
 	unset PKG_CHROOTDIR 2>/dev/null || :
+	if [ "${PKG_CHROOTDIR+set}" = set ]; then
+		echo "FATAL: PKG_CHROOTDIR could not be cleared, so pkg cannot"
+		echo "       be trusted to answer about this host"
+		exit 2
+	fi
 	if [ -d "$PKG_DBDIR" ]; then
 		printf '  %-9s %s (db %s)\n' pkg "$_PKG" "$PKG_DBDIR"
 	else
