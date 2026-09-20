@@ -104,6 +104,7 @@ bhyve_usage(int code)
 	    "       -l: LPC device configuration\n"
 	    "       -M: monitor mode\n"
 	    "       -m: memory size\n"
+	    "       -N: don't reboot while in monitor mode\n"
 	    "       -n: NUMA domain specification\n"
 	    "       -o: set config 'var' to 'value'\n"
 	    "       -P: vmexit from the guest on pause\n"
@@ -131,9 +132,9 @@ bhyve_optparse(int argc, char **argv)
 	int c;
 
 #ifdef BHYVE_SNAPSHOT
-	optstr = "aehuwxACDHIMPSWYk:f:o:p:G:c:s:m:n:l:K:U:r:";
+	optstr = "aehuwxACDHIMNPSWYk:f:o:p:G:c:s:m:n:l:K:U:r:";
 #else
-	optstr = "aehuwxACDHIMPSWYk:f:o:p:G:c:s:m:n:l:K:U:";
+	optstr = "aehuwxACDHIMNPSWYk:f:o:p:G:c:s:m:n:l:K:U:";
 #endif
 	while ((c = getopt(argc, argv, optstr)) != -1) {
 		switch (c) {
@@ -209,7 +210,7 @@ bhyve_optparse(int argc, char **argv)
 			set_config_value("memory.size", optarg);
 			break;
 		case 'M':
-			set_config_bool("monitor", true);
+			set_config_bool("monitor.enabled", true);
 			break;
 		case 'n':
 			if (bhyve_numa_parse(optarg) != 0)
@@ -219,6 +220,9 @@ bhyve_optparse(int argc, char **argv)
 				    optarg);
 			if (!get_config_bool("acpi_tables"))
 				errx(EX_USAGE, "NUMA emulation requires ACPI");
+			break;
+		case 'N':
+			set_config_bool("monitor.no_reboot", true);
 			break;
 		case 'o':
 			if (!bhyve_parse_config_option(optarg)) {
@@ -274,6 +278,7 @@ bhyve_optparse(int argc, char **argv)
 	bhyve_cfg_warn("lpc.bootrom", "bootrom");
 	bhyve_cfg_warn("lpc.bootvars", "bootvars");
 	bhyve_cfg_warn("virtio_msix", "virtio.msix");
+	bhyve_cfg_warn("monitor", "monitor.enabled");
 }
 
 void
