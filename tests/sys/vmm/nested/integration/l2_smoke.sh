@@ -222,8 +222,16 @@ fi
 # is the worst direction.  So send a token that is ONLY ever command text and
 # must never appear assembled.  If it does, the splitting has stopped working
 # and no other guard in this file can be believed.
-send ': CAN"ARY"'
-sleep 2
+# The companion token is what makes this falsifiable.  `sleep; grep` alone
+# would be silent when send delivered NOTHING at all, or when the console was
+# merely slow -- absence of the canary would read as health, which is the same
+# false PASS in a check written to prevent false PASSes.  CANDONE must arrive
+# either way (split or not, it is echoed at minimum), so waiting for it proves
+# the line was processed BEFORE the canary's absence is allowed to mean
+# anything.
+send ': CAN"ARY"; echo CANDO"NE"'
+wait_for 'CANDONE' 30 ||
+    fail "L1 console did not answer the send-integrity probe at all -- nothing below can be believed (see $CONS)"
 if grep -q CANARY "$CONS"; then
 	fail "send() is no longer delivering quotes verbatim -- every sentinel below would match the command echo instead of the guest's output, so this run would PASS without proving anything (see $CONS)"
 fi
