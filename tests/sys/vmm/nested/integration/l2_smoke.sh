@@ -71,9 +71,48 @@ fail() { log "FAIL: $*"; exit 1; }
 [ "$(id -u)" -eq 0 ] || skip "must run as root"
 [ -n "$L1_IMAGE" ] && [ -r "$L1_IMAGE" ] || skip "L1_IMAGE not set or unreadable"
 command -v "$BHYVE" >/dev/null 2>&1 || skip "$BHYVE not found"
-"$BHYVE" -h 2>&1 | grep -q -- '-N' || skip "$BHYVE does not accept -N (build usr.sbin/bhyve from this tree)"
-"$BHYVELOAD" 2>&1 | grep -q -- '-NS' || skip "$BHYVELOAD does not accept -N (build usr.sbin/bhyveload from this tree)"
-kldstat -q -n vmm || skip "vmm.ko not loaded"
+# Only require the -N flags when NFLAG actually asks for them.  They used to
+# be unconditional, as a proxy for "these binaries were built from this tree",
+# and that proxy was simply false: CloudBSD-bhyve built from this very tree
+# advertises no -N at all, so the gate skipped the only test that proves an L2
+# runs -- on every host in the fleet, including the ones running this tree's
+# kernel, for as long as it has existed.  A skip is reported as a non-failure,
+# so nothing ever said so.
+#
+# hw.vmm.nested.enable immediately below is the check that still carries
+# weight: stock vmm(4) has no hw.vmm.nested.* sysctls, so a kernel accepting
+# it is necessarily ours.  That is a statement about the KERNEL only -- there
+# is deliberately no provenance check left on the bhyve binaries, because
+# nesting needs no per-VM flag (see the header) and so a stock bhyve is a
+# legitimate way to run this test.
+command -v "$BHYVELOAD" >/dev/null 2>&1 || skip "$BHYVELOAD not found"
+if [ -n "$NFLAG" ]; then
+	# An explicit NFLAG the binaries cannot honour is a FAILURE, not a skip.
+	# Skipping a request the caller actually made is the same unreported
+	# non-failure this gate was rewritten to stop producing.
+	#
+	# The usage grep is kept here even though it is a poor proxy for "built
+	# from this tree", because that is no longer what it is being asked.
+	# The question now is only "does this binary accept -N", which is
+	# exactly what a caller passing NFLAG needs to know.  It is still a
+	# usage-text match rather than a real acceptance probe, so a binary that
+	# accepts -N without documenting it fails here; that is the residue.
+	"$BHYVE" -h 2>&1 | grep -q -- '-N' ||
+	    fail "NFLAG=$NFLAG but $BHYVE does not accept -N (build usr.sbin/bhyve from this tree)"
+	"$BHYVELOAD" 2>&1 | grep -q -- '-NS' ||
+	    fail "NFLAG=$NFLAG but $BHYVELOAD does not accept -N (build usr.sbin/bhyveload from this tree)"
+fi
+# -m, not -n: -n matches the linker FILE, so a vmm compiled into the kernel
+# lives in the file "kernel" and -n vmm returns 1.  That failed OPEN here --
+# a host with a built-in vmm skipped silently, which is the same class of
+# unreported non-failure as the -N gate above.
+#
+# The module name is "vmm" exactly: sys/dev/vmm/vmm_dev.c has
+# DECLARE_MODULE(vmm, ...) and MODULE_VERSION(vmm, 1), so -m vmm names this
+# tree's module in both forms.  Measured with vmm loaded as a module
+# (`kldstat -q -m vmm` exits 0), and the built-in case demonstrated with ufs,
+# which is compiled into GENERIC: -n ufs exits 1 while -m ufs exits 0.
+kldstat -q -m vmm || skip "vmm is neither loaded nor built into the kernel"
 if [ "$(sysctl -n hw.vmm.nested.enable 2>/dev/null)" != "1" ]; then
 	sysctl hw.vmm.nested.enable=1 >/dev/null 2>&1 ||
 	    skip "hw.vmm.nested.enable=1 refused (hw.vmm.nested.vmx/svm not 1?)"
@@ -161,18 +200,55 @@ fi
 # Inside L1: confirm the CPU advertises virtualization, load vmm, run L2.
 # bhyve in L1 needs writable /tmp (ACPI tables) and /var/run (IPC socket);
 # the disk is a scratch copy, so make the single-user root read-write.
-send 'mount -u -o rw / && mount -t tmpfs tmpfs /tmp && echo TMPOK'
+# NOTE on every sentinel below: the literal is SPLIT with "" so that the
+# assembled token appears only in the guest's OUTPUT, never in the command
+# text.  The L1 console echoes each command back -- twice, once as typed and
+# once by the shell's prompt -- so an unsplit `echo CREATED` puts "CREATED" on
+# the console BEFORE the command has run, and wait_for matches that echo.
+# Every `&&` guard in this section was therefore inert: `bhyvectl --create &&
+# echo CREATED` reported success even when bhyvectl failed, because the test
+# was reading the question rather than the answer.  Verified against a real
+# console log, where CREATED appears on lines 99 and 108 as command text and
+# only on line 109 as output.
+#
+# The split must be "" and not '': the send argument is itself single-quoted,
+# so an inner '' merely closes and reopens THAT string and the guest receives
+# the assembled token anyway.  Getting this wrong turns the guard inside out
+# -- it was caught here only because the false FAIL was loud.
+# Canary for the whole scheme.  Every guard below depends on send() putting
+# the quotes on the wire untouched -- it is `printf '%s\r' "$*" >&3` today,
+# but an eval, an sh -c or an ssh hop added later would strip them and quietly
+# return every sentinel to matching its own echo: a silent false PASS, which
+# is the worst direction.  So send a token that is ONLY ever command text and
+# must never appear assembled.  If it does, the splitting has stopped working
+# and no other guard in this file can be believed.
+send ': CAN"ARY"'
+sleep 2
+if grep -q CANARY "$CONS"; then
+	fail "send() is no longer delivering quotes verbatim -- every sentinel below would match the command echo instead of the guest's output, so this run would PASS without proving anything (see $CONS)"
+fi
+
+send 'mount -u -o rw / && mount -t tmpfs tmpfs /tmp && echo TMP"OK"'
 wait_for 'TMPOK' 30 || fail "could not mount tmpfs on /tmp in L1"
 progress "L1 kldload vmm"
-send 'kldload vmm; echo KLDLOADED'
-wait_for 'KLDLOADED' 60 || fail "kldload vmm in L1 did not complete"
+# Assert the STATE, not the command.  `kldload vmm; echo KLDLOADED` printed
+# the sentinel whatever happened, so an L1 image with no vmm.ko reported
+# "kldload: can't load vmm: No such file or directory" and then KLDLOADED on
+# the next line, and the test sailed past it.  kldstat is the question worth
+# asking anyway -- it is also satisfied when vmm is built into the kernel or
+# was already loaded, both of which make a bare `kldload &&` fail wrongly.
+send 'kldload vmm 2>&1; if kldstat -q -m vmm; then echo KLD"LOADED"; else echo KLD"MISSING"; fi'
+wait_for 'KLDLOADED|KLDMISSING' 60 ||
+    fail "L1 shell never answered the kldload probe -- hung or dead, see $CONS"
+grep -q KLDMISSING "$CONS" &&
+    fail "vmm is not loaded in L1 and is not built in (no vmm.ko in the L1 image?) -- see $CONS"
 progress "L1 vmm loaded"
-send 'sysctl hw.vmm.nested.vmx hw.vmm.nested.svm; echo VMMLOADED'
+send 'sysctl hw.vmm.nested.vmx hw.vmm.nested.svm; echo VMM"LOADED"'
 wait_for 'VMMLOADED' 30 || fail "L1 shell unresponsive after kldload"
 # vmm(4) initializes SVM lazily on the first VM creation; do that as a
 # separate step so a failure here is distinguishable from L2 execution.
 progress "L1 first vm_create (svm_enable in L1)"
-send 'bhyvectl --vm=probe --create && echo CREATED; bhyvectl --vm=probe --destroy'
+send 'bhyvectl --vm=probe --create && echo CRE"ATED"; bhyvectl --vm=probe --destroy'
 wait_for 'CREATED' 60 || fail "vm_create inside L1 failed (see $CONS)"
 progress "L1 vm_create done"
 if grep -q 'vmm: .*not available\|SVM: not available\|VMX .*not available' "$CONS"; then
@@ -180,9 +256,16 @@ if grep -q 'vmm: .*not available\|SVM: not available\|VMX .*not available' "$CON
 fi
 
 mark=$(wc -l < "$CONS")
-send 'bhyveload -m 512M -h / -e console=comconsole -e autoboot_delay=1 l2 && echo ===L2START=== && bhyve -c 1 -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,stdio l2; echo ===L2EXIT=$?==='
+send 'bhyveload -m 512M -h / -e console=comconsole -e autoboot_delay=1 l2 && echo ===L2"START"=== && bhyve -c 1 -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,stdio l2; echo ===L2"EXIT"=$?==='
 wait_for '===L2START===' 60 "$mark" || fail "bhyveload inside L1 failed (see $CONS)"
-mark=$(wc -l < "$CONS")
+# Deliberately NOT re-marked here.  A second mark taken after wait_for returns
+# races the L2 output: wait_for polls once a second, bhyve starts the instant
+# bhyveload finishes, and any banner emitted inside that window would land
+# BEFORE the new mark and be invisible to the searches below -- a false
+# timeout.  It was safe only while ===L2START=== matched the command echo and
+# so fired before L2 produced anything; splitting the sentinel removed that
+# accident.  The pre-send mark is correct and sufficient: nothing between it
+# and here can contain an L2 kernel banner.
 progress "L2 loaded, starting bhyve in L1"
 
 if wait_for 'Copyright \(c\) 1992-20[0-9][0-9] The FreeBSD Project' "$L2_TIMEOUT" "$mark"; then
