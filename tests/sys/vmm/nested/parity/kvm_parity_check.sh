@@ -178,8 +178,18 @@ count_vectors()
 		err "vector file not found: ${_file}"
 		return 1
 	fi
-	_mp=$(grep -cE '^[A-Za-z][0-9]+\|.*\|MUST_PASS$' "${_file}" 2>/dev/null || echo 0)
-	_kd=$(grep -cE '^[A-Za-z][0-9]+\|.*\|KNOWN_DIFF$' "${_file}" 2>/dev/null || echo 0)
+	# Fallback OUTSIDE the substitution. `grep -c' prints 0 AND exits 1 on
+	# no match, so `$(grep -c ... || echo 0)' captures both and the value
+	# becomes the two-line string "0\n0".
+	#
+	# Harmless here as it happens -- the caller extracts with
+	# awk '$1=="MUST_PASS" {print $2}', which ignores the stray line -- but
+	# this function's contract says it "prints two lines", and with an empty
+	# vector file it printed four. The same idiom in check_internal_tls.sh
+	# skipped a security guard outright, so it is not left standing on the
+	# strength of the current caller being tolerant.
+	_mp=$(grep -cE '^[A-Za-z][0-9]+\|.*\|MUST_PASS$' "${_file}" 2>/dev/null) || _mp=0
+	_kd=$(grep -cE '^[A-Za-z][0-9]+\|.*\|KNOWN_DIFF$' "${_file}" 2>/dev/null) || _kd=0
 	echo "MUST_PASS ${_mp}"
 	echo "KNOWN_DIFF ${_kd}"
 }
