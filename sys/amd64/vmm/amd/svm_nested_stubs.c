@@ -327,11 +327,43 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	 * GPAs are L1 GPAs and L0's own table is the right one.
 	 */
 	if (vmcb12->ctrl.np_enable != 0) {
+		uint64_t prev_ncr3 = ns->l1_ncr3;
+		bool flushed = false;
+
 		if (vmcb12->ctrl.tlb_ctrl != VMCB_TLB_FLUSH_NOTHING ||
 		    vmcb12->ctrl.n_cr3 != ns->l1_ncr3) {
 			svm_nested_npt_flush(vcpu);
 			ns->l1_ncr3 = vmcb12->ctrl.n_cr3;
+			flushed = true;
 		}
+		/*
+		 * DIAGNOSTIC, for the npt02-reuse hypothesis (see the skill
+		 * nested-regression-matrix). npt02 is reused across L2
+		 * instances -- svm_nested_npt_init() returns early when it
+		 * already exists -- and is flushed ONLY on this condition. A
+		 * new L2 whose nested page-table root lands at the same GPA
+		 * as the previous one therefore inherits the previous
+		 * guest's shadow mappings.
+		 *
+		 * prev_ncr3 is captured BEFORE the branch on purpose: the
+		 * flush arm assigns ns->l1_ncr3 = n_cr3, so reading it
+		 * afterwards would print the two as equal in every flushed
+		 * case and destroy the very comparison being made.
+		 *
+		 * This prints the two values the condition turns on plus
+		 * whether the flush actually ran, once per VMRUN, so the
+		 * failing cycles in the l2_smoke stress loop can be
+		 * correlated against reuse-without-flush.
+		 *
+		 * READ THIS BEFORE BELIEVING THE RESULT: the tracer itself
+		 * costs the guest time. Measured on freedev010, turning
+		 * svm_debug on roughly DOUBLES the failure rate (16.5% over
+		 * 230 launches against 9.5% over 190). So compare
+		 * reuse-vs-flush WITHIN a single traced run; do not compare
+		 * this run's rate against an untraced baseline.
+		 */
+		svm_nested_trace(vcpu, flushed ? "vmrun-npt-flushed" :
+		    "vmrun-npt-REUSED", vmcb12->ctrl.n_cr3, prev_ncr3);
 		ctrl->n_cr3 = ns->npt02_pa;
 	}
 
