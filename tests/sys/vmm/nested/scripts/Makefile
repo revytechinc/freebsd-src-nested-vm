@@ -39,6 +39,11 @@ ${PACKAGE}FILES+=	build_release_media.sh
 ${PACKAGE}FILES+=	stage_release_artifacts.sh
 ${PACKAGE}FILES+=	gen_release_manifest.sh
 ${PACKAGE}FILES+=	gen_release_manifest.py
+# Its test, which was the only *_test.* file in this directory not listed.
+# check_pkgbase_kernel_test.sh and check_nested_tests_package_test.sh both
+# ship, so a test that cannot be run on a host is the odd one out rather than
+# a deliberate exclusion.
+${PACKAGE}FILES+=	gen_release_manifest_test.py
 ${PACKAGE}FILES+=	gen_repo_fingerprint.sh
 ${PACKAGE}FILES+=	gen_gate_report.sh
 ${PACKAGE}FILES+=	gen_gate_report.py
