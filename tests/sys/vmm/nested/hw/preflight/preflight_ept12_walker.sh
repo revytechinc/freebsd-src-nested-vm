@@ -267,7 +267,7 @@ preflight_ept12_walker_head()
 }
 preflight_ept12_walker_body()
 {
-	bash "$0"
+	sh "$0"
 }
 atf_init_test_cases()
 {

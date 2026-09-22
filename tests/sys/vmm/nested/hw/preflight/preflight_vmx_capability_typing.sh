@@ -166,7 +166,7 @@ preflight_vmx_capability_typing_head()
 }
 preflight_vmx_capability_typing_body()
 {
-	bash "$0"
+	sh "$0"
 }
 atf_init_test_cases()
 {

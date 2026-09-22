@@ -106,7 +106,7 @@ preflight_unit_help_head()
 }
 preflight_unit_help_body()
 {
-	bash "$0"
+	sh "$0"
 }
 atf_init_test_cases()
 {

@@ -114,7 +114,7 @@ preflight_arch_consistency_head()
 }
 preflight_arch_consistency_body()
 {
-    bash "$0"
+    sh "$0"
 }
 atf_init_test_cases()
 {

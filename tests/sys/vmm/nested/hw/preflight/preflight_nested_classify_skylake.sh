@@ -161,7 +161,7 @@ preflight_nested_classify_skylake_head()
 }
 preflight_nested_classify_skylake_body()
 {
-	bash "$0"
+	sh "$0"
 }
 atf_init_test_cases()
 {

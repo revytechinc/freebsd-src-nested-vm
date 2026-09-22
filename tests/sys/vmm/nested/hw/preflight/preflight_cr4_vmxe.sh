@@ -158,7 +158,7 @@ preflight_cr4_vmxe_head()
 }
 preflight_cr4_vmxe_body()
 {
-	bash "$0"
+	sh "$0"
 }
 atf_init_test_cases()
 {
