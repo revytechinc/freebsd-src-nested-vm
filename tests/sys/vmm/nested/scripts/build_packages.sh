@@ -52,7 +52,22 @@ log() { printf '%s: %s\n' "$PROGRAM" "$*"; }
 die() { log "FAIL: $*"; exit 1; }
 
 [ -f "${SRCTOP}/sys/conf/kern.pre.mk" ] || die "SRCTOP not a src tree: $SRCTOP"
-[ "$(id -u)" -eq 0 ] || die "need root (installkernel DESTDIR + pkg create)"
+# ROOT IS NOT REQUIRED, and deliberately so. The installs below use NO_ROOT,
+# which records intended ownership in a METALOG instead of calling chown, and
+# pkg create takes that ownership from the plist rather than from the staged
+# files on disk. Both halves measured: a file staged as an unprivileged user
+# comes out of pkg query as root:wheel with the right mode.
+#
+# The alternative was a doas rule letting the build user run this script as
+# root. That cannot be made safe here: the Jenkins agent owns its own
+# workspace, so any allowlist naming a path under it is writable by the very
+# principal the rule grants, and the realpath gate that would guard it adds
+# nothing when the caller owns every path component.
+#
+# Run as root anyway and it still works -- the flags are harmless there.
+if [ "$(id -u)" -eq 0 ]; then
+	log "running as root; NO_ROOT staging is used regardless"
+fi
 
 GITREV=$(git -C "$SRCTOP" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 GITFULL=$(git -C "$SRCTOP" rev-parse HEAD 2>/dev/null || echo unknown)
@@ -82,8 +97,14 @@ else
 	log "skip buildkernel (NESTED_SKIP_BUILDKERNEL=1)"
 fi
 
-log "installkernel DESTDIR=$STAGE/kernel"
-make -C "$SRCTOP" installkernel KERNCONF="$KERNCONF" DESTDIR="$STAGE/kernel"
+log "installkernel DESTDIR=$STAGE/kernel (NO_ROOT)"
+# A TOP-LEVEL make, so Makefile.inc1's own
+#	METALOG_INSTALLFLAGS = -U -M ${METALOG} -D ${INSTALL_DDIR}
+# applies and no INSTALL override is needed here. That is not true of the leaf
+# makes further down, which is why they carry one.
+KERN_METALOG="$STAGE/kernel/METALOG"
+make -C "$SRCTOP" installkernel KERNCONF="$KERNCONF" DESTDIR="$STAGE/kernel" \
+	-DNO_ROOT METALOG="$KERN_METALOG"
 find "$STAGE/kernel" \( -name '*.debug' -o -name '*.full' -o -name '*.symbols' \) -delete
 rm -rf "$STAGE/kernel/usr/lib/debug" || true
 
@@ -133,7 +154,9 @@ _be=$(mktemp) || { log "ERROR: cannot create a temporary file"; exit 1; }
 # The generated script is run as root during a release, so it is written the
 # way any other generated program should be -- with the data kept out of the
 # code.
-export NP_SRCTOP="$SRCTOP" NP_STAGE="$STAGE" NP_JOBS="$JOBS"
+BHYVE_METALOG="$STAGE/bhyve/METALOG"
+export NP_SRCTOP="$SRCTOP" NP_STAGE="$STAGE" NP_JOBS="$JOBS" \
+	NP_METALOG="$BHYVE_METALOG"
 cat > "$_be" <<'BUILDENV_EOF'
 #!/bin/sh
 # Generated; runs inside 'make buildenv'.
@@ -142,12 +165,21 @@ make -C "${NP_SRCTOP}/lib/libvmmapi" -j"${NP_JOBS}" all
 make -C "${NP_SRCTOP}/usr.sbin/bhyve" -j"${NP_JOBS}" all
 make -C "${NP_SRCTOP}/usr.sbin/bhyvectl" -j"${NP_JOBS}" all
 make -C "${NP_SRCTOP}/usr.sbin/bhyveload" -j"${NP_JOBS}" all
-make -C "${NP_SRCTOP}/lib/libvmmapi" install DESTDIR="${NP_STAGE}/bhyve" -DWITHOUT_TESTS
-make -C "${NP_SRCTOP}/usr.sbin/bhyve" install DESTDIR="${NP_STAGE}/bhyve" -DWITHOUT_TESTS
-make -C "${NP_SRCTOP}/usr.sbin/bhyvectl" install DESTDIR="${NP_STAGE}/bhyve" -DWITHOUT_TESTS
+# INSTALL is overridden, not INSTALLFLAGS. These are LEAF makes, so
+# Makefile.inc1 is not in play and nothing appends the metalog flags for
+# them. INSTALLFLAGS alone is not enough either: bsd.man.mk builds its own
+# command from ${INSTALL} and never looks at INSTALLFLAGS, so the manual
+# pages would still try to chown and the install would stop. Overriding
+# INSTALL covers every consumer -- programs, manual pages, files, links.
+# Measured on each variant.
+_ni="install -U -M ${NP_METALOG} -D ${NP_STAGE}/bhyve"
+_nf="-DNO_ROOT -DWITHOUT_TESTS -DWITHOUT_DEBUG_FILES"
+make -C "${NP_SRCTOP}/lib/libvmmapi" install DESTDIR="${NP_STAGE}/bhyve" ${_nf} METALOG="${NP_METALOG}" INSTALL="${_ni}"
+make -C "${NP_SRCTOP}/usr.sbin/bhyve" install DESTDIR="${NP_STAGE}/bhyve" ${_nf} METALOG="${NP_METALOG}" INSTALL="${_ni}"
+make -C "${NP_SRCTOP}/usr.sbin/bhyvectl" install DESTDIR="${NP_STAGE}/bhyve" ${_nf} METALOG="${NP_METALOG}" INSTALL="${_ni}"
 # Ship bhyveload too: it is what creates the VM, so an installed system needs
 # the matching one.
-make -C "${NP_SRCTOP}/usr.sbin/bhyveload" install DESTDIR="${NP_STAGE}/bhyve" -DWITHOUT_TESTS
+make -C "${NP_SRCTOP}/usr.sbin/bhyveload" install DESTDIR="${NP_STAGE}/bhyve" ${_nf} METALOG="${NP_METALOG}" INSTALL="${_ni}"
 BUILDENV_EOF
 chmod 0700 "$_be"
 log "building the bhyve toolset inside the world build environment"
@@ -216,8 +248,55 @@ pkg_from_stage() {
 	_man=$(mktemp /tmp/cbsd-manifest.XXXXXX)
 	_plist=$(mktemp /tmp/cbsd-plist.XXXXXX)
 	write_manifest "$_pkg" "$_comment" "$_man" "$_shlibs"
-	(cd "$_root" && find . \( -type f -o -type l \) | sed 's|^\./||' | sort) > "$_plist"
+	# The plist carries OWNERSHIP, taken from the METALOG the NO_ROOT
+	# install wrote. A bare `find' lists the staged files, and those are
+	# owned by whoever ran the build -- so a package built unprivileged
+	# would install every file owned by that user. pkg honours
+	# `@(user,group,mode) path', which is what makes an unprivileged build
+	# produce a root-owned package.
+	#
+	# No fallback to `find' when the METALOG is missing. A fallback would
+	# quietly emit a package with the build user's ownership baked in,
+	# which is the failure this whole change exists to avoid, and it would
+	# look exactly like a successful build.
+	_meta="$_root/METALOG"
+	[ -r "$_meta" ] || die "no METALOG under $_root -- the install did not run with NO_ROOT, and a plist without ownership would ship files owned by $(id -un)"
+
+	# Last entry wins: mtree logs may name a path more than once. Only
+	# paths that still EXIST are emitted, because the debug and symbol
+	# files are deleted after install and would otherwise be listed and
+	# then missing at pkg create time.
+	awk -v root="$_root" '''
+	{
+		path = $1
+		sub(/^\.\//, "", path)
+		u = ""; g = ""; m = ""; t = ""
+		for (i = 2; i <= NF; i++) {
+			if ($i ~ /^uname=/) { u = substr($i, 7) }
+			else if ($i ~ /^gname=/) { g = substr($i, 7) }
+			else if ($i ~ /^mode=/)  { m = substr($i, 6) }
+			else if ($i ~ /^type=/)  { t = substr($i, 6) }
+		}
+		if (t == "dir" || path == "" || path == "METALOG") next
+		if (u == "" || g == "" || m == "") next
+		own[path] = "@(" u "," g "," m ") " path
+		order[path] = NR
+	}
+	END {
+		for (p in own) print order[p] "\t" own[p]
+	}''' "$_meta" | sort -n | cut -f2- | while read -r _line; do
+		_p=${_line##*) }
+		[ -e "$_root/$_p" ] || [ -L "$_root/$_p" ] || continue
+		printf '''%s\n''' "$_line"
+	done > "$_plist"
+
 	[ -s "$_plist" ] || die "empty plist for $_name under $_root"
+	# Every line must carry ownership. One that does not would install as
+	# the build user, and would be invisible among thousands that do.
+	if grep -qv '''^@(.*,.*,.*) ''' "$_plist"; then
+		grep -v '''^@(.*,.*,.*) ''' "$_plist" | head -3 >&2
+		die "plist lines without ownership for $_name (see above)"
+	fi
 	pkg create -M "$_man" -p "$_plist" -r "$_root" -o "$OUTDIR"
 	rm -f "$_man" "$_plist"
 	log "created $_name"
