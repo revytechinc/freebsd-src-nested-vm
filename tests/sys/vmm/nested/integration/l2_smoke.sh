@@ -48,6 +48,12 @@ set -u
 : "${L1_CPUS:=2}"
 : "${L1_TIMEOUT:=300}"
 : "${L2_TIMEOUT:=120}"
+# Number of L2 guests to boot inside the ONE L1 boot. 1 is the smoke test and
+# is the default, so this file behaves exactly as before unless asked. Higher
+# values make it the VMRUN/VMRESUME stress that stress_vmrun.sh drives: each
+# cycle is a full L2 entry and teardown from the same L1, which is where a
+# leaked ASID/VPID or a resource leak in the nested path would show up.
+: "${L2_CYCLES:=1}"
 : "${KEEP:=0}"
 : "${PROGRESS:=}"
 
@@ -263,28 +269,145 @@ if grep -q 'vmm: .*not available\|SVM: not available\|VMX .*not available' "$CON
 	fail "L1 kernel says virtualization is not available: hw.vmm.nested.enable=1 did not expose VMX/SVM to the guest"
 fi
 
-mark=$(wc -l < "$CONS")
-send 'bhyveload -m 512M -h / -e console=comconsole -e autoboot_delay=1 l2 && echo ===L2"START"=== && bhyve -c 1 -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,stdio l2; echo ===L2"EXIT"=$?==='
-wait_for '===L2START===' 60 "$mark" || fail "bhyveload inside L1 failed (see $CONS)"
-# Deliberately NOT re-marked here.  A second mark taken after wait_for returns
-# races the L2 output: wait_for polls once a second, bhyve starts the instant
-# bhyveload finishes, and any banner emitted inside that window would land
-# BEFORE the new mark and be invisible to the searches below -- a false
-# timeout.  It was safe only while ===L2START=== matched the command echo and
-# so fired before L2 produced anything; splitting the sentinel removed that
-# accident.  The pre-send mark is correct and sufficient: nothing between it
-# and here can contain an L2 kernel banner.
-progress "L2 loaded, starting bhyve in L1"
+l2_failed()
+{
+	reason=$(tail -n +"$(($1 + 1))" "$CONS" |
+	    grep -E 'vm exit|Abort|error|invalid|failed|===L2EXIT' | head -5)
+	fail "L2 kernel did not run within ${L2_TIMEOUT}s: ${reason:-no diagnostic on console} (log: $CONS)"
+}
 
-if wait_for 'Copyright \(c\) 1992-20[0-9][0-9] The FreeBSD Project' "$L2_TIMEOUT" "$mark"; then
-	log "L2 kernel banner seen"
-	# Give it a moment to reach the mountroot prompt for extra evidence.
-	if wait_for 'mountroot>' 60 "$mark"; then
-		log "L2 reached mountroot>"
+if [ "$L2_CYCLES" -le 1 ]; then
+	mark=$(wc -l < "$CONS")
+	send 'bhyveload -m 512M -h / -e console=comconsole -e autoboot_delay=1 l2 && echo ===L2"START"=== && bhyve -c 1 -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,stdio l2; echo ===L2"EXIT"=$?==='
+	wait_for '===L2START===' 60 "$mark" || fail "bhyveload inside L1 failed (see $CONS)"
+	# Deliberately NOT re-marked here.  A second mark taken after wait_for returns
+	# races the L2 output: wait_for polls once a second, bhyve starts the instant
+	# bhyveload finishes, and any banner emitted inside that window would land
+	# BEFORE the new mark and be invisible to the searches below -- a false
+	# timeout.  It was safe only while ===L2START=== matched the command echo and
+	# so fired before L2 produced anything; splitting the sentinel removed that
+	# accident.  The pre-send mark is correct and sufficient: nothing between it
+	# and here can contain an L2 kernel banner.
+	progress "L2 loaded, starting bhyve in L1"
+
+	# SINGLE SHOT -- unchanged, and deliberately kept separate from the
+	# stress path below. This is the form proven on all six fleet hosts;
+	# it runs bhyve in the FOREGROUND with com1 on stdio, which is why it
+	# cannot be looped: once L2 boots it owns L1's console, so anything
+	# typed next goes to the L2's mountroot> prompt rather than to L1's
+	# shell. That is not a theory -- the first version of the loop sent
+	# `bhyvectl --destroy' and L2 answered "Invalid file system
+	# specification."
+	if wait_for 'Copyright \(c\) 1992-20[0-9][0-9] The FreeBSD Project' "$L2_TIMEOUT" "$mark"; then
+		log "L2 kernel banner seen"
+		if wait_for 'mountroot>' 60 "$mark"; then
+			log "L2 reached mountroot>"
+		fi
+		log "PASS: L2 guest executed inside nested L1"
+		exit 0
 	fi
-	log "PASS: L2 guest executed inside nested L1"
-	exit 0
+	l2_failed "$mark"
 fi
 
-reason=$(tail -n +"$((mark + 1))" "$CONS" | grep -E 'vm exit|Abort|error|invalid|failed|===L2EXIT' | head -5)
-fail "L2 kernel did not run within ${L2_TIMEOUT}s: ${reason:-no diagnostic on console} (log: $CONS)"
+# STRESS -- N L2 entries from the one L1, which is what exercises repeated
+# VMRUN/VMRESUME and shows up an ASID/VPID or resource leak in the nested path.
+#
+# The whole loop is handed to L1 as ONE command and reports ONE total, rather
+# than being driven a cycle at a time from here. Driving it from here needs
+# L1's shell to stay reachable between cycles, and it is not: com1 on stdio
+# gives the console to the guest. So each L2 is backgrounded with its console
+# redirected to a file inside L1, and L1 greps that file itself.
+#
+# The count comes back as seen/attempted. Reporting only "seen" would let a
+# loop that ran three cycles instead of N look like a pass.
+#
+# kill -9 and no `wait'. A guest sitting at mountroot> does not necessarily
+# act on SIGTERM, and `wait' on a process that will not die blocks the loop
+# for ever -- which presents as "L1 wedged or died" and is indistinguishable
+# from a real nested-virt hang, i.e. the harness would have blamed the kernel
+# for its own teardown bug. bhyvectl --destroy at the top of each cycle is
+# what actually reclaims the VM.
+log "stress: ${L2_CYCLES} L2 cycles inside one L1"
+
+# The loop is WRITTEN TO A FILE in L1 a line at a time, then run -- not typed
+# as one long command. Two reasons, both learned here: a single 500-character
+# line is awkward to reason about when it goes wrong, and it gives no way to
+# see WHICH step blocked, because a shell busy in a loop prints nothing and
+# returns no prompt. The per-step STEP= markers below are what make a hang
+# diagnosable instead of just "L1 wedged or died".
+_w() {
+	mark=$(wc -l < "$CONS")
+	send "printf '%s\\n' $1 >> /tmp/stress.sh; echo WROTE\"LINE\""
+	wait_for 'WROTELINE' 30 "$mark" ||
+	    fail "L1 stopped accepting input while writing the stress script (log: $CONS)"
+}
+
+mark=$(wc -l < "$CONS")
+send 'rm -f /tmp/stress.sh /tmp/l2c; echo CLEAR"ED"'
+wait_for 'CLEARED' 30 "$mark" || fail "L1 unresponsive before the stress loop (log: $CONS)"
+
+_w "'kldload nmdm >/dev/null 2>&1'"
+_w "'i=0; ok=0'"
+_w "'while [ \$i -lt ${L2_CYCLES} ]; do'"
+_w "'echo STEP=destroy:\$i'"
+_w "'bhyvectl --vm=l2 --destroy >/dev/null 2>&1'"
+_w "'echo STEP=load:\$i'"
+_w "': > /tmp/l2c'"
+# The reader starts BEFORE the guest. Started afterwards it races the
+# banner: cycle 8 of a 10-cycle run missed for exactly that reason while
+# every other cycle passed. Opening the B side first also creates the
+# nmdm pair, so the A side is there when bhyve wants it.
+_w "'( cat /dev/nmdm_l2B > /tmp/l2c 2>/dev/null & echo \$! > /tmp/catpid )'"
+_w "'sleep 1'"
+_w "'bhyveload -m 512M -h / -e console=comconsole -e autoboot_delay=0 l2 >/tmp/l2load 2>&1'"
+_w "'echo STEP=loadrc:\$?'"
+# com1 on an nmdm(4) pair, NOT on stdio redirected into a file. bhyve's
+# stdout is block-buffered when it is not a tty, so the L2 banner sits in
+# bhyve's own 4K buffer and may never reach the file while the guest is
+# still running -- which reads exactly like "L2 did not boot". Measured:
+# 6/10 and 8/10 on runs where bhyveload returned 0 every time and the
+# failures fell on scattered cycles. nmdm is a tty, so `cat' of the B side
+# delivers each line as it arrives. This is the trap nested-regression-matrix
+# already warns about under "nmdm console rules".
+_w "'bhyve -c 1 -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,/dev/nmdm_l2A l2 >/dev/null 2>&1 &'"
+_w "'p=\$!'"
+_w "'echo STEP=started:\$p'"
+# POLL, do not sleep a fixed time. A flat `sleep 15' makes the test ask
+# "did L2 boot within exactly 15 seconds", and L1 is itself a guest whose
+# timing varies with host load: a first run scored 8/10 with the two
+# failures at cycles 1 and 7 -- scattered rather than clustering at the
+# end, which is the shape of a timing artifact and NOT of the resource
+# leak this loop is looking for. Reported as a kernel result that would
+# have been a fabricated defect.
+_w "'n=0'"
+_w "'while [ \$n -lt 60 ]; do grep -q \"Copyright (c) 199\" /tmp/l2c && break; sleep 1; n=\$((n+1)); done'"
+_w "'grep -q \"Copyright (c) 199\" /tmp/l2c && ok=\$((ok+1))'"
+_w "'echo STEP=checked:\$ok'"
+_w "'kill -9 \$p >/dev/null 2>&1'"
+_w "'kill -9 \$(cat /tmp/catpid) >/dev/null 2>&1'"
+_w "'i=\$((i+1))'"
+_w "'done'"
+_w "'bhyvectl --vm=l2 --destroy >/dev/null 2>&1'"
+_w "'echo CYCLES\"RESULT\"=\$ok/\$i'"
+
+mark=$(wc -l < "$CONS")
+send 'sh /tmp/stress.sh'
+wait_for 'CYCLESRESULT=' $((L2_CYCLES * 80 + 120)) "$mark" || {
+	_last=$(tail -n +"$((mark + 1))" "$CONS" | grep -o 'STEP=[a-z]*:[0-9-]*' | tail -1)
+	fail "the stress loop stopped after ${_last:-no step at all} (log: $CONS)"
+}
+
+_res=$(tail -n +"$((mark + 1))" "$CONS" | grep -o 'CYCLESRESULT=[0-9]*/[0-9]*' | tail -1)
+_ok=${_res#CYCLESRESULT=}; _ok=${_ok%%/*}
+_tried=${_res##*/}
+
+[ -n "$_ok" ] && [ -n "$_tried" ] ||
+    fail "could not read the cycle result off the console (log: $CONS)"
+log "stress result: ${_ok}/${_tried} L2 boots seen"
+[ "$_tried" -eq "$L2_CYCLES" ] ||
+    fail "loop attempted ${_tried} cycles, not ${L2_CYCLES} (log: $CONS)"
+[ "$_ok" -eq "$L2_CYCLES" ] ||
+    fail "only ${_ok} of ${L2_CYCLES} L2 guests booted (log: $CONS)"
+
+log "PASS: ${L2_CYCLES} L2 guests executed inside one nested L1"
+exit 0
