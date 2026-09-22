@@ -27,6 +27,15 @@ hyperv_msr_constants_head()
 
 hyperv_msr_constants_body()
 {
+	# Skip where the nested node is absent entirely -- a stock FreeBSD
+	# kernel, for instance. That is a reason not to run, not a regression.
+	# Without this, both cases here FAILED on such a kernel while svm_basic
+	# SKIPPED on the identical condition; found by running the suite inside
+	# an L1 booted from a stock snapshot image.
+	if ! sysctl -Nq hw.vmm.nested >/dev/null 2>&1; then
+		atf_skip "no hw.vmm.nested node in this kernel -- not a CloudBSD nested-virt build"
+	fi
+
 	# vmm module loaded (require.kmods).
 	# The T2 sysctl gate is observable (must round-trip 0/1).
 	atf_check -s exit:0 -o ignore -e ignore \
@@ -56,6 +65,15 @@ hyperv_oos_id_head()
 
 hyperv_oos_id_body()
 {
+	# Skip where the nested node is absent entirely -- a stock FreeBSD
+	# kernel, for instance. That is a reason not to run, not a regression.
+	# Without this, both cases here FAILED on such a kernel while svm_basic
+	# SKIPPED on the identical condition; found by running the suite inside
+	# an L1 booted from a stock snapshot image.
+	if ! sysctl -Nq hw.vmm.nested >/dev/null 2>&1; then
+		atf_skip "no hw.vmm.nested node in this kernel -- not a CloudBSD nested-virt build"
+	fi
+
 	# The kernel-side default for MSR_HV_GUEST_OS_ID when L1
 	# hasn't set one is MSR_HV_GUEST_OS_ID_WINDOWS (0x8100).  This
 	# is a static build-target check: the test only verifies the
