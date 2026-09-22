@@ -343,7 +343,20 @@ pkg_from_stage() {
 # build their commands from ${INSTALL} and never read INSTALLFLAGS.
 log "nested test harness -> $STAGE/tests (NO_ROOT)"
 TESTS_METALOG="$STAGE/tests/METALOG"
-mkdir -p "$STAGE/tests/usr/tests/sys/vmm/nested"
+
+# Create the destination hierarchy first. install(1) does not create the
+# directory it is writing into, and the SUBDIR walk goes straight to
+# abisnap/ and its siblings, so a bare mkdir of the top level fails with
+#	install: .../usr/tests/sys/vmm/nested/abisnap: No such file or directory
+# Derived from the source tree rather than listed by hand: every directory
+# that has a Makefile gets a matching stage directory, so a subdirectory
+# added later is handled without editing this script -- a hand-maintained
+# list is exactly what goes stale and is the reason the harness was
+# unshippable in the first place.
+( cd "$SRCTOP/tests/sys/vmm/nested" && find . -name Makefile -exec dirname {} \; ) |
+while read -r _d; do
+	mkdir -p "$STAGE/tests/usr/tests/sys/vmm/nested/${_d#./}"
+done
 make -C "$SRCTOP/tests/sys/vmm/nested" install \
 	DESTDIR="$STAGE/tests" \
 	-DNO_ROOT -DWITHOUT_DEBUG_FILES METALOG="$TESTS_METALOG" \
