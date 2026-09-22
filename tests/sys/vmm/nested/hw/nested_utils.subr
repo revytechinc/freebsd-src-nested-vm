@@ -47,6 +47,47 @@ nested_fixture_dir()
 	echo "${NESTED_FIXTURE_DIR:-/usr/tests/sys/vmm/nested/fixtures}"
 }
 
+# nested_require_l2_image skips the calling test unless a bootable L2 guest
+# image is present, and sets ${l2img} to its path when it is.
+#
+# CALL IT DIRECTLY. NOT IN A COMMAND SUBSTITUTION.
+#
+#	nested_require_l2_image		# correct: skip reaches the test
+#	l2img=$(nested_require_l2_image)	# WRONG: skip dies in the subshell
+#
+# It sets a variable instead of echoing precisely so that it cannot be used
+# the second way. The first version did echo the path, every caller wrote
+# `l2img=$(nested_require_l2_image)', and atf_skip then exited only the
+# command-substitution subshell -- so the test continued with l2img empty and
+# ran `bhyve ... -s 4,virtio-blk, ...', failing on "Could not open backing
+# file" instead of skipping. A guard that runs in a subshell cannot stop the
+# thing it guards.
+#
+# WHY THIS EXISTS. Every test under hw/ launched bhyve like this:
+#
+#	bhyve -c 1 -m 256M -s 0,hostbridge -s 1,lpc -l com1,stdio -H -A -P <vm>
+#
+# There is no bootrom and no disk in that command. The guest has nothing to
+# execute, so it triple-faults immediately and bhyve exits 3 -- and the test
+# asserted exit 0. None of them could ever have passed, on any host, with any
+# hypervisor. It went unnoticed because the directories were unreachable from
+# any Kyuafile, so the tests had never been run at all.
+#
+# The image is deliberately NOT shipped in the package: it is a large binary
+# artifact built by scripts/build_l2_image.sh (see README.artifacts.md). So
+# its absence is the normal state, and it is a reason not to run rather than a
+# failure. The skip names the gap so it reads as unfinished work rather than
+# as a hypervisor fault.
+nested_require_l2_image()
+{
+	# Deliberately NOT local: the caller uses ${l2img} after this returns.
+	l2img="${NESTED_L2_IMAGE:-$(nested_fixture_dir)/l2_freebsd.img}"
+
+	if [ ! -f "${l2img}" ]; then
+		atf_skip "no L2 guest image at ${l2img} -- build one with scripts/build_l2_image.sh, or set NESTED_L2_IMAGE"
+	fi
+}
+
 # nested_supported returns success (0) when the host can actually
 # run nested-virt tests: vmm(4) must be loadable and either VMX or
 # SVM must be present in CPUID. Returns 1 otherwise; callers should
@@ -126,7 +167,21 @@ nested_vm_create()
 		echo "nested_vm_create: empty vm name" >&2
 		return 2
 	fi
-	bhyvectl --vm="${vmname}" --create 2>/dev/null || return 1
+
+	# A VM left behind by an earlier run holds its memory allocation, and
+	# creating over it fails. Clear a stale one first so a single leak does
+	# not block every subsequent run -- the top-level nested_utils.subr has
+	# always done this and this copy had drifted away from it.
+	if [ -e "/dev/vmm/${vmname}" ]; then
+		bhyvectl --vm="${vmname}" --destroy >/dev/null 2>&1 || true
+	fi
+
+	# NOT 2>/dev/null. bhyvectl's message is the only thing that says WHY a
+	# create failed, and discarding it is how a caller ends up with an empty
+	# create.log and a failure it cannot explain. Measured: with sixteen
+	# leaked VMs on the host every create failed with "vm_open: ... Cannot
+	# allocate memory", and not one of those words reached the log.
+	bhyvectl --vm="${vmname}" --create || return 1
 	# Set memory; ignore failure (older bhyvectl may not support it).
 	bhyvectl --vm="${vmname}" --memsize="${memsize}" 2>/dev/null || true
 	return 0
@@ -210,5 +265,21 @@ nested_default_vmname()
 	local script="$1"
 	local prefix="${NESTED_VM_PREFIX:-nested}"
 
-	echo "${prefix}-${script}-$$"
+	# NO $$ HERE. It used to end "-$$", and that leaked every VM the hw
+	# tests ever created.
+	#
+	# atf runs a test case's body and its cleanup routine as SEPARATE
+	# PROCESSES. Both call this function to work out which VM to act on, so
+	# with the pid in the name the cleanup computed a name that had never
+	# existed, destroyed nothing, and reported success. Measured on
+	# freedev010: one suite run left sixteen VMs registered in /dev/vmm with
+	# no bhyve process behind any of them, and once they had eaten the
+	# available allocation every later create failed with "Cannot allocate
+	# memory" -- which reads like a host or hypervisor fault and is neither.
+	#
+	# A name derived only from the test case is the same in both processes,
+	# which is the whole requirement. It also means a leaked VM is named
+	# after the test that leaked it, and nested_vm_create clears a stale one
+	# rather than failing behind it.
+	echo "${prefix}-${script}"
 }

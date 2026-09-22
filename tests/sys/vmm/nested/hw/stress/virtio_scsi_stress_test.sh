@@ -52,9 +52,12 @@ virtio_scsi_stress_body()
 	    atf_fail "nested_vm_create ${vmname} failed -- see ${logdir}/create.log"
 	nested_vm_running "${vmname}" ||
 	    atf_fail "${vmname} was created but is not registered in /dev/vmm"
+	# Without a boot device the guest triple-faults and bhyve exits 3.
+	nested_require_l2_image
 	atf_check -s exit:0 -o save:${logdir}/bhyve.log -e ignore \
 	    bhyve -c 1 -m 512M -s 0,hostbridge -s 1,lpc \
 	        -s 2,virtio-scsi,/dev/null \
+	        -s 4,virtio-blk,"${l2img}" \
 	        -l com1,stdio -H -A -P "${vmname}" </dev/null
 	atf_check -s exit:0 -o save:${logdir}/stress.log -e ignore \
 	    sh -c "i=0; while [ \$i -lt ${ITERATIONS} ]; do \
