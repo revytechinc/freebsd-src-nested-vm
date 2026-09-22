@@ -137,7 +137,7 @@ simulate_descriptor()
 	done
 
 	# Read back: bytes 0..7 -> uint64_t LE.  The bytes are
-	# stored as hex strings ("be", not 0xbe); use the 16#be
+	# stored as hex strings ("be", not 0xbe); use a 0x prefix
 	# syntax to convert them to integers so set -u does not
 	# interpret them as variable names.
 	hi_out=0
@@ -146,9 +146,9 @@ simulate_descriptor()
 	while [ "$i" -lt 8 ]; do
 		b=$(sed -n "$((i + 1))p" "${tmpdir}/desc.hex")
 		if [ "$i" -lt 4 ]; then
-			lo_out=$((lo_out | (16#$b << (i * 8))))
+			lo_out=$((lo_out | (0x$b << (i * 8))))
 		else
-			hi_out=$((hi_out | (16#$b << ((i - 4) * 8))))
+			hi_out=$((hi_out | (0x$b << ((i - 4) * 8))))
 		fi
 		i=$((i + 1))
 	done

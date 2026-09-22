@@ -124,13 +124,13 @@ walk_pte_only()
 		printf -- '-1\n'
 		return
 	fi
-	_access=$((16#$_pte & (EPT_PTE_R | EPT_PTE_W | EPT_PTE_X)))
+	_access=$((0x$_pte & (EPT_PTE_R | EPT_PTE_W | EPT_PTE_X)))
 	if [ "$_access" -eq 0 ]; then
 		printf -- '-1\n'
 		return
 	fi
 	# 4KB leaf: AND out bits 11:0 and OR in low 12 of L2 GPA.
-	_addr=$((16#$_pte & EPT_PTE_MASK))
+	_addr=$((0x$_pte & EPT_PTE_MASK))
 	_pageoff=$((_gpa & 0xfff))
 	_result=$((_addr | _pageoff))
 	printf '%x\n' "$_result"
@@ -148,26 +148,26 @@ walk_two_level()
 		printf -- '-1\n'
 		return
 	fi
-	_access=$((16#$_pde & (EPT_PTE_R | EPT_PTE_W | EPT_PTE_X)))
+	_access=$((0x$_pde & (EPT_PTE_R | EPT_PTE_W | EPT_PTE_X)))
 	if [ "$_access" -eq 0 ]; then
 		printf -- '-1\n'
 		return
 	fi
 	# Large bit set -> 2MB leaf, AND out reserved bits.
-	if [ $((16#$_pde & EPT_PTE_LARGE)) -ne 0 ]; then
+	if [ $((0x$_pde & EPT_PTE_LARGE)) -ne 0 ]; then
 		# Reserved bits 20:12 must be zero in a 2MB PDE.
-		if [ $((16#$_pde & RESVD_2MB)) -ne 0 ]; then
+		if [ $((0x$_pde & RESVD_2MB)) -ne 0 ]; then
 			printf -- '-1\n'
 			return
 		fi
-		_addr=$((16#$_pde & EPT_LARGE_2MB_ADDR))
+		_addr=$((0x$_pde & EPT_LARGE_2MB_ADDR))
 		_pageoff=$((_gpa & 0x1fffff))
 		_result=$((_addr | _pageoff))
 		printf '%x\n' "$_result"
 		return
 	fi
 	# Non-leaf PDE: the next-level table address is bits 51:12.
-	_table_addr=$((16#$_pde & EPT_PTE_MASK))
+	_table_addr=$((0x$_pde & EPT_PTE_MASK))
 	# For this CPU-side simulator we collapse to a single page.
 	# The interesting walk happens at the PT level.
 	_pt_index=$(idx_pt "$_gpa")
@@ -176,12 +176,12 @@ walk_two_level()
 		printf -- '-1\n'
 		return
 	fi
-	_access2=$((16#$_pte & (EPT_PTE_R | EPT_PTE_W | EPT_PTE_X)))
+	_access2=$((0x$_pte & (EPT_PTE_R | EPT_PTE_W | EPT_PTE_X)))
 	if [ "$_access2" -eq 0 ]; then
 		printf -- '-1\n'
 		return
 	fi
-	_addr=$((16#$_pte & EPT_PTE_MASK))
+	_addr=$((0x$_pte & EPT_PTE_MASK))
 	_pageoff=$((_gpa & 0xfff))
 	_result=$((_addr | _pageoff))
 	printf '%x\n' "$_result"

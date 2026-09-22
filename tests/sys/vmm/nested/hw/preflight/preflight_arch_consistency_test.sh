@@ -89,7 +89,14 @@ DMESG
 
     if [ "${out1}" != "${out2}" ] || [ "${out2}" != "${out3}" ]; then
         echo "FAIL: nondeterministic output across 3 runs"
-        diff <(printf '%s\n' "${out1}") <(printf '%s\n' "${out2}") | head -40
+        # Temporary files rather than `diff <(...) <(...)'. Process
+        # substitution is a bashism, and this script has no bash shebang --
+        # it is run with sh, where that line is a syntax error at PARSE time.
+        # The whole script therefore failed to load, so the check it performs
+        # had never run once, and the error named only "(" unexpected.
+        printf '%s\n' "${out1}" > "${tmpdir}/run1"
+        printf '%s\n' "${out2}" > "${tmpdir}/run2"
+        diff "${tmpdir}/run1" "${tmpdir}/run2" | head -40
         rm -rf "${tmpdir}"
         exit 1
     fi
