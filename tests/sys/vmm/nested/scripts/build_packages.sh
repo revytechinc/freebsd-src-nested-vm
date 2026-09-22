@@ -49,7 +49,11 @@ CHANNEL=${PKG_CHANNEL:-latest}
 PKG_NAME_PREFIX=${PKG_NAME_PREFIX:-CloudBSD}
 
 log() { printf '%s: %s\n' "$PROGRAM" "$*"; }
-die() { log "FAIL: $*"; exit 1; }
+# Temp files the packaging step is holding open, removed by die() and by the
+# EXIT trap below. A failing build is exactly when these would otherwise
+# accumulate in /tmp, because every die() path skips the rm that follows it.
+_PKGTMP=
+die() { rm -f $_PKGTMP; log "FAIL: $*"; exit 1; }
 
 [ -f "${SRCTOP}/sys/conf/kern.pre.mk" ] || die "SRCTOP not a src tree: $SRCTOP"
 # ROOT IS NOT REQUIRED, and deliberately so. The installs below use NO_ROOT,
@@ -168,8 +172,18 @@ log "libvmmapi + bhyve"
 # first rather than adding to it, so two of them means the earlier file is only
 # cleaned up by the explicit rm on the success path and leaks on every failure
 # between the two.
+#
+# INT and TERM get their own handlers that EXIT, rather than sharing the
+# cleanup handler. A handler that removes the files and returns does NOT stop
+# the script: after the signal, execution resumes at the next command with the
+# temporary files already deleted -- so an interrupt arriving inside
+# pkg_from_stage would delete the manifest and plist it is still using and then
+# carry on into `pkg create` with them gone. Exiting from the handler lets the
+# EXIT trap do the one cleanup.
 _be=""; _be9=""
-trap 'rm -f "$_be" "$_be9"' EXIT INT TERM
+trap 'rm -f "$_be" "$_be9" $_PKGTMP' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 _be=$(mktemp) || { log "ERROR: cannot create a temporary file"; exit 1; }
 # A QUOTED heredoc, and the values arrive through the environment.
 #
@@ -270,8 +284,9 @@ pkg_from_stage() {
 	_root=$3
 	_shlibs=${4:-}
 	_name="${PKG_NAME_PREFIX}-${_pkg}"
-	_man=$(mktemp /tmp/cbsd-manifest.XXXXXX)
-	_plist=$(mktemp /tmp/cbsd-plist.XXXXXX)
+	_man=$(mktemp /tmp/cloudbsd-manifest.XXXXXX)
+	_plist=$(mktemp /tmp/cloudbsd-plist.XXXXXX)
+	_PKGTMP="$_man $_plist"
 	write_manifest "$_pkg" "$_comment" "$_man" "$_shlibs"
 	# The plist carries OWNERSHIP, taken from the METALOG the NO_ROOT
 	# install wrote. A bare `find' lists the staged files, and those are
@@ -315,15 +330,142 @@ pkg_from_stage() {
 		printf '''%s\n''' "$_line"
 	done > "$_plist"
 
+	# DIRECTORIES, after the files -- and bounded to PKG_DIRROOT.
+	#
+	# Without these pkg removes every file and leaves the empty tree: 0
+	# files and 23 directories were left under /usr/tests/sys/vmm/nested on
+	# a host that had neither before the install. A leftover skeleton is
+	# indistinguishable, to anything testing for a directory rather than
+	# its contents, from a real installation.
+	#
+	# TWO THINGS MEASURED ON freedev010, both of which contradict what is
+	# easy to assume:
+	#
+	#  1. pkg does NOT need them in any particular plist order. A plist
+	#     listing the deepest directory first cleaned up just as completely
+	#     as shallowest-first, so pkg is ordering by path itself. They are
+	#     emitted shallowest-first for readability, and nothing depends on
+	#     it. An earlier version of this comment asserted that pkg "unwinds
+	#     @dir entries in reverse plist order"; that was never tested and
+	#     is false.
+	#
+	#  2. @dir APPLIES OWNERSHIP AND MODE ON INSTALL, to directories that
+	#     already exist, and does not put them back on deinstall. A package
+	#     claiming `@dir(root,wheel,0700) usr/tests' changed a host's
+	#     /usr/tests from 0755 to 0700 and LEFT it at 0700 after
+	#     `pkg delete'. That is why PKG_DIRROOT exists: a package may only
+	#     claim directories at or below its own root, never the shared
+	#     ancestors (/usr, /usr/tests, /usr/tests/sys) that belong to the
+	#     system and to other packages. A package with no directories of
+	#     its own -- bhyve, whose files all land in pre-existing system
+	#     directories -- sets no PKG_DIRROOT and claims none.
+	#
+	# The set is derived from the FILES already in the plist, not from the
+	# METALOG. The METALOG cannot be the source here: `install -d -M'
+	# records only the leaf directory it was asked to create, and the stage
+	# hierarchy above is built with a plain `mkdir -p', which writes no
+	# METALOG entry at all. Taking directories from the METALOG would
+	# therefore silently miss exactly the ones this exists to reclaim.
+	# Ownership still comes from the METALOG where it has an entry;
+	# root/wheel/0755 is the fallback, which is what these directories are.
+	#
+	# What this deliberately does NOT reclaim: the ancestors between the
+	# system's directories and PKG_DIRROOT. Measured on a host with no
+	# /usr/tests/sys at all, a full install-then-delete cycle leaves
+	# /usr/tests/sys and /usr/tests/sys/vmm behind -- two empty
+	# directories, down from twenty-three, and both of them paths that
+	# FreeBSD's own test packages own and populate. Claiming them would
+	# mean applying this build's idea of their mode to every host that
+	# installs the package, which is the trade described above and is not
+	# worth two directories.
+	# Required, not defaulted. An unset variable meaning "claim none" is the
+	# same fail-open that produced the 23-directory skeleton: a package that
+	# grows a tree of its own and whose author forgets the assignment would
+	# regress silently and look like a clean build. "none" has to be typed.
+	: "${PKG_DIRROOT?must be set before pkg_from_stage: a path, or none for a package that owns no directories}"
+	if [ "$PKG_DIRROOT" != none ]; then
+		[ -n "$PKG_DIRROOT" ] || die "PKG_DIRROOT is empty for $_name -- use none to mean a package that owns no directories"
+		_dirs=$(mktemp /tmp/cloudbsd-dirs.XXXXXX)
+		_PKGTMP="$_man $_plist $_dirs"
+		awk -v root="${PKG_DIRROOT}" '''
+		FNR == NR {
+			path = $1
+			sub(/^\.\//, "", path)
+			u = ""; g = ""; m = ""; t = ""
+			for (i = 2; i <= NF; i++) {
+				if ($i ~ /^uname=/) { u = substr($i, 7) }
+				else if ($i ~ /^gname=/) { g = substr($i, 7) }
+				else if ($i ~ /^mode=/)  { m = substr($i, 6) }
+				else if ($i ~ /^type=/)  { t = substr($i, 6) }
+			}
+			if (t == "dir" && path != "" && u != "" && g != "" && m != "")
+				own[path] = u "," g "," m
+			next
+		}
+		{
+			# Strip the @(user,group,mode) prefix to recover the path.
+			# Parsed here rather than with a shell ${##} suffix strip,
+			# which a path containing ") " would defeat.
+			p = $0
+			sub(/^@\([^)]*\) /, "", p)
+			n = split(p, part, "/")
+			acc = ""
+			for (i = 1; i < n; i++) {
+				acc = (acc == "" ? part[i] : acc "/" part[i])
+				if (substr(acc "/", 1, length(root) + 1) == root "/")
+					seen[acc] = 1
+			}
+		}
+		END {
+			for (d in seen) {
+				o = (d in own) ? own[d] : "root,wheel,0755"
+				print split(d, _t, "/") "\t" d "\t@dir(" o ") " d
+			}
+		}''' "$_meta" "$_plist" | sort -n -k1,1 > "$_dirs"
+
+		# The package must actually own its root. If PKG_DIRROOT matched
+		# nothing, it is misspelled or the layout moved, and the silent
+		# result would be the leftover skeleton this block exists to
+		# prevent -- so say so instead.
+		# Exact field comparison, not a regex: PKG_DIRROOT went into this
+		# test unescaped, and a future root holding a `.' would match a
+		# different entry -- so the guard would pass while the package did
+		# not own its root -- while a `[' would be a syntax error.
+		awk -F"	" -v r="${PKG_DIRROOT}" '''$2 == r { f = 1 } END { exit !f }''' "$_dirs" || {
+			rm -f "$_dirs"
+			die "PKG_DIRROOT=${PKG_DIRROOT} matched no directory holding a file in $_name -- wrong root, or the stage layout changed"
+		}
+
+		# Every entry here came from a file that exists under $_root, so a
+		# path that is not a directory means a symlinked component or a
+		# stage changing underneath the build -- not a normal condition.
+		# Skipping it silently would make "claimed" and "dropped" produce
+		# identical output, which is how the original defect stayed
+		# invisible for as long as it did.
+		while IFS="	" read -r _depth _p _line; do
+			# -d alone follows symlinks, so a staged link POINTING at a
+			# directory would pass and then be emitted as @dir -- and pkg
+			# would apply the mode and ownership to the link's target.
+			# A real directory is required, not something that resolves
+			# to one.
+			if [ -L "$_root/$_p" ] || [ ! -d "$_root/$_p" ]; then
+				die "$_p is in the plist ancestry for $_name but is not a real directory under $_root"
+			fi
+			printf '''%s\n''' "$_line"
+		done < "$_dirs" >> "$_plist"
+		rm -f "$_dirs"
+	fi
+
 	[ -s "$_plist" ] || die "empty plist for $_name under $_root"
 	# Every line must carry ownership. One that does not would install as
 	# the build user, and would be invisible among thousands that do.
-	if grep -qv '''^@(.*,.*,.*) ''' "$_plist"; then
-		grep -v '''^@(.*,.*,.*) ''' "$_plist" | head -3 >&2
+	if grep -qvE '''^@(dir)?\(.*,.*,.*\) ''' "$_plist"; then
+		grep -vE '''^@(dir)?\(.*,.*,.*\) ''' "$_plist" | head -3 >&2
 		die "plist lines without ownership for $_name (see above)"
 	fi
 	pkg create -M "$_man" -p "$_plist" -r "$_root" -o "$OUTDIR"
 	rm -f "$_man" "$_plist"
+	_PKGTMP=
 	log "created $_name"
 }
 
@@ -362,15 +504,40 @@ make -C "$SRCTOP/tests/sys/vmm/nested" install \
 	-DNO_ROOT -DWITHOUT_DEBUG_FILES METALOG="$TESTS_METALOG" \
 	INSTALL="install -U -M $TESTS_METALOG -D $STAGE/tests"
 
+# PKG_DIRROOT names the one subtree each package may claim directories in.
+# Set on its own line, not as a `PKG_DIRROOT=x pkg_from_stage ...' prefix.
+# Whether an assignment preceding a FUNCTION survives the call is left
+# UNSPECIFIED by POSIX and differs between shells. FreeBSD's /bin/sh scopes
+# it to the call -- measured, the variable reverts afterwards -- so the prefix
+# form would in fact work here. A build script that leans on unspecified
+# behaviour to avoid handing the last value to whatever call is added next is
+# one shell away from claiming the wrong directories.
+# PKG_DIRROOT is REQUIRED before every call: `none' is how a package says it
+# owns no directories, which is correct for one whose files all land in
+# directories the system already owns. Leaving it unset is an error rather than
+# a default, because a silent default is what let the original defect ship --
+# see the @dir note in pkg_from_stage for what claiming a shared directory
+# actually does to a host.
+#
+# /boot/kernel is deliberately NOT claimed for kernel-generic: it is the
+# running system's kernel directory, it exists on every host, and it is shared
+# with the stock FreeBSD kernel packages.
+PKG_DIRROOT=none
 pkg_from_stage kernel-generic \
 	"CloudBSD GENERIC kernel + modules (incl. vmm.ko, zfs.ko)" \
 	"$STAGE/kernel"
 
+# bhyve's files go to /usr/sbin, /usr/lib and /usr/share/man -- all system
+# directories. Nothing here is ours to remove.
+PKG_DIRROOT=none
 pkg_from_stage bhyve \
 	"CloudBSD bhyve + bhyveload + bhyvectl + libvmmapi (nested-virt)" \
 	"$STAGE/bhyve" \
 	"libprivate9p.so.1"
 
+# The harness is the one package that creates a tree of its own, and the only
+# one that left an empty skeleton behind on deinstall.
+PKG_DIRROOT=usr/tests/sys/vmm/nested
 pkg_from_stage nested-tests \
 	"CloudBSD nested-virt test harness (l2_smoke, stress, controls, scripts)" \
 	"$STAGE/tests"
