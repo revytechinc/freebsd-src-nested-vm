@@ -437,8 +437,21 @@ _tried=${_res##*/}
 log "stress result: ${_ok}/${_tried} L2 boots seen"
 [ "$_tried" -eq "$L2_CYCLES" ] ||
     fail "loop attempted ${_tried} cycles, not ${L2_CYCLES} (log: $CONS)"
-[ "$_ok" -eq "$L2_CYCLES" ] ||
-    fail "only ${_ok} of ${L2_CYCLES} L2 guests booted (log: $CONS)"
+if [ "$_ok" -ne "$L2_CYCLES" ]; then
+	# Capture L0's OWN view before failing. The guest-side probe says the
+	# L2 vcpu is frozen; this says what L0 was doing about it. On the runs
+	# so far the tail is a tight repeating pair of SVM IOIO exits (0x7b)
+	# being reflected to L1 at two alternating L1 RIPs, over and over --
+	# reflects are normal traffic, so it is the repetition WITHOUT progress
+	# that is the signal. Recording it automatically rather than relying on
+	# somebody thinking to look at dmesg afterwards, by which time the ring
+	# buffer may have moved on.
+	{
+		echo "--- L0 svm_nested tail at failure ---"
+		dmesg | grep svm_nested | tail -40
+	} >> "$CONS" 2>&1
+	fail "only ${_ok} of ${L2_CYCLES} L2 guests booted (log: $CONS)"
+fi
 
 log "PASS: ${L2_CYCLES} L2 guests executed inside one nested L1"
 exit 0
