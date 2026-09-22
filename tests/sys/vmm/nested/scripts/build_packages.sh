@@ -108,6 +108,31 @@ make -C "$SRCTOP" installkernel KERNCONF="$KERNCONF" DESTDIR="$STAGE/kernel" \
 find "$STAGE/kernel" \( -name '*.debug' -o -name '*.full' -o -name '*.symbols' \) -delete
 rm -rf "$STAGE/kernel/usr/lib/debug" || true
 
+# THE WORLD HAS TO EXIST IN THIS OBJECT TREE.
+#
+# The bhyve tools are built inside `make buildenv', which compiles against the
+# world's staged headers and libraries. This script used to assume they were
+# already there, which was true only because it had always run against a warm
+# /usr/obj that somebody had built a world in by hand. Point it at a fresh
+# object tree -- as the Jenkins job now does, because /usr/obj is not writable
+# by the agent user -- and every file fails with
+#
+#	sys/sys/types.h:43:10: fatal error: 'machine/endian.h' file not found
+#
+# which names a header rather than the missing world and sends you looking in
+# the wrong place. Measured on the first Jenkins run to get this far: the
+# kernel built and installed fine, and then all eight userland objects failed
+# on that line.
+#
+# WITH_META_MODE is on for these builds, so a warm tree makes this close to a
+# no-op; it is the FIRST build in a new object tree that pays.
+if [ "${NESTED_SKIP_BUILDWORLD:-0}" != 1 ]; then
+	log "buildworld (needed by buildenv; cheap on a warm META_MODE tree)"
+	make -C "$SRCTOP" -j"$JOBS" buildworld
+else
+	log "skip buildworld (NESTED_SKIP_BUILDWORLD=1)"
+fi
+
 log "libvmmapi + bhyve"
 # -DWITHOUT_TESTS on the installs: these tools have test directories now, and
 # the bhyve package is not where tests belong -- they ship in the tests
