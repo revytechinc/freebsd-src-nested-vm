@@ -69,15 +69,35 @@ vmx_basic_body()
 	if [ "${delta}" -lt 1 ]; then
 		delta=20
 	fi
+	# NOT /5. The module reported five cases when this was written and
+	# reports twelve now -- measured on freedev005: "vmx_nested_test: 8/12
+	# PASS (0 FAIL, 4 SKIP)". The hardcoded denominator meant the summary
+	# was never found, so the test failed with "produced no N/5 PASS
+	# summary line" on the only host that has the module installed, while
+	# the module itself was working perfectly.
 	summary=$(dmesg | tail -n "${delta}" | \
-	    grep -E '^vmx_nested_test: [0-9]+/5 PASS' | tail -n 1 || true)
+	    grep -E '^vmx_nested_test: [0-9]+/[0-9]+ PASS' | tail -n 1 || true)
 
 	kldunload vmx_nested_test 2>/dev/null || true
 
 	if [ -z "${summary}" ]; then
 		atf_fail "vmx_nested_test.ko produced no N/5 PASS summary line"
 	fi
-	atf_check_not_matches "${summary}" 'FAIL' "vmx_nested_test reported FAIL"
+	# atf_check_not_matches DOES NOT EXIST. It is not an atf-sh function and
+	# was defined nowhere in the tree, so this line was a command-not-found
+	# -- which makes the body return non-zero, which atf reports as a
+	# failure. It had never run, because the grep above never matched.
+	#
+	# Matching the bare word FAIL would have been wrong anyway: the summary
+	# line reads "(0 FAIL, 4 SKIP)", so a clean run contains it. Assert on
+	# the COUNT.
+	case "${summary}" in
+	*"(0 FAIL"*)
+		;;
+	*)
+		atf_fail "vmx_nested_test reported failures: ${summary}"
+		;;
+	esac
 
 	# 2. hw.vmm.nested.vmx must exist and be a boolean.
 	vmx_status=$(sysctl -n hw.vmm.nested.vmx 2>/dev/null) || \
