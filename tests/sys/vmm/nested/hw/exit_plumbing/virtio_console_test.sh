@@ -53,7 +53,7 @@ virtio_console_basic_body()
 	nested_require_l2_image
 	nested_require_bootrom
 	nested_boot_guest "${logdir}/bhyve.log" -c 1 -m 256M -s 0,hostbridge -s 1,lpc \
-	        -s 2,virtio-console -l com1,stdio \
+	        -s 2,virtio-console,port1="${logdir}/vcon.sock" -l com1,stdio \
 	        -l bootrom,"${bootrom}" \
 	        -s 4,virtio-blk,"${l2img}" \
 	        -H -A -P "${vmname}"

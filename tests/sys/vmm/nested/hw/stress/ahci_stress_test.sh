@@ -61,7 +61,7 @@ ahci_stress_body()
 	scratch="${logdir}/scratch.img"
 	truncate -s 64M "${scratch}"
 	nested_boot_guest "${logdir}/bhyve.log" -c 1 -m 512M -s 0,hostbridge -s 1,lpc \
-	        -s 2,ahci,"${scratch}" \
+	        -s 2,ahci,hd:"${scratch}" \
 	        -l bootrom,"${bootrom}" \
 	        -s 4,virtio-blk,"${l2img}" \
 	        -l com1,stdio -H -A -P "${vmname}"
