@@ -124,6 +124,23 @@ if [ "$(sysctl -n hw.vmm.nested.enable 2>/dev/null)" != "1" ]; then
 	    skip "hw.vmm.nested.enable=1 refused (hw.vmm.nested.vmx/svm not 1?)"
 fi
 
+# Prune abandoned work directories before making another one.
+#
+# Each of these holds a COPY OF THE L1 DISK IMAGE, so they are ~1.3G apiece.
+# Measured on a test host: 24 of them, 32G in total, dating from runs whose
+# EXIT trap never fired -- a kyua timeout sends SIGKILL, and a killed shell
+# runs no trap. They are mode 0700 and owned by root, so an unprivileged
+# `rm -rf /tmp/l2smoke.*' reports nothing and removes nothing, which is why
+# nobody noticed.
+#
+# This matters more now that a FAILING run keeps its directory deliberately
+# (see cleanup): at roughly one failed launch in ten, keeping every one of
+# them without pruning would trade a disk leak for a diagnostic. Keep the
+# recent ones, which are the ones anybody would still want to read.
+: "${WORKDIR_KEEP_DAYS:=2}"
+find /tmp -maxdepth 1 -type d -name 'l2smoke.*' \
+    -mtime "+${WORKDIR_KEEP_DAYS}" -exec rm -rf {} + 2>/dev/null || true
+
 WORKDIR=${WORKDIR:-$(mktemp -d /tmp/l2smoke.XXXXXX)}
 mkdir -p "$WORKDIR" || fail "cannot create $WORKDIR"
 VM="l2smoke$$"
@@ -133,11 +150,28 @@ INFIFO="$WORKDIR/console.in"
 
 cleanup()
 {
+	# FIRST statement: $? is the script's exit status only until something
+	# else runs.
+	_rc=$?
+
 	exec 3>&- 2>/dev/null
 	[ -n "${PROGRESS_PID:-}" ] && kill "$PROGRESS_PID" 2>/dev/null
 	[ -n "${BHYVE_PID:-}" ] && kill "$BHYVE_PID" 2>/dev/null
 	bhyvectl --vm="$VM" --destroy >/dev/null 2>&1
-	if [ "$KEEP" = 1 ]; then
+	# A FAILING run keeps its evidence, whatever KEEP says.
+	#
+	# This used to delete the work directory on every exit unless KEEP=1 was
+	# set in advance -- including the failures. So a run would print
+	#
+	#	FAIL: only 19 of 20 L2 guests booted (log: /tmp/l2smoke.XXXX/console.log)
+	#
+	# and then remove that file before anyone could read it. The one message
+	# naming the evidence was also the moment the evidence was destroyed, and
+	# reproducing an intermittent fault to see it again is expensive: this is
+	# a defect that appears roughly one launch in ten.
+	#
+	# KEEP=1 still means "keep even on success".
+	if [ "$KEEP" = 1 ] || [ "$_rc" -ne 0 ]; then
 		log "kept $WORKDIR (console log: $CONS)"
 	else
 		rm -rf "$WORKDIR"
