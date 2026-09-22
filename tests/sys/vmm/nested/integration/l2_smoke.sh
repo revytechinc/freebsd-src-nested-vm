@@ -407,6 +407,12 @@ _w "'grep -q \"Copyright (c) 199\" /tmp/l2c || { echo BHYVE\"ERR\":\$i; cat /tmp
 # looked.
 _w "'if grep -q \"Copyright (c) 199\" /tmp/l2c; then :; else'"
 _w "'echo VMSTAT\"S\":\$i'"
+# Is the console READER still alive? A guest spinning in ns8250_putc is
+# waiting for a UART transmitter that never drains, and a dead cat(1) on the
+# nmdm B side produces exactly that -- in which case the freeze is this
+# harness, not the nested path. Ask before claiming otherwise.
+_w "'echo CATALIV\"E\":\$(ps -p \$(cat /tmp/catpid 2>/dev/null) >/dev/null 2>&1 && echo yes || echo NO)'"
+_w "'echo L2CBYTES:\$(wc -c < /tmp/l2c 2>/dev/null)'"
 _w "'bhyvectl --vm=l2 --get-stats 2>&1 | grep -i \"total number of vm exits\"'"
 _w "'bhyvectl --vm=l2 --cpu=0 --get-rip 2>&1 | head -1'"
 _w "'sleep 3'"
