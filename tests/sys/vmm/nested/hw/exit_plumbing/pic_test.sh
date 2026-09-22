@@ -46,10 +46,10 @@ pic_basic_body()
 	nested_load_vmm || atf_skip "vmm(4) not loadable"
 	vmname=$(nested_default_vmname pic_basic)
 	logdir=$(nested_make_log_dir pic_basic)
-	atf_check -s exit:0 -o save:${logdir}/create.log \
-	    nested_vm_create "${vmname}" 256M
-	atf_check -s exit:0 -o ignore -e ignore \
-	    sh -c "nested_vm_running ${vmname}"
+	nested_vm_create "${vmname}" 256M >"${logdir}/create.log" 2>&1 ||
+	    atf_fail "nested_vm_create ${vmname} failed -- see ${logdir}/create.log"
+	nested_vm_running "${vmname}" ||
+	    atf_fail "${vmname} was created but is not registered in /dev/vmm"
 	atf_check -s exit:0 -o save:${logdir}/bhyve.log -e ignore \
 	    bhyve -c 1 -m 256M -s 0,hostbridge -s 1,lpc \
 	        -l com1,stdio -H -A -P "${vmname}" </dev/null

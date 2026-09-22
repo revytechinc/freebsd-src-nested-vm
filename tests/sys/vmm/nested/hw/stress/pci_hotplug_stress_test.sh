@@ -49,10 +49,10 @@ pci_hotplug_stress_body()
 	nested_load_vmm || atf_skip "vmm(4) not loadable"
 	vmname=$(nested_default_vmname pci_hotplug_stress)
 	logdir=$(nested_make_log_dir pci_hotplug_stress)
-	atf_check -s exit:0 -o save:${logdir}/create.log \
-	    nested_vm_create "${vmname}" 512M
-	atf_check -s exit:0 -o ignore -e ignore \
-	    sh -c "nested_vm_running ${vmname}"
+	nested_vm_create "${vmname}" 512M >"${logdir}/create.log" 2>&1 ||
+	    atf_fail "nested_vm_create ${vmname} failed -- see ${logdir}/create.log"
+	nested_vm_running "${vmname}" ||
+	    atf_fail "${vmname} was created but is not registered in /dev/vmm"
 	atf_check -s exit:0 -o save:${logdir}/stress.log -e ignore \
 	    sh -c "i=0; while [ \$i -lt ${ITERATIONS} ]; do \
 	        bhyvectl --vm=${vmname} --destroy >/dev/null 2>&1 || true; \

@@ -89,6 +89,30 @@ nested_load_vmm()
 	return 1
 }
 
+# EVERYTHING HERE IS A SHELL FUNCTION. CALL IT DIRECTLY.
+#
+# These are functions in the sourcing shell, not programs on PATH, so they
+# cannot be handed to atf_check and they are not visible to `sh -c'. Both
+# spawn a process that never sourced this file:
+#
+#	atf_check ... nested_vm_create "$vm" 256M	-> execvp: No such file
+#	atf_check ... sh -c "nested_vm_running $vm"	-> command not found
+#
+# Every test under hw/ did one of those, and each failed in about twenty
+# milliseconds with exit 127 -- long before it could reach a hypervisor. They
+# were written that way and never run, because the directories holding them
+# were listed under SUBDIR rather than TESTS_SUBDIRS and so were absent from
+# the generated Kyuafile. Twenty-three tests that could never have passed sat
+# in the tree looking like coverage.
+#
+# The shape that works, and what they use now:
+#
+#	nested_vm_create "$vm" 256M >"$logdir/create.log" 2>&1 ||
+#	    atf_fail "nested_vm_create $vm failed -- see $logdir/create.log"
+#
+# atf_check is still right for real commands -- bhyve, bhyvectl, sysctl.
+# It is only wrong for the helpers in this file.
+
 # nested_vm_create creates a bhyve VM with the given name. The
 # optional second argument is a memory size (default 256M). Returns
 # 0 if the VM was created, non-zero if bhyvectl failed.
