@@ -50,11 +50,17 @@ pci_cfg_basic_body()
 	    atf_fail "${vmname} was created but is not registered in /dev/vmm"
 	# Without a boot device the guest triple-faults and bhyve exits 3.
 	nested_require_l2_image
-	atf_check -s exit:0 -o save:${logdir}/bhyve.log -e ignore \
-	    bhyve -c 1 -m 256M -s 0,hostbridge -s 1,lpc \
-	        -s 2,virtio-blk,/dev/null \
+	nested_require_bootrom
+	# bhyve block emulations cannot use /dev/null as a backing store:
+	# "Could not fetch dev blk/sector size: Inappropriate ioctl for
+	# device". A sparse scratch image costs nothing and is real.
+	scratch="${logdir}/scratch.img"
+	truncate -s 64M "${scratch}"
+	nested_boot_guest "${logdir}/bhyve.log" -c 1 -m 256M -s 0,hostbridge -s 1,lpc \
+	        -s 2,virtio-blk,"${scratch}" \
+	        -l bootrom,"${bootrom}" \
 	        -s 4,virtio-blk,"${l2img}" \
-	        -l com1,stdio -H -A -P "${vmname}" </dev/null
+	        -l com1,stdio -H -A -P "${vmname}"
 }
 pci_cfg_basic_cleanup()
 {

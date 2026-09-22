@@ -78,6 +78,91 @@ nested_fixture_dir()
 # its absence is the normal state, and it is a reason not to run rather than a
 # failure. The skip names the gap so it reads as unfinished work rather than
 # as a hypervisor fault.
+# nested_boot_guest <logfile> <bhyve args...>
+#
+# Boots an L2 guest, waits only until it proves it booted, stops it, and fails
+# the test if it never did.
+#
+# WHY A HELPER AND NOT atf_check. These tests used
+#
+#	atf_check -s exit:0 ... bhyve ... -P "${vmname}" </dev/null
+#
+# which is wrong twice. bhyve runs a guest until something stops it, so with a
+# disk and firmware actually attached the guest boots and keeps running, and
+# atf_check waits for a process that is not going to exit -- measured: 300
+# seconds, then "broken: Test case body timed out", per test. And `-s exit:0'
+# is not the right assertion anyway: bhyve exits 0 on reset, 1 on poweroff, 2
+# on halt and 3 on a triple fault, so the status says how the guest STOPPED,
+# not whether it ever ran.
+#
+# What is asserted instead is boot output. Measured on freedev010 against the
+# mfsBSD fixture: the console carries "BdsDxe" from the UEFI firmware and then
+# "FreeBSD 16.0-CURRENT" from the kernel, about 10 KB in all. A triple fault
+# produces none of it, which is the case this has to catch.
+#
+# The wait stops as soon as the banner appears rather than burning the whole
+# timeout, because 21 tests times a fixed wait is the difference between a
+# suite you run and one you do not.
+nested_boot_guest()
+{
+	local log="$1"
+	shift
+	local waited=0
+	local limit="${NESTED_BOOT_TIMEOUT:-90}"
+	local bpid
+
+	: > "${log}"
+	bhyve "$@" > "${log}" 2>&1 </dev/null &
+	bpid=$!
+
+	while [ "${waited}" -lt "${limit}" ]; do
+		if grep -aq 'FreeBSD' "${log}" 2>/dev/null; then
+			break
+		fi
+		kill -0 "${bpid}" 2>/dev/null || break
+		sleep 1
+		waited=$((waited + 1))
+	done
+
+	# bhyve ignores SIGTERM, so ask, wait, then insist. A bare kill here
+	# leaves the guest running and the next test unable to allocate.
+	kill "${bpid}" 2>/dev/null || true
+	local killwait=0
+	while [ "${killwait}" -lt 10 ] && kill -0 "${bpid}" 2>/dev/null; do
+		sleep 1
+		killwait=$((killwait + 1))
+	done
+	if kill -0 "${bpid}" 2>/dev/null; then
+		kill -9 "${bpid}" 2>/dev/null || true
+	fi
+	wait "${bpid}" 2>/dev/null || true
+
+	if ! grep -aq 'FreeBSD' "${log}" 2>/dev/null; then
+		atf_fail "the L2 guest produced no FreeBSD boot banner in ${limit}s -- see ${log}"
+	fi
+}
+
+# nested_require_bootrom skips the calling test unless bhyve's UEFI firmware
+# is installed, and sets ${bootrom} to its path when it is.
+#
+# The L2 image is a GPT/UEFI disk, so a disk alone is not enough: without
+# firmware there is nothing to execute at reset and the guest triple-faults
+# exactly as it did with no disk at all -- bhyve exits 3 either way, which is
+# why attaching the image changed 21 skips into 21 identical failures and no
+# new information.
+#
+# Same calling convention as nested_require_l2_image: call it DIRECTLY, never
+# in a command substitution, or the skip dies in the subshell.
+nested_require_bootrom()
+{
+	# Deliberately not local: the caller uses ${bootrom} after this returns.
+	bootrom="${NESTED_BOOTROM:-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}"
+
+	if [ ! -f "${bootrom}" ]; then
+		atf_skip "no UEFI firmware at ${bootrom} -- pkg install bhyve-firmware, or set NESTED_BOOTROM"
+	fi
+}
+
 nested_require_l2_image()
 {
 	# Deliberately NOT local: the caller uses ${l2img} after this returns.

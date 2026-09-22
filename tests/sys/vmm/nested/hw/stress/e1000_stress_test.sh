@@ -54,11 +54,12 @@ e1000_stress_body()
 	    atf_fail "${vmname} was created but is not registered in /dev/vmm"
 	# Without a boot device the guest triple-faults and bhyve exits 3.
 	nested_require_l2_image
-	atf_check -s exit:0 -o save:${logdir}/bhyve.log -e ignore \
-	    bhyve -c 1 -m 512M -s 0,hostbridge -s 1,lpc \
+	nested_require_bootrom
+	nested_boot_guest "${logdir}/bhyve.log" -c 1 -m 512M -s 0,hostbridge -s 1,lpc \
 	        -s 2,e1000,tap0 \
+	        -l bootrom,"${bootrom}" \
 	        -s 4,virtio-blk,"${l2img}" \
-	        -l com1,stdio -H -A -P "${vmname}" </dev/null
+	        -l com1,stdio -H -A -P "${vmname}"
 	atf_check -s exit:0 -o save:${logdir}/stress.log -e ignore \
 	    sh -c "i=0; while [ \$i -lt ${ITERATIONS} ]; do \
 	        ping -c 1 -W 1 127.0.0.1 >/dev/null 2>&1 || true; \
