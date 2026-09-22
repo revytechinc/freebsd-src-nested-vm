@@ -111,6 +111,28 @@ nested_boot_guest()
 	local limit="${NESTED_BOOT_TIMEOUT:-90}"
 	local bpid
 
+	# SAY WHICH LEVEL THIS ACTUALLY EXERCISES.
+	#
+	# These tests are named "... under nested virt" and their headers talk
+	# about L1 device models and L2 firmware, but the command below is a
+	# plain bhyve run on whatever host executes the suite. Nothing here
+	# nests: no test under hw/ calls nested_supported, reads
+	# hw.vmm.nested.*, or starts a hypervisor inside a guest.
+	#
+	# So the level is decided entirely by WHERE THE SUITE RUNS. Inside an
+	# L1 guest the VM below is an L2 and the name is accurate. On bare
+	# metal it is an L1 and the test exercises bhyve's device model at the
+	# first level only -- useful, but not nested, and the result looked
+	# identical either way. Print it so a passing run says which it was.
+	case "$(sysctl -n kern.vm_guest 2>/dev/null)" in
+	none|"")
+		echo "nested_boot_guest: host is BARE METAL -- the guest below is an L1, this run does NOT exercise nesting"
+		;;
+	*)
+		echo "nested_boot_guest: host is itself a guest ($(sysctl -n kern.vm_guest 2>/dev/null)) -- the guest below is an L2, nesting IS exercised"
+		;;
+	esac
+
 	: > "${log}"
 	bhyve "$@" > "${log}" 2>&1 </dev/null &
 	bpid=$!
