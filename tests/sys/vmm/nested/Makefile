@@ -97,6 +97,18 @@ TEST_METADATA.deployment_safety+=	is_exclusive="true"
 # Only directories that declare tests belong here. The rest install shell
 # drivers as FILES and are run by hand; putting them in TESTS_SUBDIRS would
 # generate an include for a Kyuafile that declares nothing.
+#
+# AND CHECK THE PACKAGE BEFORE ADDING ONE. The parent directory
+# (tests/sys/vmm/Makefile) deliberately keeps `nested' under plain SUBDIR for
+# exactly this reason: its Kyuafile ships in the `tests' package while
+# everything here ships in `nested-tests', and kyua ABORTS on an include
+# naming a Kyuafile that is not present -- so that one line would break the
+# whole base test suite on any host that installed tests without nested-tests.
+#
+# The includes generated here are safe because abisnap, fuzz, hw and hw's own
+# two test subdirectories all set PACKAGE=nested-tests, the same package as
+# this Kyuafile. They are installed together or not at all, so the include can
+# never dangle. Anything added to this list must be checked the same way.
 TESTS_SUBDIRS+=	abisnap
 TESTS_SUBDIRS+=	fuzz
 TESTS_SUBDIRS+=	hw
