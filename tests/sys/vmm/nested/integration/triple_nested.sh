@@ -61,6 +61,19 @@ T47 triple-nested sub-tests:
 CASES
 }
 
+
+# WHAT THIS FILE DOES, PLAINLY: it enumerates a plan. It does not launch a
+# guest, and it never did -- there is no bhyve invocation anywhere in it.
+#
+# It used to end by echoing "PASS: ... enumerated ...". The word "enumerated"
+# was honest; reporting it as PASS was not. A plan that prints itself cannot
+# fail, so this reported success on every host, on every build, including ones
+# where nested virtualization was completely broken -- and it was counted as
+# nested coverage the fleet did not have.
+#
+# It exits 77 (SKIP) until the driver exists. A skip is a gap you can see; a
+# PASS is a gap that looks like coverage.
+
 tn_main()
 {
 	if tn_unsupported; then
@@ -68,7 +81,11 @@ tn_main()
 	fi
 	echo "T47 triple_nested: L0 -> L1 -> L2 -> L3"
 	tn_subtests
-	echo "PASS: triple_nested enumerated 6 sub-tests with explicit not-supported list"
+	echo "SKIP: plan only -- 6 sub-tests enumerated, none executed."
+	echo "SKIP: the only bhyve mentions in this file are in a comment."
+	echo "SKIP: note also that the design it describes uses bhyve -N,"
+	echo "SKIP: which the bhyve built from this tree does not accept."
+	exit 77
 }
 
 tn_main "$@"

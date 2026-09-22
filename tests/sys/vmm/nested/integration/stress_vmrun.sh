@@ -71,6 +71,19 @@ VMRUN/VMRESUME stress plan:
 PLAN
 }
 
+
+# WHAT THIS FILE DOES, PLAINLY: it enumerates a plan. It does not launch a
+# guest, and it never did -- there is no bhyve invocation anywhere in it.
+#
+# It used to end by echoing "PASS: ... enumerated ...". The word "enumerated"
+# was honest; reporting it as PASS was not. A plan that prints itself cannot
+# fail, so this reported success on every host, on every build, including ones
+# where nested virtualization was completely broken -- and it was counted as
+# nested coverage the fleet did not have.
+#
+# It exits 77 (SKIP) until the driver exists. A skip is a gap you can see; a
+# PASS is a gap that looks like coverage.
+
 stress_main()
 {
 	if stress_unsupported; then
@@ -78,7 +91,10 @@ stress_main()
 	fi
 	echo "T43 stress_vmrun: VMRUN/VMRESUME stress"
 	stress_plan "${CYCLES}"
-	echo "PASS: ${CYCLES} cycles enumerated; on-target driver runs and verifies no leaks"
+	echo "SKIP: plan only -- ${CYCLES} cycles enumerated, none run."
+	echo "SKIP: this file contains no bhyve invocation; nothing here"
+	echo "SKIP: verifies a leak, because nothing here creates a VM."
+	exit 77
 }
 
 stress_main "$@"
