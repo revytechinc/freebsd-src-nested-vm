@@ -327,6 +327,28 @@ pkg_from_stage() {
 	log "created $_name"
 }
 
+# THE TEST HARNESS, which nothing here was building.
+#
+# check_nested_tests_package.sh -- run by the Gates stage on every build, not
+# only media builds -- requires a <prefix>-nested-tests-<version>.pkg and says
+# why when it is missing: "the harness has nowhere to be installed from, the
+# published route is an overlay and cannot take the base test suite". So a
+# BUILD_MEDIA=false run failed that gate by construction, and every fix that
+# makes the harness INSTALLABLE (its Makefile listings) was unreachable
+# because the package carrying it was never created. Verified against a real
+# package-only build: the gate exits 1.
+#
+# Installed with the same NO_ROOT machinery as the bhyve stage: INSTALL
+# overridden rather than INSTALLFLAGS, because bsd.man.mk and bsd.files.mk
+# build their commands from ${INSTALL} and never read INSTALLFLAGS.
+log "nested test harness -> $STAGE/tests (NO_ROOT)"
+TESTS_METALOG="$STAGE/tests/METALOG"
+mkdir -p "$STAGE/tests/usr/tests/sys/vmm/nested"
+make -C "$SRCTOP/tests/sys/vmm/nested" install \
+	DESTDIR="$STAGE/tests" \
+	-DNO_ROOT -DWITHOUT_DEBUG_FILES METALOG="$TESTS_METALOG" \
+	INSTALL="install -U -M $TESTS_METALOG -D $STAGE/tests"
+
 pkg_from_stage kernel-generic \
 	"CloudBSD GENERIC kernel + modules (incl. vmm.ko, zfs.ko)" \
 	"$STAGE/kernel"
@@ -335,6 +357,10 @@ pkg_from_stage bhyve \
 	"CloudBSD bhyve + bhyveload + bhyvectl + libvmmapi (nested-virt)" \
 	"$STAGE/bhyve" \
 	"libprivate9p.so.1"
+
+pkg_from_stage nested-tests \
+	"CloudBSD nested-virt test harness (l2_smoke, stress, controls, scripts)" \
+	"$STAGE/tests"
 
 # Generate the pkg(8) repository catalog (meta.conf + packagesite + data) in the
 # version directory so clients can `pkg update` / `pkg install` from this repo.
