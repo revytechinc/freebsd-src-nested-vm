@@ -20,6 +20,7 @@ LIBADD+=	vmmapi
 # scripts/run_l2_smoke.sh ships and invokes l2_smoke.sh, so the wrapper was
 # installed without the thing it wraps.
 ${PACKAGE}FILES+=	bhyve_in_bhyve.sh
+${PACKAGE}FILES+=	l0_control.sh
 ${PACKAGE}FILES+=	l2_smoke.sh
 ${PACKAGE}FILES+=	smp_l1.sh
 ${PACKAGE}FILES+=	stress_vmrun.sh
