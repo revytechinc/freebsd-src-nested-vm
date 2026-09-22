@@ -400,6 +400,20 @@ _w "'echo STEP=checked:\$ok'"
 # On a miss, show what bhyve said. Silence here is what turned a real abort
 # into an unexplained cycle for two whole soaks.
 _w "'grep -q \"Copyright (c) 199\" /tmp/l2c || { echo BHYVE\"ERR\":\$i; cat /tmp/l2err.\${i} 2>/dev/null | tail -5; }'"
+# On a miss, ASK WHETHER THE GUEST IS EXECUTING rather than guessing. An exit
+# count above zero means the vcpu has been entered and the console is the
+# broken part; a count of zero means it never ran at all. Those are different
+# bugs, and three soaks have been unable to tell them apart because nothing
+# looked.
+_w "'if grep -q \"Copyright (c) 199\" /tmp/l2c; then :; else'"
+_w "'echo VMSTAT\"S\":\$i'"
+_w "'bhyvectl --vm=l2 --get-stats 2>&1 | grep -i \"total number of vm exits\"'"
+_w "'bhyvectl --vm=l2 --cpu=0 --get-rip 2>&1 | head -1'"
+_w "'sleep 3'"
+_w "'echo RIPAGAI\"N\"'"
+_w "'bhyvectl --vm=l2 --cpu=0 --get-rip 2>&1 | head -1'"
+_w "'bhyvectl --vm=l2 --get-stats 2>&1 | grep -i \"total number of vm exits\"'"
+_w "'fi'"
 _w "'kill -9 \$p >/dev/null 2>&1'"
 _w "'kill -9 \$(cat /tmp/catpid) >/dev/null 2>&1'"
 _w "'i=\$((i+1))'"
