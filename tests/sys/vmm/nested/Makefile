@@ -77,11 +77,32 @@ TEST_METADATA.deployment_safety+=	is_exclusive="true"
 # harness has to be copied onto each host by hand -- and a host whose boot
 # environment reverts silently takes an old harness with it, which then fails a
 # perfectly good kernel. Ship the tests with the build they test.
-SUBDIR+=	abisnap
+# TESTS_SUBDIRS, not SUBDIR, for any directory that REGISTERS TESTS.
+#
+# The two are not interchangeable and the difference is invisible until you
+# count what ran. bsd.test.mk adds every TESTS_SUBDIRS entry to SUBDIR, so the
+# build and install behaviour is identical -- but only TESTS_SUBDIRS entries
+# get an `include("<dir>/Kyuafile")' line in the generated Kyuafile. A test
+# directory listed under plain SUBDIR is therefore built, installed, and
+# registered in its OWN Kyuafile, and then never reached, because nothing
+# includes it.
+#
+# Measured on an installed package before this change: 32 test programs were
+# declared across the tree's Kyuafiles and `kyua test` at the top level ran 8
+# cases from 5 programs. The other 27 programs -- 14 in hw/exit_plumbing
+# (lapic, ioapic, pit, rtc, uart, msi, pci_cfg ...) and 10 in hw/stress (ahci,
+# nvme, xhci, e1000, hda, dma nested paging ...) -- never executed. The run
+# reported "5/8 passed" and looked like a green suite.
+#
+# Only directories that declare tests belong here. The rest install shell
+# drivers as FILES and are run by hand; putting them in TESTS_SUBDIRS would
+# generate an include for a Kyuafile that declares nothing.
+TESTS_SUBDIRS+=	abisnap
+TESTS_SUBDIRS+=	fuzz
+TESTS_SUBDIRS+=	hw
+
 SUBDIR+=	demo
 SUBDIR+=	features
-SUBDIR+=	fuzz
-SUBDIR+=	hw
 SUBDIR+=	integration
 SUBDIR+=	io
 SUBDIR+=	negative
