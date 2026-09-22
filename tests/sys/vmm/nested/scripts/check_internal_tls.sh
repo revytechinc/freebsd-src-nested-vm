@@ -61,7 +61,30 @@ log() { printf '%s: %s\n' "$PROGRAM" "$*"; }
 # Refuse a chain file where a root was asked for. Passing the chain makes every
 # check below succeed regardless of what the server sends, which is precisely
 # the way the original defect hid.
-_n=$(grep -c 'BEGIN CERTIFICATE' "$ROOT" 2>/dev/null || echo 0)
+# A missing file and a file with no certificates are different findings, and
+# neither may be allowed to reach the arithmetic test below as a non-number.
+if [ ! -r "$ROOT" ]; then
+	log "FAIL: $ROOT cannot be read, so the root this check depends on is absent."
+	exit 2
+fi
+
+# The fallback is OUTSIDE the command substitution, deliberately.
+#
+# `grep -c' prints 0 AND exits 1 when it matches nothing, so the older form
+#
+#	_n=$(grep -c ... 2>/dev/null || echo 0)
+#
+# captured BOTH -- _n became the two-line string "0\n0". The arithmetic test
+# below then failed with "illegal number" and returned 2, so the `if' did not
+# take its branch and execution CONTINUED as though the check had passed.
+# Measured: with _n="0\n0" the guard is skipped; with _n=0 it fires.
+#
+# That is the same false pass the comment above this block was written to
+# prevent, arrived at through the guard's own error path.
+_n=$(grep -c 'BEGIN CERTIFICATE' "$ROOT" 2>/dev/null) || _n=0
+case "$_n" in
+''|*[!0-9]*) _n=0 ;;
+esac
 if [ "$_n" -ne 1 ]; then
 	log "FAIL: $ROOT holds $_n certificates; this must be the ROOT ALONE."
 	log "  A chain file would supply the intermediate the server is supposed to"
