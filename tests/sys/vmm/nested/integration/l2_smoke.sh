@@ -357,10 +357,18 @@ _w "': > /tmp/l2c'"
 # banner: cycle 8 of a 10-cycle run missed for exactly that reason while
 # every other cycle passed. Opening the B side first also creates the
 # nmdm pair, so the A side is there when bhyve wants it.
-_w "'( cat /dev/nmdm_l2B > /tmp/l2c 2>/dev/null & echo \$! > /tmp/catpid )'"
+_w "'( cat /dev/nmdm_l2\${i}B > /tmp/l2c 2>/dev/null & echo \$! > /tmp/catpid )'"
 _w "'sleep 1'"
 _w "'bhyveload -m 512M -h / -e console=comconsole -e autoboot_delay=0 l2 >/tmp/l2load 2>&1'"
 _w "'echo STEP=loadrc:\$?'"
+# A FRESH nmdm pair per cycle -- nmdm_l2${i}, not a single nmdm_l2. Reusing
+# one pair across cycles leaves a race: kill -9 on bhyve can leave the A side
+# held for a moment, so the next cycle's guest attaches its console to nothing
+# and its banner is never seen. That produced 44/50 on a soak whose failures
+# fell on cycles 9, 13, 15, 27, 31 and 32 -- scattered, with the LAST ten
+# clean, which is the shape of a race and rules out the resource leak this
+# loop is looking for. A leak degrades monotonically.
+#
 # com1 on an nmdm(4) pair, NOT on stdio redirected into a file. bhyve's
 # stdout is block-buffered when it is not a tty, so the L2 banner sits in
 # bhyve's own 4K buffer and may never reach the file while the guest is
@@ -369,7 +377,13 @@ _w "'echo STEP=loadrc:\$?'"
 # failures fell on scattered cycles. nmdm is a tty, so `cat' of the B side
 # delivers each line as it arrives. This is the trap nested-regression-matrix
 # already warns about under "nmdm console rules".
-_w "'bhyve -c 1 -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,/dev/nmdm_l2A l2 >/dev/null 2>&1 &'"
+# bhyve's OWN stderr is kept, not sent to /dev/null. It aborts on a small
+# fraction of nested launches -- "pid N (bhyve) exited on signal 6" -- and
+# signal 6 is abort(), which this loop's kill -9 cannot produce. The first
+# two soaks recorded the abort and NOT the reason, because stderr had been
+# discarded: the evidence that would name the assertion was thrown away by
+# the harness watching for it.
+_w "'bhyve -c 1 -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,/dev/nmdm_l2\${i}A l2 >/tmp/l2err.\${i} 2>&1 &'"
 _w "'p=\$!'"
 _w "'echo STEP=started:\$p'"
 # POLL, do not sleep a fixed time. A flat `sleep 15' makes the test ask
@@ -383,6 +397,9 @@ _w "'n=0'"
 _w "'while [ \$n -lt 60 ]; do grep -q \"Copyright (c) 199\" /tmp/l2c && break; sleep 1; n=\$((n+1)); done'"
 _w "'grep -q \"Copyright (c) 199\" /tmp/l2c && ok=\$((ok+1))'"
 _w "'echo STEP=checked:\$ok'"
+# On a miss, show what bhyve said. Silence here is what turned a real abort
+# into an unexplained cycle for two whole soaks.
+_w "'grep -q \"Copyright (c) 199\" /tmp/l2c || { echo BHYVE\"ERR\":\$i; cat /tmp/l2err.\${i} 2>/dev/null | tail -5; }'"
 _w "'kill -9 \$p >/dev/null 2>&1'"
 _w "'kill -9 \$(cat /tmp/catpid) >/dev/null 2>&1'"
 _w "'i=\$((i+1))'"
