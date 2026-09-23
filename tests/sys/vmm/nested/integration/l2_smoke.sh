@@ -641,8 +641,20 @@ _w "'echo CYCLES\"RESULT\"=\$ok/\$i'"
 mark=$(wc -l < "$CONS")
 send 'sh /tmp/stress.sh'
 wait_for 'CYCLESRESULT=' $((L2_CYCLES * 80 + 120)) "$mark" || {
-	_last=$(tail -n +"$((mark + 1))" "$CONS" | grep -o 'STEP=[a-z]*:[0-9-]*' | tail -1)
-	fail "the stress loop stopped after ${_last:-no step at all} (log: $CONS)"
+	_tail=$(tail -n +"$((mark + 1))" "$CONS")
+	_last=$(printf '%s\n' "$_tail" | grep -o 'STEP=[a-z]*:[0-9-]*' | tail -1)
+	# Report the PARTIAL result, not just where it stopped. The markers
+	# already carry it: one STEP=checked: per finished cycle, whose value is
+	# the running count of successes. Without this an aborted run yields no
+	# numbers at all, and a caller then either drops it -- losing real
+	# launches -- or, worse, scores it 0-of-N and invents a failure rate.
+	# A wedged run here that had completed six cycles successfully was
+	# tallied by one such caller as 0/50, reporting 57% for a host measuring
+	# nearer 10%.
+	_done=$(printf '%s\n' "$_tail" | grep -c 'STEP=checked:')
+	_boots=$(printf '%s\n' "$_tail" | grep -o 'STEP=checked:[0-9]*' | tail -1)
+	_boots=${_boots#STEP=checked:}
+	fail "the stress loop stopped after ${_last:-no step at all} -- completed ${_done} of ${L2_CYCLES} cycles, ${_boots:-0} L2 boots seen. This is a PARTIAL result: it is not ${L2_CYCLES} attempts, so do not score it as one (log: $CONS)"
 }
 
 _res=$(tail -n +"$((mark + 1))" "$CONS" | grep -o 'CYCLESRESULT=[0-9]*/[0-9]*' | tail -1)
