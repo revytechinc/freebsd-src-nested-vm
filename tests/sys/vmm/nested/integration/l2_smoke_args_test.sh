@@ -134,6 +134,43 @@ expect "L2_CPUS>L1_CPUS rejected"    1 "exceeds L1_CPUS" L2_CPUS=8 L1_CPUS=2
 # A malformed L1_CPUS must say so, not blame L2_CPUS for exceeding it.
 expect "L1_CPUS=abc rejected"        1 "L1_CPUS must be a positive integer" L1_CPUS=abc
 
+# Memory sizes. These are spliced into a command line typed into L1, so a
+# malformed value becomes a malformed bhyve invocation INSIDE the guest, where
+# the failure is indistinguishable from a failed L2 boot and gets tallied as
+# one. A rejection here is the difference between "you typed it wrong" and a
+# contaminated measurement.
+expect "L2_MEM=512 rejected (no unit)" 1 "L2_MEM must be a size" L2_MEM=512
+expect "L2_MEM=big rejected"           1 "L2_MEM must be a size" L2_MEM=big
+# The case that killed the first version of this check. `[1-9]*[MmGg]' looks
+# like it validates a size and accepts this: [1-9] takes the 5, * takes the X2,
+# [MmGg] takes the M. The value then reached shell arithmetic and died there,
+# inside a run that had already been accepted.
+expect "L2_MEM=5X2M rejected"          1 "L2_MEM must be a size" L2_MEM=5X2M
+# Arithmetic smuggled through the size field. `2*1G' passes a first/last
+# character check, evaluates to a plausible 2G in the fit test, and is then
+# typed into L1 as `bhyveload -m 2*1G'.
+expect "L2_MEM=2*1G rejected"          1 "L2_MEM must be a size" "L2_MEM=2*1G"
+# A digit string long enough to wrap the shell's signed 64-bit arithmetic
+# NEGATIVE, which would then pass the "fits inside L1" comparison.
+expect "L2_MEM=99999999999999999999G rejected" 1 "L2_MEM must be a size" L2_MEM=99999999999999999999G
+expect "L2_MEM=0M rejected"            1 "L2_MEM must be a size" L2_MEM=0M
+# Leading zeros are OCTAL to both $(( )) and bhyve's expand_number(3).
+# "0512M" is 330M, not 512M -- a run that silently measures a guest nobody
+# asked for. "08M" is not valid octal at all and blows up mid-comparison,
+# producing a "does not fit inside L1_MEM" misdiagnosis.
+expect "L2_MEM=0512M rejected"         1 "L2_MEM must be a size" L2_MEM=0512M
+expect "L2_MEM=08M rejected"           1 "L2_MEM must be a size" L2_MEM=08M
+expect "L2_MEM='1 2M' rejected"        1 "L2_MEM must be a size" "L2_MEM=1 2M"
+expect "L1_MEM=nonsense rejected"      1 "L1_MEM must be a size" L1_MEM=nonsense
+# An L2 that cannot fit inside L1 fails at bhyve startup in the guest and is
+# counted as a nesting failure -- the same contamination, one level up.
+expect "L2_MEM>L1_MEM rejected"        1 "does not fit inside" L2_MEM=8G L1_MEM=4G
+# Equal is refused too: L1 must keep something for itself.
+expect "L2_MEM==L1_MEM rejected"       1 "does not fit inside" L2_MEM=4G L1_MEM=4G
+# Compared in BYTES, not as strings: 1024M and 1G are the same size, and a
+# string comparison would call one of these pairs wrong.
+expect "L2_MEM=1024M vs L1_MEM=1G"     1 "does not fit inside" L2_MEM=1024M L1_MEM=1G
+
 # --- accepted values -------------------------------------------------------
 # These must get PAST validation. With L1_IMAGE unset the run then SKIPs (77)
 # at the prerequisite checks -- which is the proof that validation let it
@@ -161,6 +198,26 @@ expect "SVM_DEBUG_STRICT=0 accepted" 77 "" SVM_DEBUG_STRICT=0
 expect "SVM_DEBUG_STRICT=1 accepted" 77 "" SVM_DEBUG_STRICT=1
 expect "L2_CPUS=1 accepted"          77 "" L2_CPUS=1
 expect "L2_CPUS=4 with L1_CPUS=4"    77 "" L2_CPUS=4 L1_CPUS=4
+expect "L2_MEM=1G inside L1_MEM=4G"  77 "" L2_MEM=1G L1_MEM=4G
+expect "L2_MEM=512M accepted"        77 "" L2_MEM=512M
+# Lower case units are a real thing people type.
+expect "L2_MEM=512m accepted"        77 "" L2_MEM=512m
+# The harness is NARROWER than bhyve on purpose: bhyve takes a bare `-m 4096'
+# as megabytes and accepts K/T, this refuses them. A bare number is the
+# ambiguity that makes 0512M an octal trap, and these values end up in logs a
+# reader interprets later. Asserted so the narrowing stays deliberate -- if
+# someone widens _size_ok, this case goes red and they have to mean it.
+expect "L2_MEM=4096 rejected (no unit)" 1 "explicit M or G" L2_MEM=4096
+expect "L2_MEM=1T rejected"          1 "explicit M or G" L2_MEM=1T
+# EMPTY is accepted and means "use the default", because the script assigns
+# with `: "${L2_MEM:=512M}"` and `:=` substitutes when unset OR empty. This
+# case is here because the first draft of it asserted the opposite and the
+# test caught it -- the same mistake this file already records for SVM_DEBUG,
+# made again. Kept so that switching to `:-` or `=` cannot change the
+# behaviour silently.
+expect "L2_MEM empty accepted"       77 "" L2_MEM=
+# 512M really is less than 1G once compared in bytes; as strings it is not.
+expect "L2_MEM=512M inside L1_MEM=1G" 77 "" L2_MEM=512M L1_MEM=1G
 
 # --- result ----------------------------------------------------------------
 _p=$(wc -l < "$WORK/pass" | tr -d ' ')

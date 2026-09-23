@@ -76,6 +76,28 @@ set -u
 # L1 itself was given, and a run that quietly tested 2 when asked for 8 is a
 # measurement about a guest nobody requested.
 : "${L2_CPUS:=1}"
+# Memory for the L2 guest. Was hard-coded to 512M in four places -- the
+# bhyveload and the bhyve of each of the two paths -- and bhyveload must get
+# the same size as bhyve, or the loader lays the guest out for a different
+# machine than the one it then runs on.
+#
+# Parameterised to test one hypothesis, and it has now been run: every captured
+# nested-page-fault abort reported the SAME faulting GPA, 0x3ffff000, which is
+# 1GB minus a page, in a guest that owns 512M.
+#
+# Result of four alternating 50-cycle runs, all with L1_MEM=4G and L1_CPUS=2
+# (512M: 46,50 -- 1G: 30,43): at 1G
+# the abort signature -- 0x3ffff000, an all-ones RIP, a bhyve SIGABRT and an
+# instruction-emulation failure -- is absent from ALL 27 failures, while at
+# 512M it is present. The other failure shape, in which bhyve stays alive and
+# the guest freezes at or near btext, occurs in both arms. So the two shapes
+# are two distinct bugs, not one event seen twice.
+#
+# The failure RATE difference between the arms is NOT established: the spread
+# within the 1G arm (30 vs 43) exceeds the gap the comparison would rest on,
+# and this measurement is roughly threefold overdispersed. Keep this knob for
+# reproducing the split, not for quoting a rate.
+: "${L2_MEM:=512M}"
 # hw.vmm.nested.svm_debug to run L0 with. Applied once L1 has booted, and
 # deliberately NOT restored on exit -- the host is left in whichever arm ran
 # last, so set it explicitly rather than inheriting it.
@@ -108,6 +130,150 @@ progress()
 		timeout 3 bhyvectl --vm="$VM" --get-stats 2>/dev/null | grep -E 'total number of vm exits|wrmsr|rdmsr|cpuid|nested page fault' | tr -s ' \t' ' '
 	} >> "$PROGRESS" 2>&1
 	sync
+}
+# Snapshot L0's accumulated nested counters. Two sysctl reads, taken either
+# side of the stress loop, so every run's log carries the host state it ran
+# against.
+#
+# This exists because the run-to-run failure rate on this defect is
+# OVERDISPERSED -- six identical 50-cycle runs gave 0 to 24%, about 3.4x the
+# spread independent sampling allows (p about 0.004). Something differs
+# between runs and nothing identifies what. Accumulated nested state is the
+# obvious candidate and is free to read, so record it rather than guess later:
+# a campaign can then correlate a bad run against the counters instead of
+# theorising. Retrofitting it is impossible, which is the whole point.
+# Both vendors' counters: svm_l2inj is SVM-side and reads all zeros on a VMX
+# host, l2stats is the VMX-side equivalent. Emitting only the first made this
+# useless on Intel, which is half the fleet -- and an all-zero line looks like
+# "nothing happened" rather than "wrong counter for this CPU".
+#
+# Four states are kept APART rather than collapsed into one label. Discarding
+# stderr and printing "<absent on this kernel>" for every empty read asserts a
+# specific cause for four different ones -- a missing oid, a permission error,
+# no sysctl(8) at all, and an oid that exists but printed nothing -- and a
+# campaign correlating against these lines could not tell "this host has no
+# counter" from "this harness could not read it". That is the same shape as a
+# check that cannot fail: an answer-looking string covering a non-answer.
+nested_counters()
+{
+	for _oid in svm_l2inj l2stats; do
+		# stderr goes to its own file, NOT merged into $_v. Merging
+		# on the success path folds any warning sysctl(8) prints into
+		# the recorded counter value, so a campaign correlating these
+		# lines would be parsing a warning as data.
+		_e=0
+		# Per-oid path, and truncated before each use. One shared
+		# file, left behind by an earlier read, is a trap on the very
+		# error path this function exists to keep honest: if the
+		# redirect fails THIS time but the stale file is still
+		# readable, the failure branch reports the PREVIOUS oid's
+		# error under the current one's name.
+		_err=$WORKDIR/.sysctl.${_oid}.err
+		# If the scratch file cannot be truncated, fall back to
+		# DISCARDING stderr -- never to a path outside WORKDIR.
+		# Redirecting to /nonexistent was tried and is worse in both
+		# directions: as root with a writable / the shell CREATES
+		# that file and the harness litters the host root, and with /
+		# unwritable the redirect fails before sysctl runs, losing a
+		# counter value the read would have returned perfectly well.
+		# Losing the reading to protect the error text inverts this
+		# function's whole purpose.
+		_errok=1
+		if : > "$_err" 2>/dev/null; then
+			_v=$(sysctl -n "hw.vmm.nested.${_oid}" 2>"$_err") || _e=$?
+		else
+			_errok=0
+			_v=$(sysctl -n "hw.vmm.nested.${_oid}" 2>/dev/null) || _e=$?
+		fi
+		_v=$(printf '%s' "$_v" | tr '\n' ' ' | tr -s ' ')
+		if [ "$_e" -ne 0 ]; then
+			# The stderr file may not exist: if the redirect
+			# itself failed -- unwritable or full scratch -- then
+			# reading it here prints its own error and yields an
+			# empty string, and the line below becomes
+			# "<unreadable: >", which names nothing. This function
+			# exists to name the observation, so name this one
+			# too rather than emitting an empty accusation.
+			# Keep the STATUS as well as the text. Exit 1, 2 and
+			# 127 are different failures -- a refusal, a usage
+			# error, and sysctl(8) not being there at all -- and
+			# without the number they are told apart only by
+			# whatever stderr happened to say, which may be
+			# nothing.
+			if [ "$_errok" = 1 ] && [ -r "$_err" ]; then
+				_v=$(tr '\n' ' ' < "$_err" | tr -s ' ')
+			else
+				_v="stderr not captured (WORKDIR unwritable)"
+			fi
+			[ -n "$_v" ] || _v="no message"
+			_v="rc=$_e: $_v"
+			# ONLY the unknown-oid form is treated as absent, and
+			# even then the label does NOT claim to know why. An
+			# unloaded vmm.ko makes every hw.vmm.* oid unknown
+			# exactly as a kernel built without the counter does,
+			# and this function exists precisely to stop asserting
+			# a cause it cannot distinguish -- so it names the
+			# observation and lists the possibilities instead.
+			# "unknown oid" here is ALWAYS a fault. Both nodes are
+			# static sysctls in the one vmm.ko and register
+			# whatever the CPU is, so the wrong-vendor counter
+			# reads as zeros, NOT as unknown -- measured on an
+			# Intel host, where svm_l2inj printed
+			# "total=0 vmruns=0 ..." while l2stats printed real
+			# values. An earlier version of this label offered
+			# "the other vendor's counter" as the likely benign
+			# cause, which would have taught the reader to skip
+			# the one line that means something is wrong.
+			case "$_v" in
+			*"unknown oid"*)
+				_v="<rc=$_e unknown oid: vmm not loaded, or a kernel without this counter -- NOT the wrong vendor, which reads as zeros>" ;;
+			*)	_v="<unreadable: $_v>" ;;
+			esac
+		elif [ -z "$_v" ]; then
+			_v="<present but empty>"
+		fi
+		# A warning that accompanies exit 0 must not vanish: dropping
+		# it collapses "value" and "value, with sysctl complaining"
+		# into the same line, which is the state-merging this function
+		# exists to avoid -- just on the success path, where it is
+		# easier to miss.
+		if [ "$_e" -eq 0 ] && [ "$_errok" = 1 ] && [ -s "$_err" ]; then
+			_v="$_v <warning: $(tr '\n' ' ' < "$_err" | tr -s ' ')>"
+		fi
+		# And say so when stderr was never captured at all. Without
+		# this, a successful read whose warning was discarded prints
+		# byte-identically to a clean read on a healthy host -- the
+		# vanishing this function forbids three comments above,
+		# reintroduced by its own fallback. The marker goes on
+		# regardless of exit status: the point is that the line may be
+		# incomplete, which is true whether the read worked or not.
+		# Not on the failure branch, where the label already says it.
+		if [ "$_errok" != 1 ] && [ "$_e" -eq 0 ]; then
+			_v="$_v <stderr not captured: WORKDIR unwritable>"
+		fi
+		log "L0counters $1 $_oid: $_v"
+	done
+}
+
+# Snapshot on EVERY exit path, not just the happy one.
+#
+# `nested_counters after' used to sit below the "could not read the cycle
+# result" check, and that check calls fail(), which exits. So the run most
+# likely to have been perturbed by accumulated host state -- the one whose
+# loop wedged badly enough to produce no result line -- was the single run
+# that recorded no "after" snapshot. The counters exist precisely to explain
+# such runs. This does not register a trap of its own: it is CALLED from
+# cleanup(), which is already trapped on EXIT and on INT/TERM further down, so
+# every fail(), skip() and signal path reaches it. It is guarded so it cannot
+# print twice or before the matching "before".
+_counters_started=0
+_counters_done=0
+nested_counters_final()
+{
+	[ "$_counters_started" = 1 ] || return 0
+	[ "$_counters_done" = 0 ] || return 0
+	_counters_done=1
+	nested_counters after
 }
 skip() { log "SKIP: $*"; exit 77; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -143,6 +309,78 @@ for _v in L1_CPUS L2_CPUS; do
 	''|*[!0-9]*|0*)	fail "$_v must be a positive integer, got '$_n'" ;;
 	esac
 done
+# L2_MEM is spliced into a command line typed into L1, so a malformed value
+# becomes a malformed bhyve invocation inside the guest, where the failure
+# looks like a failed L2 boot and is TALLIED as one. That contaminates exactly
+# the kind of comparison this knob exists for: an arm whose value is
+# unusable scores as an arm whose nesting is broken. Refuse it here instead.
+# Strip the unit first, then require what remains to be DIGITS ONLY. One case
+# glob cannot express that: `[1-9]*[MmGg]' accepts "5X2M" -- [1-9] takes the 5,
+# * takes the X2, [MmGg] takes the M -- and the arithmetic below then dies on
+# `5X2'. A check that admits the value it exists to reject is worse than no
+# check, because the caller believes it ran.
+_size_ok()
+{
+	case "$1" in
+	*[MmGg])	;;
+	*)		return 1 ;;
+	esac
+	_n=${1%[MmGg]}
+	[ -n "$_n" ] || return 1
+	case "$_n" in
+	*[!0-9]*)	return 1 ;;
+	# A leading zero is OCTAL to both the shell's $(( )) and bhyve's
+	# expand_number(3). "0512M" is not 512M, it is 330M, and the run
+	# would quietly measure a guest nobody asked for. "08M" is not even
+	# valid octal: $(( 08 )) is an arithmetic error, the command
+	# substitution comes back empty, and the `-lt' below then fails with
+	# the "does not fit inside L1_MEM" message -- a wrong diagnosis
+	# produced by the check meant to prevent wrong diagnoses.
+	0*)		return 1 ;;
+	esac
+	# Bound the magnitude before any arithmetic. A long digit string
+	# overflows the shell's signed 64-bit $(( )) and wraps NEGATIVE, which
+	# then passes the `-lt' fit check below -- an absurd size accepted by
+	# the very test meant to reject it. Seven digits covers 9999999M, far
+	# past any real L1.
+	[ "${#_n}" -le 7 ] || return 1
+	[ "$_n" -gt 0 ] 2>/dev/null || return 1
+	return 0
+}
+# This is NARROWER than bhyve, deliberately. bhyve accepts a bare `-m 4096'
+# (megabytes) and K/T suffixes; this harness requires an explicit M or G. The
+# narrowing is the point: a bare number is the ambiguity that produced the
+# octal bug above, and every value here is quoted into a log line that another
+# reader has to interpret months later. Say so in the message so a caller who
+# typed something bhyve would have taken is told why it was refused, rather
+# than left thinking the check is broken.
+#
+# NOTE FOR L1_MEM SPECIFICALLY: that knob predates this check and was passed
+# straight to bhyve, so this narrows an interface somebody may already be
+# using -- `L1_MEM=4096' now fails where it once worked. Accepted as a
+# deliberate break rather than an oversight: bhyve_in_bhyve.sh in this same
+# directory already refuses its own size knob with "must be a bhyve size such
+# as 4G", no in-tree caller passes a bare number, and the failure is a loud
+# message at startup rather than a wrong measurement. If an out-of-tree caller
+# turns up, widen _size_ok to accept a bare number as megabytes -- do not
+# widen it to accept leading zeros.
+_size_ok "${L2_MEM}" ||
+    fail "L2_MEM must be a size with an explicit M or G suffix, like 512M or 1G, not '${L2_MEM}' (bhyve is more permissive; this harness is not, on purpose)"
+_size_ok "${L1_MEM}" ||
+    fail "L1_MEM must be a size with an explicit M or G suffix, like 4G, not '${L1_MEM}' (bhyve is more permissive; this harness is not, on purpose)"
+# Same reasoning one level up: an L2 that cannot fit inside L1 fails at bhyve
+# startup in the guest and is counted as a nesting failure. Compared in bytes
+# because "1G" and "1024M" are the same size and string comparison says
+# otherwise. L1 must also keep something for itself, so require strictly less.
+_tob() {
+	case "$1" in
+	*[Mm])	echo $(( ${1%[Mm]} * 1024 * 1024 )) ;;
+	*[Gg])	echo $(( ${1%[Gg]} * 1024 * 1024 * 1024 )) ;;
+	esac
+}
+[ "$(_tob "${L2_MEM}")" -lt "$(_tob "${L1_MEM}")" ] ||
+    fail "L2_MEM=${L2_MEM} does not fit inside L1_MEM=${L1_MEM}: bhyve inside L1 cannot give L2 as much memory as L1 itself has. Raise L1_MEM."
+
 [ "${L2_CPUS}" -le "${L1_CPUS}" ] ||
     fail "L2_CPUS=${L2_CPUS} exceeds L1_CPUS=${L1_CPUS}: bhyve inside L1 cannot use more CPUs than L1 has. Raise L1_CPUS to at least ${L2_CPUS}."
 
@@ -226,13 +464,14 @@ cleanup()
 	# else runs.
 	_rc=$?
 
-	# Teardown is not interruptible. A second signal -- a second ^C, or a
-	# harness TERM arriving after an INT -- would otherwise fire the handler
+	# Teardown is not interruptible. A second signal -- a second ^C, a
+	# harness TERM arriving after an INT, or the HUP that ends a run whose
+	# ssh session went away -- would otherwise fire the handler
 	# again, and its `exit' would abort THIS cleanup part-way, before
 	# bhyvectl --destroy. That abandons the VM this function exists to
 	# reclaim, and the EXIT pass cannot repair it because the guard below
 	# has already been set. Ignore both for the duration.
-	trap '' INT TERM
+	trap '' INT TERM HUP
 
 	# Signalled runs come through here and then again via EXIT. Without a
 	# guard the second pass re-runs bhyvectl --destroy on a VM that is
@@ -240,6 +479,11 @@ cleanup()
 	# ended.
 	[ -n "${_cleaned:-}" ] && return 0
 	_cleaned=1
+
+	# Before anything is torn down: the counters, on every exit path. See
+	# nested_counters_final -- the run that dies here is the one whose
+	# counters matter most, and it was the only run that used to lose them.
+	nested_counters_final
 
 	# A signal is not a clean finish, so keep the evidence regardless of
 	# what $? happened to be when the signal landed.
@@ -279,6 +523,12 @@ cleanup()
 trap cleanup EXIT
 trap '_sig=INT;  cleanup; exit 130' INT
 trap '_sig=TERM; cleanup; exit 143' TERM
+# HUP as well, and not as an afterthought: a long campaign is normally driven
+# over ssh, so losing the terminal is the ordinary way one of these runs dies.
+# Without this it exits on the default HUP action, cleanup never runs, and the
+# run records no "after" counter snapshot -- the perturbed run being exactly
+# the one the snapshot exists for.
+trap '_sig=HUP;  cleanup; exit 129' HUP
 
 log "copying $L1_IMAGE -> $DISK"
 cp "$L1_IMAGE" "$DISK" || fail "copy failed"
@@ -307,6 +557,32 @@ wait_for()
 }
 
 bhyvectl --vm="$VM" --destroy >/dev/null 2>&1
+# Armed HERE, before L1 is loaded, not down beside the stress loop.
+#
+# These sysctls are host-side and readable the moment the workdir exists, and
+# siting the snapshot later meant every run that died in bhyveload, in the L1
+# boot, or in the tracer check recorded NEITHER snapshot -- the guard in
+# nested_counters_final turned into a silent no-op for exactly the runs whose
+# accumulated host state is most worth having. "Every run's log carries the
+# host state it ran against" is only true from this point.
+# Geometry goes HERE, beside the counter snapshot and before L1 is loaded,
+# for the same reason the snapshot was moved: sited after bhyveload, a run
+# that died in bhyveload or the L1 boot recorded its counters but never said
+# what geometry it was trying to run. An unattributable failure is the one
+# most worth attributing.
+#
+# L1_MEM is named as well as L2_MEM: an L2_MEM comparison is only
+# interpretable against the L1 it ran inside, and a reader correlating arms
+# should not have to join two lines to find out.
+log "L2 geometry: L2_CPUS=${L2_CPUS} L2_MEM=${L2_MEM} (inside L1_MEM=${L1_MEM})"
+progress "l2=${L2_CPUS}cpu/${L2_MEM}"
+nested_counters before
+# Raised only once the "before" line is actually out. Set ahead of it, a
+# signal landing inside that snapshot -- it forks sysctl twice -- would run
+# cleanup and print an "after" against a missing or half-written "before",
+# which is precisely what the guard is documented to prevent.
+_counters_started=1
+
 log "loading L1 kernel from $DISK"
 # The stock images default to the video console; force the kernel onto
 # the serial port we are reading, skip the loader menu delay, and boot
@@ -489,7 +765,7 @@ l2_failed()
 
 if [ "$L2_CYCLES" -le 1 ]; then
 	mark=$(wc -l < "$CONS")
-	send 'bhyveload -m 512M -h / -e console=comconsole -e autoboot_delay=1 l2 && echo ===L2"START"=== && bhyve -c '"$L2_CPUS"' -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,stdio l2; echo ===L2"EXIT"=$?==='
+	send 'bhyveload -m '"$L2_MEM"' -h / -e console=comconsole -e autoboot_delay=1 l2 && echo ===L2"START"=== && bhyve -c '"$L2_CPUS"' -m '"$L2_MEM"' -A -H -P -s 0,hostbridge -s 31,lpc -l com1,stdio l2; echo ===L2"EXIT"=$?==='
 	wait_for '===L2START===' 60 "$mark" || fail "bhyveload inside L1 failed (see $CONS)"
 	# Deliberately NOT re-marked here.  A second mark taken after wait_for returns
 	# races the L2 output: wait_for polls once a second, bhyve starts the instant
@@ -570,7 +846,7 @@ _w "': > /tmp/l2c'"
 # nmdm pair, so the A side is there when bhyve wants it.
 _w "'( cat /dev/nmdm_l2\${i}B > /tmp/l2c 2>/dev/null & echo \$! > /tmp/catpid )'"
 _w "'sleep 1'"
-_w "'bhyveload -m 512M -h / -e console=comconsole -e autoboot_delay=0 l2 >/tmp/l2load 2>&1'"
+_w "'bhyveload -m '"$L2_MEM"' -h / -e console=comconsole -e autoboot_delay=0 l2 >/tmp/l2load 2>&1'"
 _w "'echo STEP=loadrc:\$?'"
 # A FRESH nmdm pair per cycle -- nmdm_l2${i}, not a single nmdm_l2. Reusing
 # one pair across cycles leaves a race: kill -9 on bhyve can leave the A side
@@ -594,7 +870,7 @@ _w "'echo STEP=loadrc:\$?'"
 # two soaks recorded the abort and NOT the reason, because stderr had been
 # discarded: the evidence that would name the assertion was thrown away by
 # the harness watching for it.
-_w "'bhyve -c '"$L2_CPUS"' -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,/dev/nmdm_l2\${i}A l2 >/tmp/l2err.\${i} 2>&1 &'"
+_w "'bhyve -c '"$L2_CPUS"' -m '"$L2_MEM"' -A -H -P -s 0,hostbridge -s 31,lpc -l com1,/dev/nmdm_l2\${i}A l2 >/tmp/l2err.\${i} 2>&1 &'"
 _w "'p=\$!'"
 _w "'echo STEP=started:\$p'"
 # POLL, do not sleep a fixed time. A flat `sleep 15' makes the test ask
@@ -625,10 +901,18 @@ _w "'echo VMSTAT\"S\":\$i'"
 _w "'echo CATALIV\"E\":\$(ps -p \$(cat /tmp/catpid 2>/dev/null) >/dev/null 2>&1 && echo yes || echo NO)'"
 _w "'echo L2CBYTES:\$(wc -c < /tmp/l2c 2>/dev/null)'"
 _w "'bhyvectl --vm=l2 --get-stats 2>&1 | grep -i \"total number of vm exits\"'"
+# RIP stays IMMEDIATELY adjacent to the RIPAGAIN marker on BOTH sides, with
+# RSP outside it. The established way to read this capture is
+# `grep -B1 RIPAGAIN', and a reader doing the mirror-image thing takes the
+# line after. Putting RSP next to the marker would hand one of them an RSP
+# labelled as the RIP in their own notes -- a new field silently corrupting
+# the existing measurement, which is worse than not adding it.
+_w "'bhyvectl --vm=l2 --cpu=0 --get-rsp 2>&1 | head -1'"
 _w "'bhyvectl --vm=l2 --cpu=0 --get-rip 2>&1 | head -1'"
 _w "'sleep 3'"
 _w "'echo RIPAGAI\"N\"'"
 _w "'bhyvectl --vm=l2 --cpu=0 --get-rip 2>&1 | head -1'"
+_w "'bhyvectl --vm=l2 --cpu=0 --get-rsp 2>&1 | head -1'"
 _w "'bhyvectl --vm=l2 --get-stats 2>&1 | grep -i \"total number of vm exits\"'"
 _w "'fi'"
 _w "'kill -9 \$p >/dev/null 2>&1'"
@@ -663,6 +947,7 @@ _tried=${_res##*/}
 
 [ -n "$_ok" ] && [ -n "$_tried" ] ||
     fail "could not read the cycle result off the console (log: $CONS)"
+nested_counters_final
 log "stress result: ${_ok}/${_tried} L2 boots seen"
 
 # Re-read the tracer AFTER the cycles. The earlier check proved the value for

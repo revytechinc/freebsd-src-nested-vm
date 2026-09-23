@@ -254,7 +254,7 @@ svm_nested_reflect_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
 	struct svm_nested *ns;
 	struct vmcb *vmcb, *vmcb12;
 	struct vmcb_ctrl *ctrl;
-	uint64_t queued;
+	uint64_t queued, l2_rip;
 	int i;
 
 	ns = svm_nested_lookup(vcpu);
@@ -271,12 +271,41 @@ svm_nested_reflect_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
 	vmcb12 = ns->vmcb12;
 
 	/*
+	 * L2's RIP at the moment of the exit, captured HERE because
+	 * vmcb->state stops being L2's partway through this function --
+	 * svm_nested_restore_l1_host_state() turns it back into L1's. A
+	 * later read is L1's resume RIP wearing L2's name.
+	 */
+	l2_rip = vmcb->state.rip;
+
+	/*
+	 * Count only RIPs that BECAME -1 during this L2 run. Reflecting back
+	 * the -1 that L1 handed us at VMRUN is the loop carrying the value,
+	 * not a second origin, and counting it makes the totals unable to
+	 * separate the two cases at all (see svm.c).
+	 */
+	if (vmcb->state.rip == ~(uint64_t)0 && !ns->badrip_at_entry) {
+		svm_l2_badrip_reflect++;
+		SVM_CTR1(vcpu, "nested reflect: L2 RIP became -1 during this "
+		    "run (exitcode %#lx)", (unsigned long)exitcode);
+	}
+
+	/*
 	 * #VMEXIT to L1: write the L2 save area and the exit information
 	 * into VMCB12. The event that was being delivered when the exit
 	 * happened (EXITINTINFO) belongs to L1 now; clear it in the
 	 * hardware VMCB so L0 does not re-inject it into L1.
 	 */
 	vmcb12->state = vmcb->state;
+	/*
+	 * NO ASSERTION HERE, deliberately. It is tempting to pin "this copy
+	 * is the only thing that sets VMCB12's RIP" with a KASSERT comparing
+	 * vmcb12->state.rip against the snapshot. Do not: vmcb12 is a held
+	 * mapping of L1 GUEST memory, so a second L1 vCPU storing to that
+	 * page between the copy and the assert would fire it -- a guest
+	 * panicking the host, from an ordinary multi-vCPU L1 and with no
+	 * malice required. An earlier revision did exactly that.
+	 */
 	vmcb12->ctrl.exitcode = exitcode;
 	vmcb12->ctrl.exitinfo1 = exitinfo1;
 	vmcb12->ctrl.exitinfo2 = exitinfo2;
@@ -341,6 +370,50 @@ svm_nested_reflect_l2_exit(struct svm_vcpu *vcpu, uint64_t exitcode,
 	ctrl->tsc_offset = ns->l0_tsc_offset;
 	ctrl->n_cr3 = ns->l0_ncr3;
 	ctrl->eventinj = 0;
+
+	/*
+	 * THERE IS NO L0-CORRUPTION CHECK HERE, and two attempts at one were
+	 * removed. Both compared the SOURCE of a struct copy against its
+	 * DESTINATION -- here `l2_rip', snapshotted from vmcb->state, against
+	 * vmcb12->state.rip after `vmcb12->state = vmcb->state'. L0's only
+	 * write to VMCB12's save area IS that copy, so the two are the same
+	 * value by construction and the test is tautologically false. The
+	 * sole way it could fire is another L1 vCPU writing VMCB12 between
+	 * the copy and the test, which it would have reported as an L0 bug:
+	 * a guest race announced as our own.
+	 *
+	 * Detecting L0 corrupting a RIP needs a value captured from a
+	 * DIFFERENT source than the one feeding the write, and on this path
+	 * no such source exists. It would take a different mechanism -- for
+	 * instance checking the RIP against the guest's mapped text -- not a
+	 * comparison. Do not re-add one; this is the third time.
+	 */
+
+	/*
+	 * Remember what L0 stored, so the next VMRUN can tell a -1 that L0
+	 * wrote from one that reached VMCB12 by some other route.
+	 *
+	 * ALL of it in one place. This function has no early return today --
+	 * it is void and falls through -- so the three fields cannot
+	 * currently be left half-written. The rule is kept anyway because
+	 * the failure it prevents is silent: a new GPA recorded against the
+	 * previous run's RIP is not a missing record, it is a confident
+	 * wrong one, and the first `return' added to this function would
+	 * introduce it without touching either site.
+	 *
+	 * Record the RIP L0 WROTE -- the snapshot the copy above stored --
+	 * not a read-back of VMCB12.
+	 *
+	 * That is the question `carried' asks at the next VMRUN: is the -1
+	 * we see the value L0 put here? A read-back answers a different
+	 * question: a read-back reports whatever is in VMCB12 now, which is
+	 * not necessarily what L0 put there, and `carried' would then treat
+	 * a value L1 substituted as our own loop carrying it round. It is
+	 * also one fewer read of L1 guest memory.
+	 */
+	ns->last_reflected_rip = l2_rip;
+	ns->last_reflected_gpa = ns->vmcb12_gpa;
+	ns->last_reflected_valid = true;
 
 	ns->nested_in_l2 = false;
 	ns->gif = false;		/* #VMEXIT clears GIF */

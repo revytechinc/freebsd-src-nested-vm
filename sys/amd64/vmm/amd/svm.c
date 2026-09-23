@@ -162,6 +162,192 @@ uint64_t svm_l2_vmruns, svm_l2_vintr_want, svm_l2_notintr;
 uint64_t svm_l2_exitint_seen, svm_l2_requeue;
 uint64_t svm_l2_evtq_stash, svm_l2_evtq_inject, svm_l2_evtq_l1;
 uint64_t svm_l2_evtq_drop, svm_l2_evtq_max;
+/*
+ * L2 entered, or was reflected to L1, with an all-ones RIP.
+ *
+ * Every captured nested-page-fault abort in this project reports the guest
+ * RIP as 0xffffffffffffffff, and the faulting GPA is what that address
+ * translates to through the tables bhyveload leaves behind. The RIP is the
+ * cause and the GPA is the symptom, but reading the code cannot say where
+ * the -1 enters, because L0 both LOADS L2's RIP from VMCB12
+ * (svm_nested_vmrun) and WRITES it back there on every reflection
+ * (svm_nested_reflect_l2_exit). Either could be the origin and the other
+ * would then merely carry it round the loop.
+ *
+ * 'entry' counts VMRUNs whose VMCB12 already held -1.
+ *
+ * 'reflect' counts ONLY reflections where the RIP became -1 during that L2
+ * run -- gated on ns->badrip_at_entry being clear. The gate is the whole point:
+ * without it, once the bad RIP is going round the loop an L1 origin produces
+ * entry, reflect, entry, reflect and an L0 origin produces reflect, entry,
+ * reflect, entry, so after any even number of steps entry == reflect either
+ * way and the totals cannot distinguish the cases at all.
+ *
+ * 'mismatch' is what makes 'entry' interpretable. VMCB12 holding -1 does NOT
+ * by itself mean L1 wrote -1 there: a stale or reused vmcb12 mapping reads the
+ * same way. So each reflection records the RIP L0 actually stored AND the
+ * VMCB12 GPA it stored it to, and 'mismatch' counts the VMRUNs where that
+ * same VMCB12 says -1 but the last value L0 wrote to it did not.
+ *
+ * 'gpaswitch' is the honest "cannot say". An L1 running two L2s alternates
+ * VMCB12 GPAs, and comparing one guest's RIP against the other's reflection
+ * answers about the wrong guest. When the GPA changed, neither reading is
+ * earned, so this counter takes the sample and the other two do not. A
+ * gpaswitch count comparable to entry means the mismatch figure is describing
+ * a small subset and should not be generalised.
+
+ * One assumption this rests on: svm_nested_reflect_l2_exit() is the only
+ * writer of vmcb12->state.rip. Another path that stores into VMCB12 -- a
+ * consistency failure synthesising VMEXIT_INVALID, say -- would leave this
+ * bookkeeping stale without saying so.
+ *
+ * READ THEM AS FOLLOWS, and no further:
+ *
+ *	reflect > 0	the RIP became -1 during an L2 run. That is L0 OR L2
+ *			ITSELF -- an L2 `ret' through a smashed stack or an
+ *			indirect branch through an uninitialised pointer lands
+ *			at -1 with no L0 involvement, and produces exactly the
+ *			NPF signature we are chasing. This counter does not
+ *			separate those; do not read it as "L0's bug".
+ *	mismatch > 0	the SAME VMCB12 was carrying a -1 that L0 did not put
+ *			there.
+ *	gpaswitch > 0	that many samples were unattributable because L1
+ *			switched VMCB12 between them. Not evidence either way.
+ *	NO L0-CORRUPTION BUCKET EXISTS, and three attempts at one were
+ *			removed. Each compared the SOURCE of a struct copy
+ *			against its DESTINATION -- on the reflect side the
+ *			snapshot of vmcb->state against vmcb12->state after
+ *			`vmcb12->state = vmcb->state', on the load side the
+ *			VMCB12 read against vmcb->state after the mirror
+ *			copy. L0's only write is that copy, so the operands
+ *			are the same value by construction and the test is
+ *			tautologically false. The one way either could fire
+ *			was another L1 vCPU writing between the copy and the
+ *			test, and it would have announced that guest race as
+ *			an L0 bug.
+ *
+ *			Catching L0 corrupt a RIP needs a value captured from
+ *			a DIFFERENT source than the one feeding the write.
+ *			No such source exists on either path, so it needs a
+ *			different mechanism -- checking the RIP against the
+ *			guest's mapped text, say -- and not a comparison.
+ *
+ *	firstrun > 0	L0 had reflected NOTHING on that vCPU when it saw the
+ *			-1, so L0 cannot have written it. Kept separate from
+ *			'mismatch' because "L0 wrote something else here" and
+ *			"L0 wrote nothing at all" are different facts.
+ *
+ *			READ THE ZERO CORRECTLY: it is the normal value and
+ *			it means nothing. last_reflected_valid is set only
+ *			by a reflection, so once a vCPU has reflected once,
+ *			this cannot fire again on it -- and in a campaign
+ *			running 50 L2 boots inside one long-lived L1 the
+ *			first reflection lands in cycle one. Every later
+ *			cycle reports 0 whatever the origin. A 0 is NOT
+ *			evidence that L0 wrote the value.
+ *
+ *			READ A LARGE VALUE CAREFULLY TOO -- see the shared
+ *			caveat below, which applies to this bucket as much as
+ *			to the others.
+ *
+ * If a future path writes vmcb12->state.rip WITHOUT going through
+ * svm_nested_reflect_l2_exit(), it must clear last_reflected_valid, or
+ * 'firstrun' silently acquires a second meaning. svm_nested_vmrun_invalid()
+ * did not look like such a path when this was written -- it sets exitcode and
+ * the exitinfo/exitintinfo fields and nothing in the save area -- but that is
+ * a reading of one function at one moment, not an invariant the code
+ * enforces. Re-read it before relying on 'firstrun'.
+ *	carried > 0	The -1 in VMCB12 MATCHES what L0 last wrote at the
+ *			previous reflection to this GPA -- consistent with the
+ *			loop carrying the value round, and the nearest thing
+ *			to a positive reading of it.
+ *
+ *			Not proof, for the reason given under mismatch: a GPA
+ *			does not identify a VMCB12 over time, so a recycled
+ *			page at the same address carrying a -1 L1 put there
+ *			lands in this bucket too. "Matches what L0 wrote" is
+ *			what the code tests; "is what L0 wrote" is what it
+ *			cannot. This is the outcome the
+ *			whole set exists to separate from the others, so it
+ *			is COUNTED rather than left to be derived as
+ *			entry - firstrun - gpaswitch - mismatch. That
+ *			subtraction would be four non-atomic lower bounds
+ *			differenced against each other, which the note below
+ *			explicitly says not to do.
+ *
+ *	entry > 0,
+ *	mismatch == 0	CONSISTENT WITH the loop carrying the -1 L0 wrote at
+ *			the previous reflection. It is not proof of that, for
+ *			two reasons. If L1 independently writes -1 into the
+ *			same VMCB12, the recorded value already is -1, no
+ *			mismatch fires, and an L1 origin is indistinguishable
+ *			from loop carriage. And a GPA does not identify a
+ *			VMCB12 over time -- L1's vmm recycles VMCB pages, so
+ *			a fresh VMCB12 can arrive at a dead one's address and
+ *			a -1 L1 put in the NEW page reads as the -1 L0 wrote
+ *			into the OLD one. That is the L1-origin case this
+ *			exists to find, reported as its opposite, and NOTHING
+ *			HERE DETECTS IT.
+ *
+ *			An exitcode liveness token was tried and removed:
+ *			svm_nested_vmrun_invalid() writes that same field on
+ *			the VMRUN rejection paths, so L0 overwrites its own
+ *			token and the check mis-fires on a third cause it
+ *			then cannot name. A token has to be a field L0 does
+ *			not otherwise write; there is no obvious one, which
+ *			is part of why the design note in the commit message
+ *			suggests classifying offline instead.
+ *
+ * LIMIT, and it applies to 'firstrun' exactly as much as to
+ * the other two:
+ * this bookkeeping is per L0 vCPU, while a VMCB12
+ * is a page of L1 memory that every L1 vCPU can reach. With L1_CPUS > 1, one
+ * L1 vCPU can reflect into a VMCB12 that a different one then VMRUNs, so the
+ * record consulted belongs to the wrong vCPU and 'mismatch' can fire for a -1
+ * that L0 itself wrote -- and one vCPU can VMRUN a VMCB12 another reflected
+ * into while its own last_reflected_valid is still false, so 'firstrun' fires
+ * for a -1 L0 did write. Only 'entry' and 'reflect' are meaningful in that
+ * configuration. Run the attribution campaign with L1_CPUS=1, or key the
+ * record by VMCB12 GPA in the softc under the VM lock. The sysctl output says
+ * so as well, because a counter read without its caveat is read without its
+ * caveat.
+ *
+ * Separating L2-executed from L0-corrupted needs more than a counter: compare
+ * the faulting RIP against the RIP L0 last resumed L2 with, and check whether
+ * the NPF exitinfo1 shows an instruction fetch at that RIP or a data access.
+ *
+ * 'entry' AND 'reflect' ARE LOWER BOUNDS in every configuration, because the
+ * increments are not atomic -- and above one L1 vCPU for a second reason: the
+ * entry tally reads VMCB12 once, while the flag that gates 'reflect' comes
+ * from the struct copy, which reads that guest page again. An L1 vCPU turning
+ * a valid RIP into -1 between the two leaves that VMRUN counted nowhere. See
+ * the comment at the flag in svm_nested_stubs.c. At one L1 vCPU it cannot
+ * happen.
+ *
+ * NONE OF THE ATTRIBUTION BUCKETS IS BOUNDED BY ANYTHING MEANINGFUL, and an
+ * earlier revision said this of 'firstrun' alone. The block that decides them
+ * runs BEFORE the two paths that reject a VMRUN -- deliberately, so a rejected
+ * -1 VMRUN is not counted nowhere -- which means a guest retrying a VMCB12 L0
+ * keeps refusing pumps whichever bucket applies (firstrun, then carried or
+ * mismatch or gpaswitch once that vCPU has reflected) without limit, and
+ * WITHOUT ANY L2 EVER RUNNING. N is N such VMRUNs; it is not N guests, not N
+ * vCPUs, and not N nested boots. A large value may mean one L1 spinning.
+ *
+ * COUNTING IS NOT ATOMIC. These are plain increments on globals from vCPU
+ * threads that run concurrently, so under contention updates are lost and a
+ * reading is a lower bound, not a census. The sibling svm_l2_* counters above
+ * share this and it is long-standing; it is called out here only because the
+ * readings above are phrased precisely ("N means N such VMRUNs") and that
+ * phrasing is what the plain increment cannot support. Do not build an
+ * argument on a small difference between two of these.
+ *
+ * Note that -1 is a canonical address, so neither hardware nor
+ * svm_nested_vmcb12_consistent() rejects it -- nothing else in the system
+ * will report this.
+ */
+uint64_t svm_l2_badrip_entry, svm_l2_badrip_reflect, svm_l2_badrip_mismatch;
+uint64_t svm_l2_badrip_gpaswitch, svm_l2_badrip_firstrun;
+uint64_t svm_l2_badrip_carried;
 static int
 svm_l2_inj_sysctl(SYSCTL_HANDLER_ARGS)
 {
@@ -174,6 +360,17 @@ svm_l2_inj_sysctl(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "exitint_seen=%lu requeue=%lu\n",
 	    (unsigned long)svm_l2_exitint_seen,
 	    (unsigned long)svm_l2_requeue);
+	sbuf_printf(&sb, "badrip entry=%lu reflect=%lu mismatch=%lu "
+	    "gpaswitch=%lu firstrun=%lu carried=%lu "
+	    "(all are lower bounds; the attribution buckets are meaningless "
+	    "above one L1 vCPU and carry further caveats even below it -- "
+	    "read svm.c before quoting any of them)\n",
+	    (unsigned long)svm_l2_badrip_entry,
+	    (unsigned long)svm_l2_badrip_reflect,
+	    (unsigned long)svm_l2_badrip_mismatch,
+	    (unsigned long)svm_l2_badrip_gpaswitch,
+	    (unsigned long)svm_l2_badrip_firstrun,
+	    (unsigned long)svm_l2_badrip_carried);
 	sbuf_printf(&sb, "evtq stash=%lu inject=%lu tol1=%lu drop=%lu "
 	    "max=%lu\n",
 	    (unsigned long)svm_l2_evtq_stash,

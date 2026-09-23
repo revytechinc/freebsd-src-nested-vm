@@ -170,7 +170,7 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	struct svm_nested *ns;
 	struct vmcb *vmcb, *vmcb12;
 	struct vmcb_ctrl *ctrl;
-	uint64_t gpa;
+	uint64_t gpa, l1_rip;
 	void *cookie;
 	uint64_t iopm_pa, msrpm_pa;
 	uint32_t intcpt1;
@@ -191,6 +191,95 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 		SVM_CTR1(vcpu, "nested VMRUN: unmappable VMCB12 %#lx",
 		    (unsigned long)gpa);
 		return (1);
+	}
+
+	/*
+	 * Record whether this L2 run STARTS with a broken RIP, and attribute
+	 * it, as the first thing after VMCB12 is mapped and BEFORE any path
+	 * below that can return.
+	 *
+	 * Both parts must be here, not just the flag. Two paths below reject
+	 * the VMRUN and return early -- the svm_nested_npt_init() failure and
+	 * the consistency check, both via svm_nested_vmrun_invalid() -- so
+	 * anything sited after them never runs for those. And counting later
+	 * means a -1 VMRUN rejected by
+	 * svm_nested_npt_init() or the consistency check is counted NOWHERE:
+	 * not in 'entry' because it never reached the tally, and not in
+	 * 'reflect' because the flag it set suppresses it. A VMRUN that
+	 * vanishes from every counter is the worst outcome for an
+	 * instrumentation whose whole job is to account for these.
+	 */
+	/*
+	 * Clear it HERE, not only at the copy below. Two paths between this
+	 * point and there reject the VMRUN and return, and without this the
+	 * flag would still hold the PREVIOUS run's value -- describing a run
+	 * that already ended, in a field the comments say describes this
+	 * one. Nothing mis-counts today, because no reflection follows a
+	 * rejected VMRUN, but that is a property of the surrounding code
+	 * rather than of the flag, and it is cheaper to make the flag true
+	 * than to rely on it.
+	 */
+	ns->badrip_at_entry = false;
+
+	/*
+	 * ONE read of VMCB12's RIP, used for every decision that needs it.
+	 *
+	 * VMCB12 is L1 guest memory, so each separate read is another chance
+	 * for an L1 vCPU to change the value underneath us. Two reads gave
+	 * two answers that could disagree, and a VMRUN could then be counted
+	 * in neither 'entry' (first read valid) nor 'reflect' (flag says it
+	 * started at -1) -- vanishing from the instrumentation entirely.
+	 */
+	l1_rip = vmcb12->state.rip;
+
+	if (l1_rip == ~(uint64_t)0) {
+		svm_l2_badrip_entry++;
+		/*
+		 * Did L0 put this -1 here? Only answerable for the SAME
+		 * VMCB12: an L1 running two L2s alternates between two GPAs,
+		 * and comparing this VMCB12's RIP against a RIP reflected
+		 * into the OTHER one answers about a different guest.
+		 *
+		 * If L0 has never reflected on this vCPU at all, the answer
+		 * IS known and it is the cleanest case in the set: L0 has
+		 * written nothing, so the -1 did not come from us. That gets
+		 * its OWN counter. Without the explicit valid flag it would
+		 * read as a GPA change (last_reflected_gpa still 0) and land
+		 * in the "cannot say" bucket -- the one sample that can be
+		 * said for certain, filed as unattributable. Folding it into
+		 * 'mismatch' would be almost as bad: "L0 wrote something
+		 * else" and "L0 wrote nothing" are different facts.
+		 */
+		/*
+		 * The trace says WHICH bucket was taken. Printing
+		 * last_reflected_rip unconditionally would assert an
+		 * attribution the counters just declined: in the firstrun
+		 * case it is a zero L0 never wrote, and in the gpaswitch case
+		 * it belongs to a different guest -- the exact reading this
+		 * code refuses to make, restated as fact in the log.
+		 */
+		if (!ns->last_reflected_valid) {
+			svm_l2_badrip_firstrun++;
+			SVM_CTR1(vcpu, "nested VMRUN: VMCB12 %#lx has RIP -1, "
+			    "L0 has reflected nothing on this vCPU",
+			    (unsigned long)gpa);
+		} else if (ns->last_reflected_gpa != gpa) {
+			svm_l2_badrip_gpaswitch++;
+			SVM_CTR2(vcpu, "nested VMRUN: VMCB12 %#lx has RIP -1, "
+			    "unattributable (L0 last reflected into %#lx)",
+			    (unsigned long)gpa,
+			    (unsigned long)ns->last_reflected_gpa);
+		} else if (ns->last_reflected_rip != ~(uint64_t)0) {
+			svm_l2_badrip_mismatch++;
+			SVM_CTR2(vcpu, "nested VMRUN: VMCB12 %#lx has RIP -1 "
+			    "but L0 last wrote %#lx there", (unsigned long)gpa,
+			    (unsigned long)ns->last_reflected_rip);
+		} else {
+			svm_l2_badrip_carried++;
+			SVM_CTR1(vcpu, "nested VMRUN: VMCB12 %#lx has RIP -1 "
+			    "matching what L0 last wrote there",
+			    (unsigned long)gpa);
+		}
 	}
 
 	if (vmcb12->ctrl.np_enable != 0 && svm_nested_npt_init(vcpu) != 0) {
@@ -283,6 +372,45 @@ svm_nested_vmrun(struct svm_vcpu *vcpu, uint64_t l1_next_rip)
 	 * shares L0's ASID with a forced TLB flush on every L1<->L2 switch.
 	 */
 	vmcb->state = vmcb12->state;
+
+	/*
+	 * Gate the reflect counter on the RIP L2 will ACTUALLY run with,
+	 * read back out of the hardware VMCB, which is L0's own memory.
+	 *
+	 * Deriving it from the earlier VMCB12 read instead makes the flag a
+	 * second, separate look at L1 guest memory: another L1 vCPU can flip
+	 * the value between the two reads, so L2 gets entered with -1 while
+	 * the flag says the run did not start that way.
+	 *
+	 * THE VANISH-FROM-EVERY-COUNTER WINDOW IS STILL OPEN above one L1
+	 * vCPU, and an earlier revision of this comment wrongly declared it
+	 * closed. 'entry' comes from the l1_rip read above; this flag comes
+	 * from vmcb->state.rip, which the struct copy filled -- and that copy
+	 * is a SECOND, independent read of the same L1 guest page. If another
+	 * L1 vCPU turns a valid RIP into -1 between the two, entry is not
+	 * incremented (the first read was valid), this flag is set, and the
+	 * reflect counter is suppressed by it. That VMRUN is counted nowhere.
+	 *
+	 * Closing it needs a value that does not come through the copy, and
+	 * there is none. Counting the disagreement instead -- comparing
+	 * l1_rip against vmcb->state.rip here -- has been proposed three
+	 * times and is a tautology every time: NOTHING between the l1_rip
+	 * read and the copy writes vmcb12->state. The calls in that window
+	 * are the consistency check, svm_nested_npt_init() (which does not
+	 * reference vmcb12 at all), the event-queue flush, the IOPM/MSRPM
+	 * holds and svm_nested_vmrun_invalid(), which writes ctrl fields and
+	 * then RETURNS without reaching the copy. So at one L1 vCPU the two
+	 * operands are equal by construction, exactly as for the checks
+	 * already removed.
+	 *
+	 * So it is stated rather than papered over: at one L1 vCPU the
+	 * window cannot open, and above one vCPU
+	 * 'entry' and 'reflect' are lower bounds for this reason as well as
+	 * for the non-atomic increments.
+	 */
+	ns->badrip_at_entry = (vmcb->state.rip == ~(uint64_t)0);
+
+
 	for (i = 0; i < 5; i++)
 		ctrl->intercept[i] = ns->l0_intercept[i] |
 		    vmcb12->ctrl.intercept[i];
