@@ -268,6 +268,14 @@ case "${SVM_DEBUG}" in
 *)   fail "SVM_DEBUG must be 0 or 1, got '${SVM_DEBUG}' -- values like '01' or ' 1' set the sysctl but then fail the readback comparison and abort as a bogus mismatch" ;;
 esac
 
+# What the operator left the sysctl at BEFORE we touch it. Reading this is the
+# difference between checking our own work and checking their intent: without
+# it, "set the sysctl to 0, then run without SVM_DEBUG=0" still measures arm 1
+# and sails through the readback below, because the readback only confirms the
+# value this script itself just wrote. That is the very workflow this block
+# exists to catch.
+_svm_pre=$(sysctl -n hw.vmm.nested.svm_debug 2>/dev/null)
+
 _svm_err=$(sysctl "hw.vmm.nested.svm_debug=${SVM_DEBUG}" 2>&1 >/dev/null)
 _svm_dbg=$(sysctl -n hw.vmm.nested.svm_debug 2>/dev/null)
 _svm_rerr=$(sysctl -n hw.vmm.nested.svm_debug 2>&1 >/dev/null)
@@ -281,6 +289,15 @@ _svm_strict=0
 if [ -n "${_svm_dbg}" ] && [ "${_svm_dbg}" = "${SVM_DEBUG}" ]; then
 	log "L0 hw.vmm.nested.svm_debug=${_svm_dbg}"
 	progress "svm_debug=${_svm_dbg}"
+	# The write succeeded, but did the caller MEAN this arm? A host left at
+	# the other value, with SVM_DEBUG not passed, is almost certainly someone
+	# selecting the arm the old way -- which this script silently overrode
+	# for as long as it hard-coded 1. Say so rather than measuring the arm
+	# they did not ask for.
+	if [ -n "${_svm_pre}" ] && [ "${_svm_pre}" != "${SVM_DEBUG}" ]; then
+		log "warning: host had hw.vmm.nested.svm_debug=${_svm_pre}, this run forces ${SVM_DEBUG} -- pass SVM_DEBUG=${_svm_pre} if you meant to measure that arm"
+		progress "svm_debug_override=${_svm_pre}->${SVM_DEBUG}"
+	fi
 elif [ -z "${_svm_dbg}" ]; then
 	# Empty readback is THREE states, not one: the OID is genuinely absent
 	# (SVM-only, so a VMX host has none), sysctl could not run at all, or
