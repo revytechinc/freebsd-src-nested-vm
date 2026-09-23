@@ -344,7 +344,18 @@ _size_ok()
 	# the very test meant to reject it. Seven digits covers 9999999M, far
 	# past any real L1.
 	[ "${#_n}" -le 7 ] || return 1
-	[ "$_n" -gt 0 ] 2>/dev/null || return 1
+	# Backstop. Given the checks above -- non-empty, all digits, no leading
+	# zero -- $_n is at least 1 here, so this cannot currently reject
+	# anything. It is kept anyway because it is dead by PRECEDING GUARD, not
+	# dead by construction: relax any one of those three and this becomes
+	# the only line still looking at the value. Drop the leading-zero case
+	# and "0M" arrives here; drop the all-digits case and "4g" does.
+	#
+	# It carried a 2>/dev/null once. That hid a DIAGNOSTIC, not a failure:
+	# `[ 4g -gt 0 ]' exits 2 as well as complaining, so the rejection
+	# happened either way. Dropped so that drift announces itself instead of
+	# being turned away in silence.
+	[ "$_n" -gt 0 ] || return 1
 	return 0
 }
 # This is NARROWER than bhyve, deliberately. bhyve accepts a bare `-m 4096'
