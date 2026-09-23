@@ -226,6 +226,25 @@ cleanup()
 	# else runs.
 	_rc=$?
 
+	# Teardown is not interruptible. A second signal -- a second ^C, or a
+	# harness TERM arriving after an INT -- would otherwise fire the handler
+	# again, and its `exit' would abort THIS cleanup part-way, before
+	# bhyvectl --destroy. That abandons the VM this function exists to
+	# reclaim, and the EXIT pass cannot repair it because the guard below
+	# has already been set. Ignore both for the duration.
+	trap '' INT TERM
+
+	# Signalled runs come through here and then again via EXIT. Without a
+	# guard the second pass re-runs bhyvectl --destroy on a VM that is
+	# already gone and re-logs the workdir line, which reads as if two runs
+	# ended.
+	[ -n "${_cleaned:-}" ] && return 0
+	_cleaned=1
+
+	# A signal is not a clean finish, so keep the evidence regardless of
+	# what $? happened to be when the signal landed.
+	[ -n "${_sig:-}" ] && _rc=1
+
 	exec 3>&- 2>/dev/null
 	[ -n "${PROGRESS_PID:-}" ] && kill "$PROGRESS_PID" 2>/dev/null
 	[ -n "${BHYVE_PID:-}" ] && kill "$BHYVE_PID" 2>/dev/null
@@ -249,7 +268,17 @@ cleanup()
 		rm -rf "$WORKDIR"
 	fi
 }
-trap cleanup EXIT INT TERM
+# INT and TERM get handlers that EXIT. A bare `trap cleanup INT TERM' runs
+# cleanup and then RESUMES where the signal landed -- so a signalled run tore
+# down its VM and carried on against nothing, reaching wait_for and reporting
+# "L2 did not boot" for what was actually an operator ^C. Observed: a TERMed
+# run kept its process alive with its VM already destroyed.
+#
+# 128+signo, the shell convention, so a caller can tell a signal from a real
+# FAIL(1) or SKIP(77).
+trap cleanup EXIT
+trap '_sig=INT;  cleanup; exit 130' INT
+trap '_sig=TERM; cleanup; exit 143' TERM
 
 log "copying $L1_IMAGE -> $DISK"
 cp "$L1_IMAGE" "$DISK" || fail "copy failed"
