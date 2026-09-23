@@ -21,9 +21,27 @@
 set -eu
 
 PROGRAM=${0##*/}
-SCRIPTDIR=$(cd "$(dirname "$0")" && pwd)
-SMOKE="$SCRIPTDIR/l2_smoke.sh"
+# Piped in via `sh -s' -- the diagnostic path that points SMOKE at an
+# installed harness -- $0 is the shell, and a summary line reading "sh: 6
+# passed" names nothing useful.
+case "$PROGRAM" in
+sh|-sh|dash|bash|ksh)	PROGRAM=l2_smoke_args_test.sh ;;
+esac
+SCRIPTDIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPTDIR=.
+
+# Overridable so this can be pointed at an INSTALLED l2_smoke.sh, which is how
+# you check the test still goes red against a harness lacking the guard. The
+# name is deliberately long: a bare SMOKE in the environment -- kyua scrubs no
+# such variable -- would silently redirect the run at a different file.
+L2_SMOKE_ARGS_TEST_SMOKE="${L2_SMOKE_ARGS_TEST_SMOKE:-$SCRIPTDIR/l2_smoke.sh}"
+SMOKE=$L2_SMOKE_ARGS_TEST_SMOKE
 [ -r "$SMOKE" ] || { echo "$PROGRAM: not readable: $SMOKE" >&2; exit 1; }
+
+# Say WHICH harness was tested. Without this, "tested the committed harness"
+# and "tested some other file that happened to be in the way" print the same
+# summary -- and when SCRIPTDIR falls back to `.' (a failed cd, or `sh -s'
+# where dirname gives `.'), the default resolves against the caller's cwd.
+echo "$PROGRAM: harness under test: $SMOKE"
 
 WORK=$(mktemp -d) || exit 1
 # Every rm below is rooted here, so this is the one variable that must never
