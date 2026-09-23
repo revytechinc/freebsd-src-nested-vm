@@ -112,10 +112,12 @@ TEST_METADATA.deployment_safety+=	is_exclusive="true"
 TESTS_SUBDIRS+=	abisnap
 TESTS_SUBDIRS+=	fuzz
 TESTS_SUBDIRS+=	hw
+# integration declares one test that needs no root, no vmm(4) and no L1 image
+# (l2_smoke_args_test). Its other scripts stay FILES and are still run by hand.
+TESTS_SUBDIRS+=	integration
 
 SUBDIR+=	demo
 SUBDIR+=	features
-SUBDIR+=	integration
 SUBDIR+=	io
 SUBDIR+=	negative
 SUBDIR+=	parity

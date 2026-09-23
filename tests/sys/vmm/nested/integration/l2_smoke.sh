@@ -99,6 +99,28 @@ progress()
 skip() { log "SKIP: $*"; exit 77; }
 fail() { log "FAIL: $*"; exit 1; }
 
+# Validate arguments BEFORE prerequisites. A bad SVM_DEBUG costs nothing to
+# catch here, and checking it after L1 boots wasted a full boot to report a
+# typo. Ordering it ahead of the root check also makes it testable without
+# privileges or hardware.
+#
+# ORDERING THIS DEPENDS ON: both variables are defaulted in the `: "${X:=}"`
+# block near the top, well above this point, and `fail` is defined just above.
+# If a default is ever moved below here, `set -u` turns an ordinary unset-
+# variable run into an unbound-variable death (exit 2) instead of the
+# documented exit 1 -- or, with the default gone entirely, into a spurious
+# "must be 0 or 1, got ''" on a run that asked for nothing unusual.
+# l2_smoke_args_test.sh's "unset accepted" and "empty -> default" cases are
+# what catch that, so keep them.
+case "${SVM_DEBUG}" in
+0|1) ;;
+*)   fail "SVM_DEBUG must be 0 or 1, got '${SVM_DEBUG}' -- values like '01' or ' 1' set the sysctl but then fail the readback comparison and abort as a mismatch that never happened" ;;
+esac
+case "${SVM_DEBUG_STRICT}" in
+0|1) ;;
+*)   fail "SVM_DEBUG_STRICT must be 0 or 1, got '${SVM_DEBUG_STRICT}'" ;;
+esac
+
 [ "$(id -u)" -eq 0 ] || skip "must run as root"
 [ -n "$L1_IMAGE" ] && [ -r "$L1_IMAGE" ] || skip "L1_IMAGE not set or unreadable"
 command -v "$BHYVE" >/dev/null 2>&1 || skip "$BHYVE not found"
@@ -263,11 +285,6 @@ progress "L1 booted"
 # hw.vmm.nested.svm_debug is SVM-only, so on a VMX host the OID is ABSENT.
 # That is not a mismatched arm, it is a host with no SVM tracer to set, and
 # failing there would break every Intel run.
-case "${SVM_DEBUG}" in
-0|1) ;;
-*)   fail "SVM_DEBUG must be 0 or 1, got '${SVM_DEBUG}' -- values like '01' or ' 1' set the sysctl but then fail the readback comparison and abort as a bogus mismatch" ;;
-esac
-
 # What the operator left the sysctl at BEFORE we touch it. Reading this is the
 # difference between checking our own work and checking their intent: without
 # it, "set the sysctl to 0, then run without SVM_DEBUG=0" still measures arm 1

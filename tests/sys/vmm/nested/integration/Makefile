@@ -32,4 +32,18 @@ ${PACKAGE}FILES+=	triple_nested.sh
 # line cannot reproduce the bug. Every member of this group is a program.
 ${PACKAGE}FILESMODE=	0555
 
+# Unit tests for l2_smoke.sh's argument validation, DECLARED as a test rather
+# than shipped as a FILES entry. Shipping is not executing: a *_test.sh that
+# installs and never runs is the "gap that looks like coverage" the parent
+# Makefile documents at length. It needs no root, no vmm(4) and no L1 image,
+# so unlike its siblings here it is safe for kyua to run unattended.
+#
+# This is why `integration' is in TESTS_SUBDIRS rather than plain SUBDIR: the
+# directory now declares a test, so the generated include has something to
+# reach. The safety criterion the parent Makefile sets out is met -- PACKAGE
+# is nested-tests above, the same package as the Kyuafile that includes it, so
+# the include cannot dangle on a host that installed tests without
+# nested-tests. The other scripts here stay FILES and are still run by hand.
+PLAIN_TESTS_SH+=	l2_smoke_args_test
+
 .include <bsd.test.mk>
