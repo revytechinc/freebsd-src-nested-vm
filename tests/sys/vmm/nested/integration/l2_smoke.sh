@@ -32,6 +32,15 @@
 #   L1_TIMEOUT   seconds to wait for the L1 login prompt (default 300)
 #   L2_TIMEOUT   seconds to wait for the L2 banner (default 120)
 #   WORKDIR      scratch directory (default: mktemp -d)
+#   SVM_DEBUG    hw.vmm.nested.svm_debug to run L0 with (default 1). The
+#                tracer roughly doubles the observed L2 failure rate, so
+#                every rate measured here must be reported with this value;
+#                set 0 for the other arm. The run reads the sysctl back and
+#                ABORTS if it is not what was asked for, since the rate would
+#                otherwise be filed under the wrong arm; on a VMX host the
+#                OID is absent and the arm is reported as n/a instead.
+#   SVM_DEBUG_STRICT=0
+#                downgrade that abort to a warning (diagnostic runs only).
 #   KEEP=1       keep WORKDIR and the console log on exit
 #   PROGRESS     file that receives a fsync'd line per step plus the L0
 #                dmesg tail while L2 runs (survives a host reset)
@@ -54,6 +63,22 @@ set -u
 # cycle is a full L2 entry and teardown from the same L1, which is where a
 # leaked ASID/VPID or a resource leak in the nested path would show up.
 : "${L2_CYCLES:=1}"
+# hw.vmm.nested.svm_debug to run L0 with. Applied once L1 has booted, and
+# deliberately NOT restored on exit -- the host is left in whichever arm ran
+# last, so set it explicitly rather than inheriting it.
+#
+# This used to be hard-coded to 1 further down, which quietly defeated the one
+# control every rate measured with this harness is supposed to name: the
+# tracer roughly DOUBLES the observed failure rate (measured 16.5% at 1
+# against 9.5% at 0, pooled over 420 launches), so a campaign that sets the
+# sysctl beforehand and then runs this script was measuring the 1 arm twice
+# and reporting it as a comparison. Default stays 1 so existing results
+# remain comparable; set SVM_DEBUG=0 to measure the other arm.
+: "${SVM_DEBUG:=1}"
+# Refuse to run when the tracer is not the requested value, because the rate
+# would be filed under the wrong arm. SVM_DEBUG_STRICT=0 downgrades that to a
+# warning for a diagnostic run that does not care about attribution.
+: "${SVM_DEBUG_STRICT:=1}"
 : "${KEEP:=0}"
 : "${PROGRESS:=}"
 
@@ -228,7 +253,66 @@ wait_for 'RETURN for /bin/sh' "$L1_TIMEOUT" ||
     fail "L1 did not reach the single-user prompt in ${L1_TIMEOUT}s (see $CONS)"
 log "L1 booted (single user)"
 progress "L1 booted"
-sysctl hw.vmm.nested.svm_debug=1 >/dev/null 2>&1 || true
+# Apply the requested tracer setting, then read back what it ACTUALLY is and
+# refuse to continue if they disagree. "I set it" and "the run used it" are
+# different claims: a caller that sets this sysctl before invoking the script
+# has its value overwritten right here, which is how a campaign ends up
+# running one arm twice and reporting it as a comparison.
+#
+# Three states, not two, and the third is why this cannot simply fail:
+# hw.vmm.nested.svm_debug is SVM-only, so on a VMX host the OID is ABSENT.
+# That is not a mismatched arm, it is a host with no SVM tracer to set, and
+# failing there would break every Intel run.
+case "${SVM_DEBUG}" in
+0|1) ;;
+*)   fail "SVM_DEBUG must be 0 or 1, got '${SVM_DEBUG}' -- values like '01' or ' 1' set the sysctl but then fail the readback comparison and abort as a bogus mismatch" ;;
+esac
+
+_svm_err=$(sysctl "hw.vmm.nested.svm_debug=${SVM_DEBUG}" 2>&1 >/dev/null)
+_svm_dbg=$(sysctl -n hw.vmm.nested.svm_debug 2>/dev/null)
+_svm_rerr=$(sysctl -n hw.vmm.nested.svm_debug 2>&1 >/dev/null)
+
+# Only the literal "0" downgrades the abort. Testing for "1" instead would let
+# every typo -- "yes", "true", "2" -- silently disable the check, which is the
+# same fail-open this whole block exists to remove.
+_svm_strict=0
+[ "${SVM_DEBUG_STRICT}" != "0" ] && _svm_strict=1
+
+if [ -n "${_svm_dbg}" ] && [ "${_svm_dbg}" = "${SVM_DEBUG}" ]; then
+	log "L0 hw.vmm.nested.svm_debug=${_svm_dbg}"
+	progress "svm_debug=${_svm_dbg}"
+elif [ -z "${_svm_dbg}" ]; then
+	# Empty readback is THREE states, not one: the OID is genuinely absent
+	# (SVM-only, so a VMX host has none), sysctl could not run at all, or
+	# the read failed some other way. Only the first is benign, and only an
+	# "unknown oid" error establishes it -- an empty stdout does not.
+	case "${_svm_rerr}" in
+	*"unknown oid"*|*"unknown 'oid'"*)
+		# Confirm it really is a VMX host rather than an AMD kernel that
+		# is missing the tracer, which would be a finding, not an n/a.
+		# hw.vmm.nested.vmx exists on BOTH vendors on this tree -- it
+		# reads 1 on Tiger Lake and Ivy Bridge and 0 on Zen+ -- so its
+		# absence here would itself be unexpected and falls through to
+		# the fail below rather than being read as "not VMX".
+		if [ "$(sysctl -n hw.vmm.nested.vmx 2>/dev/null)" = "1" ]; then
+			log "L0 has no hw.vmm.nested.svm_debug (SVM-only OID) on a VMX host -- tracer arm: n/a"
+			progress "svm_debug=n/a"
+		else
+			fail "hw.vmm.nested.svm_debug is absent and this is not a VMX host (${_svm_rerr}) -- cannot attribute a tracer arm"
+		fi
+		;;
+	*)
+		fail "could not read hw.vmm.nested.svm_debug: ${_svm_rerr:-no error text}${_svm_err:+ (set said: $_svm_err)} -- I could not look, which is not the same as it not being there"
+		;;
+	esac
+else
+	# Present, and NOT what was asked for. Every rate this harness produces
+	# has to name this value, so continuing would mislabel the result.
+	progress "svm_debug=${_svm_dbg}-REQUESTED-${SVM_DEBUG}"
+	[ "${_svm_strict}" = "0" ] ||
+	    fail "hw.vmm.nested.svm_debug is ${_svm_dbg}, not the requested ${SVM_DEBUG}${_svm_err:+ ($_svm_err)} -- results would belong to the ${_svm_dbg} arm. Set SVM_DEBUG_STRICT=0 to run anyway."
+	log "warning: tracer is ${_svm_dbg}, NOT the requested ${SVM_DEBUG}${_svm_err:+ ($_svm_err)} -- rates from this run belong to the ${_svm_dbg} arm"
+fi
 send ''
 wait_for '# $' 30 || fail "no root shell on L1"
 progress "L1 shell"
@@ -475,6 +559,18 @@ _tried=${_res##*/}
 [ -n "$_ok" ] && [ -n "$_tried" ] ||
     fail "could not read the cycle result off the console (log: $CONS)"
 log "stress result: ${_ok}/${_tried} L2 boots seen"
+
+# Re-read the tracer AFTER the cycles. The earlier check proved the value for
+# one instant; this sysctl is host-global and nothing restores it, so a second
+# invocation running concurrently on this host (the natural way to run "the
+# other arm") can move it out from under a run that already validated it. The
+# rate below would then be filed under an arm it did not run in.
+_svm_end=$(sysctl -n hw.vmm.nested.svm_debug 2>/dev/null)
+progress "svm_debug_end=${_svm_end:-n/a}"
+if [ -n "${_svm_dbg}" ] && [ "${_svm_end:-}" != "${_svm_dbg}" ]; then
+	fail "hw.vmm.nested.svm_debug changed under this run: ${_svm_dbg} at start, ${_svm_end:-unreadable} at end -- the ${_ok}/${_tried} result cannot be attributed to a tracer arm (another run on this host?)"
+fi
+log "tracer arm held: hw.vmm.nested.svm_debug=${_svm_end:-n/a}"
 [ "$_tried" -eq "$L2_CYCLES" ] ||
     fail "loop attempted ${_tried} cycles, not ${L2_CYCLES} (log: $CONS)"
 if [ "$_ok" -ne "$L2_CYCLES" ]; then
