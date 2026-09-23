@@ -29,6 +29,10 @@
 #                needs no per-VM flag.  Set NFLAG=-N to check that the
 #                deprecated option is still accepted as a harmless no-op.
 #   L1_MEM       L1 memory (default 4G); L1_CPUS (default 2)
+#   L2_CPUS      vCPUs for the L2 guest (default 1). Must not exceed L1_CPUS
+#                -- bhyve inside L1 cannot use more CPUs than L1 has, and a
+#                run that quietly tested a narrower guest than asked for is a
+#                measurement about a guest nobody requested.
 #   L1_TIMEOUT   seconds to wait for the L1 login prompt (default 300)
 #   L2_TIMEOUT   seconds to wait for the L2 banner (default 120)
 #   WORKDIR      scratch directory (default: mktemp -d)
@@ -63,6 +67,13 @@ set -u
 # cycle is a full L2 entry and teardown from the same L1, which is where a
 # leaked ASID/VPID or a resource leak in the nested path would show up.
 : "${L2_CYCLES:=1}"
+# vCPUs for the L2 guest. Was hard-coded to 1 in both the single-shot and the
+# stress paths, which is fine for "does an L2 run at all" but makes the width
+# question unaskable -- and width claims are published. An L2 wider than L1 is
+# refused rather than silently clamped: bhyve inside L1 cannot exceed the CPUs
+# L1 itself was given, and a run that quietly tested 2 when asked for 8 is a
+# measurement about a guest nobody requested.
+: "${L2_CPUS:=1}"
 # hw.vmm.nested.svm_debug to run L0 with. Applied once L1 has booted, and
 # deliberately NOT restored on exit -- the host is left in whichever arm ran
 # last, so set it explicitly rather than inheriting it.
@@ -120,6 +131,18 @@ case "${SVM_DEBUG_STRICT}" in
 0|1) ;;
 *)   fail "SVM_DEBUG_STRICT must be 0 or 1, got '${SVM_DEBUG_STRICT}'" ;;
 esac
+# Both, and separately: comparing against an unvalidated L1_CPUS reports
+# "L2_CPUS=1 exceeds L1_CPUS=abc", which is false and sends the reader to
+# raise a number that is not the problem. Malformed and too-wide are
+# different faults and get different messages.
+for _v in L1_CPUS L2_CPUS; do
+	eval "_n=\$$_v"
+	case "$_n" in
+	''|*[!0-9]*|0*)	fail "$_v must be a positive integer, got '$_n'" ;;
+	esac
+done
+[ "${L2_CPUS}" -le "${L1_CPUS}" ] ||
+    fail "L2_CPUS=${L2_CPUS} exceeds L1_CPUS=${L1_CPUS}: bhyve inside L1 cannot use more CPUs than L1 has. Raise L1_CPUS to at least ${L2_CPUS}."
 
 [ "$(id -u)" -eq 0 ] || skip "must run as root"
 [ -n "$L1_IMAGE" ] && [ -r "$L1_IMAGE" ] || skip "L1_IMAGE not set or unreadable"
@@ -430,7 +453,7 @@ l2_failed()
 
 if [ "$L2_CYCLES" -le 1 ]; then
 	mark=$(wc -l < "$CONS")
-	send 'bhyveload -m 512M -h / -e console=comconsole -e autoboot_delay=1 l2 && echo ===L2"START"=== && bhyve -c 1 -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,stdio l2; echo ===L2"EXIT"=$?==='
+	send 'bhyveload -m 512M -h / -e console=comconsole -e autoboot_delay=1 l2 && echo ===L2"START"=== && bhyve -c '"$L2_CPUS"' -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,stdio l2; echo ===L2"EXIT"=$?==='
 	wait_for '===L2START===' 60 "$mark" || fail "bhyveload inside L1 failed (see $CONS)"
 	# Deliberately NOT re-marked here.  A second mark taken after wait_for returns
 	# races the L2 output: wait_for polls once a second, bhyve starts the instant
@@ -535,7 +558,7 @@ _w "'echo STEP=loadrc:\$?'"
 # two soaks recorded the abort and NOT the reason, because stderr had been
 # discarded: the evidence that would name the assertion was thrown away by
 # the harness watching for it.
-_w "'bhyve -c 1 -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,/dev/nmdm_l2\${i}A l2 >/tmp/l2err.\${i} 2>&1 &'"
+_w "'bhyve -c '"$L2_CPUS"' -m 512M -A -H -P -s 0,hostbridge -s 31,lpc -l com1,/dev/nmdm_l2\${i}A l2 >/tmp/l2err.\${i} 2>&1 &'"
 _w "'p=\$!'"
 _w "'echo STEP=started:\$p'"
 # POLL, do not sleep a fixed time. A flat `sleep 15' makes the test ask

@@ -125,6 +125,14 @@ expect "SVM_DEBUG=yes rejected"      1 "SVM_DEBUG must be 0 or 1" SVM_DEBUG=yes
 expect "SVM_DEBUG=01 rejected"       1 "SVM_DEBUG must be 0 or 1" SVM_DEBUG=01
 expect "SVM_DEBUG=' 1' rejected"     1 "SVM_DEBUG must be 0 or 1" "SVM_DEBUG= 1"
 expect "SVM_DEBUG_STRICT=2 rejected" 1 "SVM_DEBUG_STRICT must be 0 or 1" SVM_DEBUG_STRICT=2
+expect "L2_CPUS=0 rejected"          1 "L2_CPUS must be a positive integer" L2_CPUS=0
+expect "L2_CPUS=two rejected"        1 "L2_CPUS must be a positive integer" L2_CPUS=two
+expect "L2_CPUS=-1 rejected"         1 "L2_CPUS must be a positive integer" L2_CPUS=-1
+# Wider than L1 is refused rather than clamped: a run that silently tested 2
+# when asked for 8 would answer a question nobody put.
+expect "L2_CPUS>L1_CPUS rejected"    1 "exceeds L1_CPUS" L2_CPUS=8 L1_CPUS=2
+# A malformed L1_CPUS must say so, not blame L2_CPUS for exceeding it.
+expect "L1_CPUS=abc rejected"        1 "L1_CPUS must be a positive integer" L1_CPUS=abc
 
 # --- accepted values -------------------------------------------------------
 # These must get PAST validation. With L1_IMAGE unset the run then SKIPs (77)
@@ -151,6 +159,8 @@ expect "SVM_DEBUG unset accepted"    77 "" IGNORE=1
 expect "SVM_DEBUG empty accepted"    77 "" SVM_DEBUG=
 expect "SVM_DEBUG_STRICT=0 accepted" 77 "" SVM_DEBUG_STRICT=0
 expect "SVM_DEBUG_STRICT=1 accepted" 77 "" SVM_DEBUG_STRICT=1
+expect "L2_CPUS=1 accepted"          77 "" L2_CPUS=1
+expect "L2_CPUS=4 with L1_CPUS=4"    77 "" L2_CPUS=4 L1_CPUS=4
 
 # --- result ----------------------------------------------------------------
 _p=$(wc -l < "$WORK/pass" | tr -d ' ')
