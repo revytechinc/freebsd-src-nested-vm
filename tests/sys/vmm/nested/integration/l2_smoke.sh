@@ -41,8 +41,10 @@
 #                every rate measured here must be reported with this value;
 #                set 0 for the other arm. The run reads the sysctl back and
 #                ABORTS if it is not what was asked for, since the rate would
-#                otherwise be filed under the wrong arm; on a VMX host the
-#                OID is absent and the arm is reported as n/a instead.
+#                otherwise be filed under the wrong arm. Despite the name the
+#                OID is present on both vendors in this tree; where it is
+#                genuinely absent (stock or older vmm) the arm is reported
+#                as n/a rather than guessed.
 #   SVM_DEBUG_STRICT=0
 #                downgrade that abort to a warning (diagnostic runs only).
 #   KEEP=1       keep WORKDIR and the console log on exit
@@ -304,10 +306,15 @@ progress "L1 booted"
 # has its value overwritten right here, which is how a campaign ends up
 # running one arm twice and reporting it as a comparison.
 #
-# Three states, not two, and the third is why this cannot simply fail:
-# hw.vmm.nested.svm_debug is SVM-only, so on a VMX host the OID is ABSENT.
-# That is not a mismatched arm, it is a host with no SVM tracer to set, and
-# failing there would break every Intel run.
+# Three states, not two, because an empty readback is not a mismatched arm.
+#
+# MEASURED, contrary to what the name suggests: hw.vmm.nested.svm_debug is
+# present on BOTH vendors in this tree -- it reads 1 on freedev003 (vmx=1
+# svm=0) exactly as on freedev010 (vmx=0 svm=1). So "absent" does NOT mean
+# "a VMX host"; it means a kernel without the OID at all, such as stock
+# vmm(4) or an older build. The branch below is kept for that case rather
+# than for Intel, and it is written to distinguish it from a read that simply
+# failed.
 # What the operator left the sysctl at BEFORE we touch it. Reading this is the
 # difference between checking our own work and checking their intent: without
 # it, "set the sysctl to 0, then run without SVM_DEBUG=0" still measures arm 1
@@ -345,14 +352,14 @@ elif [ -z "${_svm_dbg}" ]; then
 	# "unknown oid" error establishes it -- an empty stdout does not.
 	case "${_svm_rerr}" in
 	*"unknown oid"*|*"unknown 'oid'"*)
-		# Confirm it really is a VMX host rather than an AMD kernel that
-		# is missing the tracer, which would be a finding, not an n/a.
-		# hw.vmm.nested.vmx exists on BOTH vendors on this tree -- it
-		# reads 1 on Tiger Lake and Ivy Bridge and 0 on Zen+ -- so its
-		# absence here would itself be unexpected and falls through to
-		# the fail below rather than being read as "not VMX".
+		# The OID is present on both vendors in this tree (measured),
+		# so reaching here at all is unexpected and worth narrowing
+		# rather than waving through. hw.vmm.nested.vmx also exists on
+		# both -- 1 on Tiger Lake and Ivy Bridge, 0 on Zen+ -- so a
+		# VMX host with no tracer OID is a plausible older/stock kernel
+		# and is tolerated; anything else falls through to the fail.
 		if [ "$(sysctl -n hw.vmm.nested.vmx 2>/dev/null)" = "1" ]; then
-			log "L0 has no hw.vmm.nested.svm_debug (SVM-only OID) on a VMX host -- tracer arm: n/a"
+			log "L0 has no hw.vmm.nested.svm_debug OID (stock or older vmm; this tree has it on both vendors) -- tracer arm: n/a"
 			progress "svm_debug=n/a"
 		else
 			fail "hw.vmm.nested.svm_debug is absent and this is not a VMX host (${_svm_rerr}) -- cannot attribute a tracer arm"
