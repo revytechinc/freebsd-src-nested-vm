@@ -349,7 +349,10 @@ _size_ok()
 	# anything. It is kept anyway because it is dead by PRECEDING GUARD, not
 	# dead by construction: relax any one of those three and this becomes
 	# the only line still looking at the value. Drop the leading-zero case
-	# and "0M" arrives here; drop the all-digits case and "4g" does.
+	# and "0M" arrives here; drop the all-digits case and "4gM" does.
+	# ("4g" would NOT -- the `g' is the unit and is stripped, leaving 4,
+	# which is a valid 4 gigabytes. It takes a second unit letter to leave
+	# a non-numeric behind.)
 	#
 	# It carried a 2>/dev/null once. That hid a DIAGNOSTIC, not a failure:
 	# `[ 4g -gt 0 ]' exits 2 as well as complaining, so the rejection
