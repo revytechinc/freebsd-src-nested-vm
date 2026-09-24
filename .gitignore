@@ -53,5 +53,12 @@ sys/*/compile
 # repository is public and they are not part of the source tree.
 .claude/
 
+# Agent tool state written into the tree by developer tooling: run
+# continuations, scratch evidence, notepads. Not part of the source tree.
+#
+# The whole directory, not one file, for the reason given above.
+.omo/
+.sisyphus/
+
 # Python bytecode from running the in-tree test scripts
 __pycache__/
