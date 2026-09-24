@@ -216,7 +216,7 @@ selftest_classifier()
 	    "---<<BOOT>>---" \
 	    "Copyright (c) 1992-2026 The FreeBSD Project." \
 	    "FreeBSD 16.0-CURRENT #0: Thu Aug 20 01:33:43 UTC 2026" \
-	    "    root@freedev005:/usr/obj/.../sys/GENERIC amd64" \
+	    "    root@buildhost:/usr/obj/.../sys/GENERIC amd64" \
 	    "FreeBSD/SMP: Multiprocessor System Detected: 1 CPUs" \
 	    "Timecounter \"TSC-low\" frequency 1305603517 Hz quality 1000" \
 	    "Trying to mount root from ufs:/dev/vtbd0 []..." \
