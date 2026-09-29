@@ -1818,7 +1818,7 @@ kern_jail_set(struct thread *td, struct uio *optuio, int flags)
 			namelc = "";
 		if (path == NULL) {
 			path = "/";
-			root = mypr->pr_root;
+			root = ppr->pr_root;
 			vref(root);
 		}
 		strlcpy(pr->pr_hostuuid, DEFAULT_HOSTUUID, HOSTUUIDLEN);
@@ -3432,14 +3432,11 @@ prison_hold_locked(struct prison *pr)
 void
 prison_hold(struct prison *pr)
 {
-#ifdef INVARIANTS
-	int was_valid = refcount_acquire_if_not_zero(&pr->pr_ref);
+	u_int old __diagused;
 
-	KASSERT(was_valid,
-	    ("Trying to hold dead prison %p (jid=%d).", pr, pr->pr_id));
-#else
-	refcount_acquire(&pr->pr_ref);
-#endif
+	old = refcount_acquire(&pr->pr_ref);
+	KASSERT(old > 0,
+	    ("cannot hold a non-alive prison (jid=%d)", pr->pr_id));
 }
 
 /*
@@ -3478,19 +3475,12 @@ prison_free(struct prison *pr)
 static void
 prison_free_not_last(struct prison *pr)
 {
-#ifdef INVARIANTS
-	int lastref;
+	bool released __diagused;
 
-	KASSERT(refcount_load(&pr->pr_ref) > 0,
-	    ("Trying to free dead prison %p (jid=%d).",
-	     pr, pr->pr_id));
-	lastref = refcount_release(&pr->pr_ref);
-	KASSERT(!lastref,
+	released = refcount_release(&pr->pr_ref);
+	KASSERT(!released,
 	    ("prison_free_not_last freed last ref on prison %p (jid=%d).",
 	     pr, pr->pr_id));
-#else
-	refcount_release(&pr->pr_ref);
-#endif
 }
 
 /*
@@ -3505,14 +3495,11 @@ prison_free_not_last(struct prison *pr)
 void
 prison_proc_hold(struct prison *pr)
 {
-#ifdef INVARIANTS
-	int was_alive = refcount_acquire_if_not_zero(&pr->pr_uref);
+	u_int old __diagused;
 
-	KASSERT(was_alive,
-	    ("Cannot add a process to a non-alive prison (jid=%d)", pr->pr_id));
-#else
-	refcount_acquire(&pr->pr_uref);
-#endif
+	old = refcount_acquire(&pr->pr_uref);
+	KASSERT(old > 0,
+	    ("cannot add a process to a non-alive prison (jid=%d)", pr->pr_id));
 }
 
 /*
@@ -3529,8 +3516,6 @@ prison_proc_free(struct prison *pr)
 	 * This allows assurance that a locked prison will remain alive
 	 * until it is unlocked.
 	 */
-	KASSERT(refcount_load(&pr->pr_uref) > 0,
-	    ("Trying to kill a process in a dead prison (jid=%d)", pr->pr_id));
 	if (!refcount_release_if_not_last(&pr->pr_uref)) {
 		/*
 		 * Don't remove the last user reference in this context,
@@ -3738,8 +3723,10 @@ prison_deref(struct prison *pr, int flags)
 			 * that need to be killed, either in this prison or its
 			 * descendants.
 			 */
-			if (refcount_load(&pr->pr_uref) > 0)
+			if (refcount_load(&pr->pr_uref) > 0) {
 				killpr = pr;
+				flags &= ~PD_DEREF;
+			}
 			/* Make sure the parent prison doesn't get killed. */
 			flags &= ~PD_KILL;
 		}
@@ -3809,8 +3796,10 @@ prison_deref(struct prison *pr, int flags)
 		sx_xunlock(&allprison_lock);
 
 	/* Kill any processes attached to a killed prison. */
-	if (killpr != NULL)
+	if (killpr != NULL) {
 		prison_proc_iterate(killpr, prison_kill_processes_cb, NULL);
+		prison_free(killpr);
+	}
 
 	/*
 	 * Finish removing any unreferenced prisons, which couldn't happen
