@@ -2,9 +2,6 @@
 
 KMOD=	vmm
 
-.if ${MACHINE_CPUARCH} == "amd64"
-.endif
-
 SRCS+=	acpi_if.h bus_if.h device_if.h pci_if.h pcib_if.h vnode_if.h
 
 CFLAGS+= -DVMM_KEEP_STATS
@@ -18,9 +15,28 @@ SRCS+=	vmm.c			\
 	vmm_dev_machdep.c	\
 	vmm_instruction_emul.c	\
 	vmm_mem.c		\
-	vmm_nested.c		\
 	vmm_stat.c		\
 	vmm_vm.c
+
+# vmm_nested.c is amd64-ONLY: it lives in sys/amd64/vmm and has no counterpart
+# under sys/dev/vmm or sys/arm64/vmm. Listing it above, where every other entry
+# resolves on all three architectures, breaks the module on arm64 and riscv:
+#
+#	make[4]: don't know how to make vmm_nested.c. Stop
+#	stopped making "all" in .../sys/modules/vmm
+#
+# It has been wrong since the nested work was forward-ported. A commit titled
+# "vmm: build vmm_nested.c only on amd64, not on every architecture" exists and
+# did NOT do that -- its entire diff changes one tab inside this list. The
+# message described the fix; the patch never made it.
+#
+# Nothing caught it because the aarch64 CI lane could not be scheduled at all
+# (no agent carried the label pair it asked for), so the only build that
+# compiles this module for arm64 had never run. The first run after that was
+# fixed failed here, which is the lane doing precisely its job.
+.if ${MACHINE_CPUARCH} == "amd64"
+SRCS+=	vmm_nested.c
+.endif
 
 .if ${MACHINE_CPUARCH} == "aarch64"
 CFLAGS+= -I${SRCTOP}/sys/${MACHINE}/vmm/io

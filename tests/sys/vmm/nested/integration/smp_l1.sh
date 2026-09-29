@@ -75,6 +75,19 @@ SMP L1 plan:
 PLAN
 }
 
+
+# WHAT THIS FILE DOES, PLAINLY: it enumerates a plan. It does not launch a
+# guest, and it never did -- there is no bhyve invocation anywhere in it.
+#
+# It used to end by echoing "PASS: ... enumerated ...". The word "enumerated"
+# was honest; reporting it as PASS was not. A plan that prints itself cannot
+# fail, so this reported success on every host, on every build, including ones
+# where nested virtualization was completely broken -- and it was counted as
+# nested coverage the fleet did not have.
+#
+# It exits 77 (SKIP) until the driver exists. A skip is a gap you can see; a
+# PASS is a gap that looks like coverage.
+
 smp_main()
 {
 	if smp_unsupported; then
@@ -83,7 +96,10 @@ smp_main()
 	echo "T43 smp_l1: SMP L1 multi-vCPU launch"
 	smp_plan "${L1_VCPUS}" "${L2_PER_VCPU}"
 	local total=$((L1_VCPUS * L2_PER_VCPU))
-	echo "PASS: ${total}/${total} L2 instances enumerated; on-target driver launches them concurrently"
+	echo "SKIP: plan only -- ${total} L2 instances enumerated, none launched."
+	echo "SKIP: this file contains no bhyve invocation; the concurrent"
+	echo "SKIP: launcher it describes has not been written."
+	exit 77
 }
 
 smp_main "$@"

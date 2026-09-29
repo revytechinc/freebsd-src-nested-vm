@@ -55,6 +55,20 @@ extern uint64_t	svm_l2_evtq_inject;	/* injected on a later L2 entry */
 extern uint64_t	svm_l2_evtq_l1;		/* handed to L1 via VMCB12 */
 extern uint64_t	svm_l2_evtq_drop;	/* queue overflow (must stay 0) */
 extern uint64_t	svm_l2_evtq_max;	/* high-water queue depth */
+/*
+ * All-ones L2 RIP accounting. Declared here rather than function-locally: a
+ * local `extern' catches a renamed symbol at link time but NOT a changed type
+ * -- svm.c switching these to counter_u64_t would go undiagnosed across
+ * translation units and quietly corrupt the sysctl. See the block comment
+ * above their definitions in svm.c for how to read them and what they cannot
+ * support.
+ */
+extern uint64_t	svm_l2_badrip_entry;
+extern uint64_t	svm_l2_badrip_reflect;
+extern uint64_t	svm_l2_badrip_mismatch;
+extern uint64_t	svm_l2_badrip_gpaswitch;
+extern uint64_t	svm_l2_badrip_firstrun;
+extern uint64_t	svm_l2_badrip_carried;
 
 /*
  * Per-vCPU nested-virt state. Currently a minimal stub sufficient for
@@ -65,6 +79,20 @@ extern uint64_t	svm_l2_evtq_max;	/* high-water queue depth */
 struct svm_nested {
 	bool		nested_in_l2;	/* hardware VMCB holds L2 state */
 	bool		gif;		/* global interrupt flag (STGI/CLGI) */
+	bool		badrip_at_entry;	/* this L2 run STARTED with RIP == -1 */
+					/* NOT an origin claim: -1 in VMCB12 may be
+					 * L1's, or the one L0 reflected there on
+					 * the previous exit. An earlier name,
+					 * badrip_from_l1, asserted the former. */
+	uint64_t	last_reflected_rip; /* RIP L0 last wrote into VMCB12 */
+	uint64_t	last_reflected_gpa; /* ...and the VMCB12 it wrote it to */
+	/*
+	 * Zeroed with the rest of the vCPU: svm_vcpu_init() allocates with
+	 * M_ZERO, so a fresh vCPU starts with last_reflected_valid false.
+	 * The record's lifetime is the vCPU's -- a guest reset that does NOT
+	 * reallocate the vCPU would carry it across, and nothing clears it.
+	 */
+	bool		last_reflected_valid; /* L0 has reflected at least once */
 	uint64_t	vmcb12_gpa;	/* L1 GPA of the VMCB passed to VMRUN */
 	struct vmcb	*vmcb12;	/* held mapping of that page, while in L2 */
 	void		*vmcb12_cookie;

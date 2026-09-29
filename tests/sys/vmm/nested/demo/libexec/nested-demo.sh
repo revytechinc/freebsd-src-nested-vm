@@ -250,9 +250,11 @@ if [ "$SVM" != "0" ]; then
 elif [ "$VMX" != "0" ]; then
 	info "Host CPU: Intel VMX nested virtualization available (hw.vmm.nested.vmx=$VMX)."
 else
-	err "neither hw.vmm.nested.svm nor .vmx is enabled - this CPU/kernel cannot"
-	err "host nested guests.  You need an Intel VT-x or AMD-V host running the"
-	err "CloudBSD nested kernel."
+	# The nested kernel IS present (checked above), so this really is the
+	# CPU, and the message can say so without hedging about the kernel.
+	err "the nested kernel is running, but this CPU reports no virtualization"
+	err "extensions: hw.vmm.nested.svm and .vmx are both 0.  Nested guests"
+	err "need an Intel VT-x or AMD-V processor."
 	exit 1
 fi
 

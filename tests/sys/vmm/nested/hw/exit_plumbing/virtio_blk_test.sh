@@ -53,14 +53,23 @@ virtio_blk_basic_body()
 	nested_load_vmm || atf_skip "vmm(4) not loadable"
 	vmname=$(nested_default_vmname virtio_blk_basic)
 	logdir=$(nested_make_log_dir virtio_blk_basic)
-	atf_check -s exit:0 -o save:${logdir}/create.log \
-	    nested_vm_create "${vmname}" 256M
-	atf_check -s exit:0 -o ignore -e ignore \
-	    sh -c "nested_vm_running ${vmname}"
-	atf_check -s exit:0 -o save:${logdir}/bhyve.log -e ignore \
-	    bhyve -c 1 -m 256M -s 0,hostbridge -s 1,lpc \
-	        -s 2,virtio-blk,/dev/null -l com1,stdio \
-	        -H -A -P "${vmname}" </dev/null
+	nested_vm_create "${vmname}" 256M >"${logdir}/create.log" 2>&1 ||
+	    atf_fail "nested_vm_create ${vmname} failed -- see ${logdir}/create.log"
+	nested_vm_running "${vmname}" ||
+	    atf_fail "${vmname} was created but is not registered in /dev/vmm"
+	# Without a boot device the guest triple-faults and bhyve exits 3.
+	nested_require_l2_image
+	nested_require_bootrom
+	# bhyve block emulations cannot use /dev/null as a backing store:
+	# "Could not fetch dev blk/sector size: Inappropriate ioctl for
+	# device". A sparse scratch image costs nothing and is real.
+	scratch="${logdir}/scratch.img"
+	truncate -s 64M "${scratch}"
+	nested_boot_guest "${logdir}/bhyve.log" -c 1 -m 256M -s 0,hostbridge -s 1,lpc \
+	        -s 2,virtio-blk,"${scratch}" -l com1,stdio \
+	        -l bootrom,"${bootrom}" \
+	        -s 4,virtio-blk,"${l2img}" \
+	        -H -A -P "${vmname}"
 }
 virtio_blk_basic_cleanup()
 {

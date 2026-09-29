@@ -131,9 +131,29 @@ vmx_l2_stats_sysctl(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "entries=%lu injects=%lu swallow=%lu idtv_reinject=%lu\n",
 	    (unsigned long)vmx_l2_entries, (unsigned long)vmx_l2_injects,
 	    (unsigned long)vmx_l2_swallow, (unsigned long)vmx_l2_idtv_reinject);
-	sbuf_printf(&sb, "ept02_fill=%lu ept02_refault=%lu\n",
+	/*
+	 * Print the knob beside the counts, rather than either hiding the
+	 * counts or letting bare zeros speak.
+	 *
+	 * ept02_classify is off by default, so the usual case is that these
+	 * are zero because nothing incremented them -- not because the
+	 * shadow-EPT path was idle. A reader correlating a campaign against
+	 * "ept02_fill=0" on a host that took millions of L2 entries will
+	 * conclude the path was never used.
+	 *
+	 * Suppressing the numbers when the knob is currently off does NOT
+	 * fix that, and was tried: these counters are CUMULATIVE while the
+	 * knob is live, so a run that classified for a while and then turned
+	 * it off would have had real, non-zero counts replaced by "not
+	 * counted" -- hiding data to avoid a misreading, which is the same
+	 * state-collapse one step further on. Emit both and let the reader
+	 * judge: a non-zero count with classify=0 says exactly what it is,
+	 * measurement from an earlier window.
+	 */
+	sbuf_printf(&sb, "ept02_fill=%lu ept02_refault=%lu ept02_classify=%d\n",
 	    (unsigned long)vmx_l2_ept02_fill,
-	    (unsigned long)vmx_l2_ept02_refault);
+	    (unsigned long)vmx_l2_ept02_refault,
+	    vmx_nested_ept02_classify);
 	for (i = 0; i < 128; i++)
 		if (vmx_l2_exit_hist[i] != 0)
 			sbuf_printf(&sb, "reason %d = %lu\n", i,

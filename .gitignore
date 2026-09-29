@@ -55,3 +55,42 @@ sys/*/compile
 
 # Python bytecode from running the in-tree test scripts
 __pycache__/
+
+# Scratch files written into the repo root by agent sessions -- probes,
+# console captures, one-off trigger scripts, saved JSON status.
+#
+# Same hazard as .review/ above. Untracked but not ignored, these are one
+# `git add -A` away from a commit in a public tree.
+#
+# SCOPE, because a partial control described as a complete one is worse than
+# none: these patterns cover DOTFILE families only. A scratch file with an
+# ordinary name is NOT covered, and that case needs judgement at `git add`
+# time or its own entry. This block narrows the exposure; it does not close
+# it.
+#
+# Ignoring them does not delete anyone's working files; it only stops them
+# being swept up by accident.
+#
+# The families below are the ones observed in the root; they are listed
+# individually rather than as a blanket `.*' because this tree has real root
+# dotfiles (.cirrus.yml, .clang-format, .arcconfig, .mailmap and others) that
+# must stay visible.
+# Anchored with a leading `/' so each matches ONLY in the repo root. Without
+# it git matches the pattern at any depth, which would silently hide a
+# same-named file anywhere in sys/ or tests/ -- wider than the scope described
+# above, and invisible when it bites.
+#
+# The pattern names themselves are a deliberate trade: a rule must name what
+# it excludes, so these do disclose the shape of some internal names. That is
+# accepted because the alternative -- the files themselves, with their
+# contents -- discloses far more.
+/.agent-*
+/.subagent-*
+/.jenkins-*
+/.freedev*
+/.fd00*
+/.ssh-probe*
+/.kernel-grep*
+/.run-desktop-test*
+/.shell-pwd*
+/.tmp-jenkins-*

@@ -42,9 +42,26 @@ nested_basic_body()
 	nested_load_vmm
 	atf_check -s exit:0 -o ignore -e ignore kldstat -q -m vmm
 
+	# TWO LEVELS, as svm_basic does. They are different findings.
+	#
+	# No hw.vmm.nested node at ALL means this kernel simply does not carry
+	# the nested-virt work -- a stock FreeBSD kernel, for instance. That is
+	# a reason not to run, not a regression, and it must SKIP.
+	#
+	# This test used to have only the second check below, so on a stock
+	# kernel it FAILED while svm_basic SKIPPED on the identical condition:
+	# the same environmental fact producing two different verdicts. Found
+	# by running the suite inside an L1 booted from a stock snapshot image,
+	# where three tests failed for exactly this reason.
+	if ! sysctl -Nq hw.vmm.nested >/dev/null 2>&1; then
+		atf_skip "no hw.vmm.nested node in this kernel -- not a CloudBSD nested-virt build"
+	fi
+
+	# The node IS present, so the gate beneath it must be too. Missing now
+	# means it was removed or renamed, which IS a regression and must fail.
 	enable=$(nested_sysctl_get enable)
 	if [ -z "${enable}" ]; then
-		atf_fail "hw.vmm.nested.enable is not exposed by the running kernel"
+		atf_fail "hw.vmm.nested exists but hw.vmm.nested.enable is not exposed -- the gate was removed or renamed"
 	fi
 	# Nesting is ON by default (the sysctl is the single master switch).
 	# vmm_init() forces it back to 0 only on hardware that cannot nest at

@@ -10,6 +10,8 @@ TESTSDIR=	${TESTSBASE}/sys/vmm/nested/hw/preflight
 BINDIR=		${TESTSDIR}
 
 
+# Listed in no Makefile until now, so the dispatcher never shipped.
+${PACKAGE}FILES+=	preflight_nsvm_dispatcher.sh
 ${PACKAGE}FILES+=	preflight_unit_help.sh \
 			preflight_unit_classify.sh \
 			preflight_sysctl_paths.sh \
@@ -28,5 +30,13 @@ ${PACKAGE}FILES+=	preflight_unit_help.sh \
 			preflight_arch_consistency_test.sh \
 			preflight_critical_bugfix_test.sh \
 			run_preflight_tests.sh
+
+# Every member of this group is a script. bsd.files.mk would give them
+# SHAREMODE (0444), which cannot be executed by anyone, root included. The
+# driver happens to invoke them as `bash <file>` so the modes have not bitten
+# yet, but shipping a program unexecutable is the fault this whole change is
+# about, and one `./script` anywhere would surface it. Set for the group, not
+# per file, so a script added above cannot miss it.
+${PACKAGE}FILESMODE=	0555
 
 .include <bsd.test.mk>

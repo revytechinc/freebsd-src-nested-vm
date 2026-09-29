@@ -162,7 +162,7 @@ preflight_unit_test_module_head()
 }
 preflight_unit_test_module_body()
 {
-	bash "$0"
+	sh "$0"
 }
 atf_init_test_cases()
 {

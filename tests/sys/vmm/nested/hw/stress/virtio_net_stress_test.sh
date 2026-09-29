@@ -51,14 +51,18 @@ virtio_net_stress_body()
 	nested_load_vmm || atf_skip "vmm(4) not loadable"
 	vmname=$(nested_default_vmname virtio_net_stress)
 	logdir=$(nested_make_log_dir virtio_net_stress)
-	atf_check -s exit:0 -o save:${logdir}/create.log \
-	    nested_vm_create "${vmname}" 512M
-	atf_check -s exit:0 -o ignore -e ignore \
-	    sh -c "nested_vm_running ${vmname}"
-	atf_check -s exit:0 -o save:${logdir}/bhyve.log -e ignore \
-	    bhyve -c 1 -m 512M -s 0,hostbridge -s 1,lpc \
+	nested_vm_create "${vmname}" 512M >"${logdir}/create.log" 2>&1 ||
+	    atf_fail "nested_vm_create ${vmname} failed -- see ${logdir}/create.log"
+	nested_vm_running "${vmname}" ||
+	    atf_fail "${vmname} was created but is not registered in /dev/vmm"
+	# Without a boot device the guest triple-faults and bhyve exits 3.
+	nested_require_l2_image
+	nested_require_bootrom
+	nested_boot_guest "${logdir}/bhyve.log" -c 1 -m 512M -s 0,hostbridge -s 1,lpc \
 	        -s 2,virtio-net,tap0 \
-	        -l com1,stdio -H -A -P "${vmname}" </dev/null
+	        -l bootrom,"${bootrom}" \
+	        -s 4,virtio-blk,"${l2img}" \
+	        -l com1,stdio -H -A -P "${vmname}"
 	atf_check -s exit:0 -o save:${logdir}/burst.log -e ignore \
 	    sh -c "i=0; while [ \$i -lt ${ITERATIONS} ]; do \
 	        ping -c 1 -W ${BURST_SECONDS} 127.0.0.1 >/dev/null 2>&1 || true; \
