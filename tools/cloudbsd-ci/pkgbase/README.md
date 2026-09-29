@@ -13,7 +13,7 @@ builds are suppressed: start it from Jenkins (`github-revytechinc` ->
 | Job | `github-revytechinc/freebsd-src-nested-vm/main` (org-folder discovered; pipeline: `/Jenkinsfile`) |
 | Scripts | `tools/cloudbsd-ci/pkgbase/{stamp,preflight,build,record,publish-pkgrepo}.sh` |
 | Source | this repository, the branch being built (`main`) |
-| Builders | label `poudriere-amd64` (freedev005, freedev006), lock `poudriere-amd64-${NODE_NAME}` |
+| Builders | builder pool: lock ONE resource labelled `poudriere-amd64-builders` (`poudriere-amd64-<node>`: freedev005, freedev006), then run on that node |
 | Repository | InternalPkg `https://pkg.internal.revytechinc.com/FreeBSD:16:amd64/base_latest/` |
 | On disk | freedev008 `/usr/local/bastille/jails/pkgrepo/root/usr/local/www/pkgrepo/FreeBSD:16:amd64/base_latest` |
 | Client snippet | cloudbsd-ci `pkg/repos/internal-base.conf` -> `/usr/local/etc/pkg/repos/internal-base.conf` |
@@ -31,9 +31,13 @@ also exists, but nothing in the nested pipeline builds from it.
    records the commit and refuses a dirty tree.
 2. **Preflight**: FreeBSD/amd64, pkg installed, >= 80G free, prints the tree's
    `__FreeBSD_version` against the host's `kern.osreldate`.
-3. **Build**, unprivileged, niced, every core:
-   `make buildworld buildkernel` then
-   `make packages PKG_VERSION=<MAJOR>.snap<UTC timestamp> REPODIR=${WORKSPACE}@pkgbase/repo`
+3. **Build**, unprivileged, niced, with memory-capped parallelism:
+   `make -j<N> buildworld buildkernel` then
+   `make -j<min(N,8)> packages PKG_CTHREADS=2 PKG_VERSION=<MAJOR>.snap<UTC timestamp> REPODIR=${WORKSPACE}@pkgbase/repo`.
+   N is `MAKE_JOBS`, or with 0 (default) min(cores/2, RAM GiB/4): 31 on a
+   64-core/128G builder. `LLVM_TARGETS=host-only` (default) adds
+   `WITHOUT_LLVM_TARGET_ALL=yes`; `all` builds every LLVM target like
+   pkg.FreeBSD.org
    (objects in `${WORKSPACE}@pkgbase/obj`, outside the tree).
    Host `/etc/src.conf`, `/etc/make.conf`, `/etc/src-env.conf` are ignored
    (`SRCCONF=/dev/null` ...), so both builders produce the same set.
@@ -48,8 +52,17 @@ also exists, but nothing in the nested pipeline builds from it.
    existing InternalPkg key on freedev008. The key never leaves the pkgrepo
    jail and this job never reads it.
 
-The world build holds the node's build lock, so it serialises with poudriere
-on the same builder and leaves the other builder free.
+The build takes a builder from the pool (cloudbsd-ci `jenkins/casc/jenkins.yaml`,
+Track #396): it locks whichever `poudriere-amd64-<node>` resource is free, then
+runs on that node. It therefore never shares a builder with a poudriere bulk and
+never waits on a busy builder while another is idle.
+
+**Memory.** freedev005 also hosts the Jenkins controller jail. On 2026-09-29 the
+first run (`-j64` world, then `make packages` at `-j64` with the default
+`PKG_CTHREADS=0`, one zstd thread per core in every `pkg create`) ran freedev005
+out of swap, and the OOM killer took the controller. That is why the job never
+uses every core, and why packaging runs few jobs with two compression threads
+each. Do not raise `MAKE_JOBS` towards the core count.
 
 ## Publishing
 
