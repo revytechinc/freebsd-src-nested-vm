@@ -26,7 +26,7 @@
  */
 
 /*
- * T17 / Wave 3: VMX nested-virt register-virt tests.
+ * VMX nested-virt register-virt tests.
  *
  * Five kernel-side sanity checks for the register-virtualization
  * additions to the VMX (Intel) nested-virt path.  The module runs
@@ -86,10 +86,10 @@ struct vcpu;
 
 /*
  * Compile-time guarantees about the nested-VMX additions.  Both
- * predicates must hold for vmcs12 allocation to work (T15).
+ * predicates must hold for vmcs12 allocation to work.
  *
  * - struct vmcs must be exactly PAGE_SIZE (declared in vmcs.h).
- * - struct vmx_vcpu must carry the nvmcs12 pointer (T15).
+ * - struct vmx_vcpu must carry the nvmcs12 pointer.
  *
  * If either invariant is violated the test module refuses to load
  * so a future regression is caught at kldload time, not at first
@@ -261,7 +261,7 @@ vmxtest_nested_gate(void)
  * Test 3: VMCS12 allocation.
  *
  * Two layered checks, both compile-time and runtime:
- *   (a) struct vmx_vcpu carries the nvmcs12 pointer (T15).
+ *   (a) struct vmx_vcpu carries the nvmcs12 pointer.
  *   (b) struct vmcs is exactly PAGE_SIZE (vmcs.h CTASSERT).
  *   (c) The two addresses differ in the enclosing struct (guards
  *       against a regression where someone replaces nvmcs12 with a

@@ -38,7 +38,7 @@
 
 #define	PIT_FREQ	1193182u
 #define	PIT_CTRL	0x43
-#define	ACPI_PM_PORT	0x408		/* freedev006 acpi_timer0 */
+#define	ACPI_PM_PORT	0x408		/* acpi_timer0 */
 #define	ACPI_PM_FREQ	3579545u
 
 /* SVM IOIO EXITINFO1 bits. */

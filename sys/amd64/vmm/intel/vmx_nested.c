@@ -4,7 +4,7 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
- * Wave 4 (T18-T23b) shared state accessor and bitmap helpers for
+ * Shared state accessor and bitmap helpers for
  * nested VMX.  The per-task files (vmx_nested_vmptrld.c,
  * vmx_nested_vmread.c, etc.) own their respective slices of
  * functionality; this file provides the per-vCPU nested-state
@@ -66,7 +66,7 @@ vmx_nested_state(struct vmx_vcpu *vcpu)
 		return (NULL);
 
 	/*
-	 * The state field is attached by vmx.c (see Wave-3 T15) for
+	 * The state field is attached by vmx.c for
 	 * nested-enabled VMs; vcpu->nested_state is initialised to
 	 * NULL at malloc-time.  vmx.c owns the lifecycle (alloc /
 	 * free); the per-task files are read-only consumers.
@@ -89,7 +89,7 @@ vmx_nested_state(struct vmx_vcpu *vcpu)
  * width) gets its own slot; only the bit positions that fall inside
  * the architecture-supported encoding range carry meaning.
  *
- * For Wave 4 first pass we mark a minimal set of L1-writable
+ * For now we mark a minimal set of L1-writable
  * fields: guest CR0/CR3/CR4/RSP/RIP/RFLAGS, exception bitmap,
  * pin/proc-based controls, exit/entry controls, I/O bitmap
  * addresses, MSR bitmap address, and EPT12 pointer.  Everything

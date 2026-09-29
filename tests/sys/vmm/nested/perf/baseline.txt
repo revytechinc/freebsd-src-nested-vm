@@ -1,5 +1,5 @@
 # P6 pre-patch performance baseline
-# Captured: 2026-08-06 20:12:53 UTC on freedev003.cloudbsd.org
+# Captured: 2026-08-06 20:12:53 UTC
 # Host:    11th Gen Intel(R) Core(TM) i9-11950H @ 2.60GHz (16 cores, 128GB)
 # Kernel:  FreeBSD 16.0-CURRENT main-n287957-4ebcdb8dd9a7 GENERIC amd64
 # Tool:    sysbench 1.0.20 --cpu-max-prime=20000

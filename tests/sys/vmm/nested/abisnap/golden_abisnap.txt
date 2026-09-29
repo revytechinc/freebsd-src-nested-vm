@@ -31,7 +31,6 @@
 # ABI-SNAPSHOT revision: 1
 # generated-by: tests/sys/vmm/nested/abisnap/abisnap.sh
 # generated-date: 2026-07-31
-# corresponding-plan: .sisyphus/plans/nested-virt-register-virtualization.md (T39)
 
 # VMCS12 — nVMX shadow VMCS layout
 #

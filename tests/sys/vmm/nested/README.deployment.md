@@ -30,7 +30,7 @@ nested-virt **panic or hang**, we configure:
    `kldload vmm` after verifying the kernel boots cleanly. A broken vmm
    cannot lock the box at boot.
 
-freedev008 (2026-08-21) did **not** fit this pattern: ARP incomplete from
+One host (2026-08-21) did **not** fit this pattern: ARP incomplete from
 every lab peer, so the kernel never paniced (hang/NIC dead). Panic-reboot
 never ran. If `bootfs` was also pointed at the candidate, a later reset
 would have come back into the same kernel. Fix: oneshot BE + powercycle +
@@ -161,7 +161,6 @@ cd /usr/tests/sys/vmm/nested && kyua test deployment_safety
 
 ## References
 
-* Plan: `.sisyphus/plans/nested-virt-register-virtualization.md` task T0b
 * Man page: `share/man/man9/vmm_nested.9`
 * Spec: `tunables(9)`, `loader.conf(5)`, `sysctl(8)`
 ## Applying the fail-reboot contract to a candidate BE

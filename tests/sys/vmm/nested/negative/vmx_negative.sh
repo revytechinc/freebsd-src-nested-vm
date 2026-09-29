@@ -24,9 +24,7 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
-# T42 / Wave 8: comprehensive Intel VMX nested-virt negative test matrix.
-# Per .sisyphus/plans/nested-virt-register-virtualization.md T42, each row
-# below names one (instruction, expected SDM response, attack note). The
+# Intel VMX nested-virt negative test matrix. Each row below names one (instruction, expected SDM response, attack note). The
 # on-target driver must execute each instruction via a uvm wrapper, assert
 # the documented SDM response, confirm L0 host dmesg has no panic, and
 # confirm L0 host state is unchanged.

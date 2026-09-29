@@ -63,7 +63,7 @@ enum nested_platform {
  *
  * Stats MSRs (0x40000081-0x40000088) are deliberately DEFERRED to v2
  * because they overlap the SVERSION range used by the host driver;
- * importing them now would create a name collision (see T31 plan).
+ * importing them now would create a name collision.
  * The host driver retains its own MSR values for SVERSION etc.
  */
 #define	MSR_HV_GUEST_OS_ID		0x40000000U
@@ -106,7 +106,7 @@ struct nested_vcpu_state {
 	/*
 	 * L1-stated HSAVE GPA (AMD SVM MSR 0xC0010117). Set by the L1
 	 * hypervisor via WRMSR to MSR_VM_HSAVE_PA while running as the
-	 * guest of bhyve; consulted on L2 #VMEXIT by T25 (VMRUN hookup)
+	 * guest of bhyve; consulted on L2 #VMEXIT by the VMRUN path
 	 * as the destination for the L2->L1 host-save-area state
 	 * transfer. 0 means "L1 has not set one" (L1 does not need to
 	 * to launch nSVM; in that case the L2 state is discarded on

@@ -52,24 +52,66 @@ set -eu
 # this driver directly leaves it unset, and the banner still appears, because
 # the EXPERIMENTAL warning has to be seen every time and not only when someone
 # came in through a launcher.
-SELFDIR=${SELFDIR:-$(dirname "$0")}
+# Resolve to an ABSOLUTE directory. A bare `dirname "$0"` yields a relative
+# path when this is invoked by a relative path from elsewhere, and the
+# source-tree banner lookup below would then miss in exactly the case it exists
+# to serve. Verified on FreeBSD sh: a relative invocation gives a relative $0,
+# and this cd/pwd fixes it.
+#
+# A $0 with no slash is NOT resolved: dirname gives ".", which is the caller's
+# cwd, and a demo-banner planted there would then stand in for ours. FreeBSD sh
+# and dash give a full path for a script found on PATH, so this only fires for
+# a shell that does not; look the name up on PATH instead, and leave SELFDIR
+# empty (source-tree lookup skipped, installed copy still tried) if that fails.
+_self=$0
+case "${_self}" in
+*/*)	;;
+*)	_self=$(command -v "${_self}" 2>/dev/null) || _self=""
+	case "${_self}" in */*) ;; *) _self="" ;; esac ;;
+esac
+if [ -n "${_self}" ]; then
+	# set -e is on: a failed cd must leave SELFDIR empty, not end the
+	# script before the warning below is printed.
+	SELFDIR=${SELFDIR:-$(cd "$(dirname "${_self}")" 2>/dev/null && pwd)} ||
+	    SELFDIR=""
+else
+	SELFDIR=${SELFDIR:-}
+fi
+
+# warn_line is the one thing that must reach the room. Everything else about
+# the banner is presentation.
+warn_line() {
+	echo
+	echo "bhyve -- NESTED VIRTUALIZATION"
+	echo "EXPERIMENTAL - new, unaudited kernel code. Not for production."
+	echo
+}
 
 demo_banner() {
 	[ "${DEMO_BANNER_SHOWN:-0}" = 1 ] && return 0
-	for _b in "${SELFDIR}/demo-banner" \
+	# Unquoted ${SELFDIR:+...} would field-split and glob a path with
+	# spaces or metacharacters into separate words to execute. An empty
+	# SELFDIR becomes /nonexistent/demo-banner, which is simply not there.
+	for _b in "${SELFDIR:-/nonexistent}/demo-banner" \
 	    /usr/local/libexec/cloudbsd-demo/demo-banner; do
-		# The banner is cosmetic and this driver runs under set -e: a
-		# banner that somehow exits non-zero must not take a live demo
-		# down with it.
-		[ -x "${_b}" ] && { "${_b}" || true; return 0; }
+		[ -x "${_b}" ] || continue
+		# The banner is cosmetic and this driver runs under set -e, so a
+		# banner exiting non-zero must not take a live demo down. But it
+		# must not silently swallow the warning either: if the program
+		# fails, print the warning ourselves. It is the reason the banner
+		# exists, and "shown unless something went wrong" is not a
+		# warning anybody can rely on.
+		if "${_b}"; then
+			return 0
+		fi
+		echo "nested-demo: banner ${_b} failed; showing the warning directly" >&2
+		warn_line
+		return 0
 	done
 	# Not installed -- running straight from a source tree. Do not
 	# reintroduce a second copy of the box; just make sure the warning
 	# that matters is still impossible to miss.
-	echo
-	echo "bhyve -- NESTED VIRTUALIZATION   (hello, bhyvecon)"
-	echo "EXPERIMENTAL - new, unaudited kernel code. Not for production."
-	echo
+	warn_line
 	return 0
 }
 demo_banner
@@ -250,11 +292,10 @@ if [ "$SVM" != "0" ]; then
 elif [ "$VMX" != "0" ]; then
 	info "Host CPU: Intel VMX nested virtualization available (hw.vmm.nested.vmx=$VMX)."
 else
-	# The nested kernel IS present (checked above), so this really is the
-	# CPU, and the message can say so without hedging about the kernel.
-	err "the nested kernel is running, but this CPU reports no virtualization"
-	err "extensions: hw.vmm.nested.svm and .vmx are both 0.  Nested guests"
-	err "need an Intel VT-x or AMD-V processor."
+	err "neither hw.vmm.nested.svm nor .vmx is enabled - this CPU/kernel cannot"
+	err "host nested guests.  You need an Intel VT-x or AMD-V host running the"
+	err "CloudBSD nested kernel.  Enable VT-x/AMD-V (SVM) in the firmware setup,"
+	err "then install the nested kernel: https://nested.cloudbsd.cat/install.sh"
 	exit 1
 fi
 

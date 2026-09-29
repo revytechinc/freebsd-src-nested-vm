@@ -4,7 +4,7 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * All rights reserved.
  *
- * Nested interrupt controller virtualization (T25b) for AMD SVM.
+ * Nested interrupt controller virtualization for AMD SVM.
  *
  * The nested interrupt chain:
  *   - L2 device fires interrupt → virtual interrupt pending in L2's
@@ -15,7 +15,7 @@
  *   - Alternatively, propagate the interrupt up to L1, which then
  *     decides what to do.
  *
- * Wave1 implements injection via the L1 VMCB12 EventInjection
+ * The first pass implements injection via the L1 VMCB12 EventInjection
  * field. The PIR (Pending Interrupt Register)
  * is maintained per-L2-vCPU so a noisy L2 device does not flood L1.
  *
@@ -287,7 +287,7 @@ svm_nested_inject_exception(struct svm_vcpu *vcpu, uint8_t vector,
 
 /*
  * Drain the per-L2-vCPU PIR into the VMCB EventInjection field.
- * Called on each L2 entry (T25 VMRUN) when the interrupt window is
+ * Called on each L2 entry (VMRUN) when the interrupt window is
  * open. Returns the vector delivered, or -1 if no vector was
  * pending.
  */

@@ -145,8 +145,8 @@ main() {
 	ensure_sysctl_line "$SYSCTL_CONF" "$LINE_ALTBREAK"
 
 	# Persist is not enough: a host that already booted with DDB on
-	# (freedev002) will sit in the debugger on the *next* panic until
-	# the live sysctl is flipped too.
+	# will sit in the debugger on the *next* panic until the live
+	# sysctl is flipped too.
 	apply_live "$LINE_DEBUGGER"
 	apply_live "$LINE_REBOOT_WAIT"
 	apply_live "$LINE_POWERCYCLE"

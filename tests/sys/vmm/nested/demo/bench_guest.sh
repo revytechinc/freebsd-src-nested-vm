@@ -27,8 +27,11 @@ export LC_ALL
 
 PROGRAM="${0##*/}"
 
-IMAGE=${IMAGE:-/home/mlapointe/nested-layers/nested1.raw}
-WORKDIR=${WORKDIR:-/home/mlapointe/bench}
+# IMAGE has no useful default: it is the L1 disk image for this run, and a
+# baked-in path points at one developer's home and silently fails for anyone
+# else. Require it rather than defaulting to something that cannot exist.
+IMAGE=${IMAGE:?set IMAGE to the L1 disk image to benchmark}
+WORKDIR=${WORKDIR:-${HOME:?set HOME, or set WORKDIR to the scratch directory}/bench}
 VMNAME=${VMNAME:-bench}
 MEM=${MEM:-4G}
 CPUS=${CPUS:-2}

@@ -201,6 +201,10 @@ cat > "$_be" <<'BUILDENV_EOF'
 # Generated; runs inside 'make buildenv'.
 set -eu
 make -C "${NP_SRCTOP}/lib/libvmmapi" -j"${NP_JOBS}" all
+# lib9p BEFORE bhyve, which links libprivate9p.so.1 against it. Built after,
+# the link fails with "unable to find library -lprivate9p" on any objdir that
+# has not had a full buildworld. The later lib9p pass is then a no-op rebuild.
+make -C "${NP_SRCTOP}/lib/lib9p" -j"${NP_JOBS}" all
 make -C "${NP_SRCTOP}/usr.sbin/bhyve" -j"${NP_JOBS}" all
 make -C "${NP_SRCTOP}/usr.sbin/bhyvectl" -j"${NP_JOBS}" all
 make -C "${NP_SRCTOP}/usr.sbin/bhyveload" -j"${NP_JOBS}" all
