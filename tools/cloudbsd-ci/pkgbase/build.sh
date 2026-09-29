@@ -29,7 +29,41 @@ case "${KERNCONF}" in
 "" | *[!A-Z0-9_-]*) echo "FAIL: KERNCONF is not usable: ${KERNCONF}" >&2; exit 1 ;;
 esac
 
-JOBS=$(sysctl -n hw.ncpu)
+# Parallelism is capped by cores AND memory. The builders are shared, and
+# freedev005 also hosts the Jenkins controller jail: on 2026-09-29 a
+# -j<ncpu> world build followed by `make packages` (-j<ncpu>, each pkg create
+# compressing with one zstd thread per core) ran freedev005 out of swap and the
+# OOM killer took the controller. Auto: min(cores/2, RAM GiB/4); a big C++
+# translation unit in clang/LLVM wants well over 1 GiB.
+PKGBASE_MAKE_JOBS="${PKGBASE_MAKE_JOBS:-0}"
+case "${PKGBASE_MAKE_JOBS}" in
+"" | *[!0-9]*) echo "FAIL: PKGBASE_MAKE_JOBS is not a number: ${PKGBASE_MAKE_JOBS}" >&2; exit 1 ;;
+esac
+NCPU=$(sysctl -n hw.ncpu)
+MEM_GIB=$(( $(sysctl -n hw.physmem) / 1073741824 ))
+if [ "${PKGBASE_MAKE_JOBS}" -gt 0 ]; then
+	JOBS=${PKGBASE_MAKE_JOBS}
+else
+	JOBS=$(( NCPU / 2 ))
+	[ $(( MEM_GIB / 4 )) -lt "${JOBS}" ] && JOBS=$(( MEM_GIB / 4 ))
+fi
+[ "${JOBS}" -ge 1 ] || JOBS=1
+# Packaging is I/O and compression, not compilation: few jobs, few threads
+# each (Makefile.inc1 passes -T${PKG_CTHREADS} to every pkg create; its
+# default 0 means one thread per core, per package).
+PKG_JOBS=$(( JOBS < 8 ? JOBS : 8 ))
+PKG_CTHREADS=2
+
+# LLVM targets in the shipped toolchain. host-only drops the other targets
+# from clang/lld (WITHOUT_LLVM_TARGET_ALL); buildworld still bootstraps its
+# own cross toolchain when TARGET differs, so the fleet loses nothing it
+# builds with. A command-line make variable, since SRCCONF is /dev/null.
+set --
+case "${PKGBASE_LLVM_TARGETS:-host-only}" in
+host-only) set -- WITHOUT_LLVM_TARGET_ALL=yes ;;
+all) ;;
+*) echo "FAIL: PKGBASE_LLVM_TARGETS must be host-only or all" >&2; exit 1 ;;
+esac
 
 # The host's /etc/src.conf and /etc/make.conf are NOT part of the base we
 # ship. Two builders behind one label must produce the same packages, and a
@@ -69,19 +103,20 @@ case "${MAJOR}" in
 "" | *[!0-9]*) echo "FAIL: cannot read REVISION from sys/conf/newvers.sh" >&2; exit 1 ;;
 esac
 PKG_VERSION="${MAJOR}.snap$(date -u +%Y%m%d%H%M%S)"
-echo "pkgbase: PKG_VERSION=${PKG_VERSION} KERNCONF=${KERNCONF} -j${JOBS}"
+echo "pkgbase: PKG_VERSION=${PKG_VERSION} KERNCONF=${KERNCONF} -j${JOBS} (cores ${NCPU}, RAM ${MEM_GIB}G) packages -j${PKG_JOBS} -T${PKG_CTHREADS} llvm=${PKGBASE_LLVM_TARGETS:-host-only}"
 printf '%s\n' "${PKG_VERSION}" > "${PKGBASE_ARTIFACTS}/pkgbase-version.txt"
 
 # nice: the builders are shared. A world build yields to whatever else is on
 # the node rather than starving it; it still gets every idle core.
 t0=$(date +%s)
 nice -n 10 make -j"${JOBS}" buildworld buildkernel \
-	TARGET="${TARGET}" TARGET_ARCH="${TARGET_ARCH}" KERNCONF="${KERNCONF}"
+	TARGET="${TARGET}" TARGET_ARCH="${TARGET_ARCH}" KERNCONF="${KERNCONF}" "$@"
 t1=$(date +%s)
 echo "pkgbase: buildworld+buildkernel took $(( (t1 - t0) / 60 )) min"
 
-nice -n 10 make -j"${JOBS}" packages \
-	TARGET="${TARGET}" TARGET_ARCH="${TARGET_ARCH}" KERNCONF="${KERNCONF}" \
-	PKG_VERSION="${PKG_VERSION}" REPODIR="${PKGBASE_REPODIR}"
+nice -n 10 make -j"${PKG_JOBS}" packages \
+	TARGET="${TARGET}" TARGET_ARCH="${TARGET_ARCH}" KERNCONF="${KERNCONF}" "$@" \
+	PKG_VERSION="${PKG_VERSION}" REPODIR="${PKGBASE_REPODIR}" \
+	PKG_CTHREADS="${PKG_CTHREADS}"
 t2=$(date +%s)
 echo "pkgbase: make packages took $(( (t2 - t1) / 60 )) min"

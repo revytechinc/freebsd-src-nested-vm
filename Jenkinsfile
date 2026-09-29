@@ -31,8 +31,36 @@
 //                 root pulls the packages into a root-owned staging directory
 //                 there and runs publish-internal-repo.sh -d .../base_latest.
 //
-// WHERE IT RUNS: the shared amd64 builder label, serialised per NODE by the
-// same lock poudriere takes there, taken AFTER the node is allocated.
+// WHERE IT RUNS: the amd64 BUILDER POOL (cloudbsd-ci jenkins/casc/jenkins.yaml,
+// Track #396). The build locks ONE free resource labelled
+// poudriere-amd64-builders (each is poudriere-amd64-<node>, the same lock
+// poudriere takes there) and then runs on the node that resource names. The
+// lock picks the node, not the scheduler, so pkgbase never pins one builder
+// while the other sits idle, and never shares a builder with a poudriere bulk.
+//
+// MEMORY: the builders also host the Jenkins controller jail (freedev005).
+// On 2026-09-29 a -j<ncpu> world build plus `make packages` with -T0
+// compression pushed freedev005 out of swap, and the OOM killer took the
+// controller. build.sh therefore caps parallelism by cores AND memory (see
+// MAKE_JOBS) and packages with few jobs and few compression threads.
+
+// Mirrors builderAgentLabel() in cloudbsd-ci jenkins/Jenkinsfile.port: the
+// locked resource name becomes part of a label EXPRESSION, so check its shape.
+String builderAgentLabel(String locked) {
+    String prefix = 'poudriere-amd64-'
+    String r = (locked ?: '').trim()
+    if (!r.startsWith(prefix)) {
+        error("locked builder resource '${r}' is not ${prefix}<node>")
+    }
+    String node = r.substring(prefix.length())
+    if (!(node ==~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/)) {
+        error("locked builder resource '${r}' does not name a plain node")
+    }
+    if (node.startsWith('poudriere') || node.endsWith('-builders')) {
+        error("locked builder resource '${r}' names a label, not a builder node")
+    }
+    return node + ' && poudriere-amd64'
+}
 
 pipeline {
     agent none
@@ -69,6 +97,14 @@ pipeline {
             choices: ['handoff', 'pkgrepo-node'],
             description: 'handoff: documented root step on freedev008, the job waits for it. pkgrepo-node: automatic, on the node carrying the pkgrepo label (Track #396).')
         string(
+            name: 'MAKE_JOBS',
+            defaultValue: '0',
+            description: 'make -j for buildworld/buildkernel. 0 = auto: min(cores/2, RAM GiB/4). The builders host other jobs and the controller jail; do not set this to the core count.')
+        choice(
+            name: 'LLVM_TARGETS',
+            choices: ['host-only', 'all'],
+            description: 'host-only (WITHOUT_LLVM_TARGET_ALL): the shipped clang/lld target amd64 only; buildworld still builds its own cross toolchain for other architectures. Much less build time and memory. all: every LLVM target, like pkg.FreeBSD.org.')
+        string(
             name: 'HANDOFF_WAIT_HOURS',
             defaultValue: '12',
             description: 'How long the handoff gate waits for the operator before the build is aborted. The packages stay on the builder until the next build either way.')
@@ -85,6 +121,9 @@ pipeline {
                     if (!(params.KERNCONF ==~ /^[A-Z0-9_-]+$/)) {
                         error("KERNCONF is not a usable kernel config name: ${params.KERNCONF}")
                     }
+                    if (!(params.MAKE_JOBS ==~ /^[0-9]{1,3}$/)) {
+                        error("MAKE_JOBS must be 0 (auto) or a job count: ${params.MAKE_JOBS}")
+                    }
                     if (!(params.HANDOFF_WAIT_HOURS ==~ /^[1-9][0-9]?$/)) {
                         error("HANDOFF_WAIT_HOURS must be 1-99: ${params.HANDOFF_WAIT_HOURS}")
                     }
@@ -93,10 +132,15 @@ pipeline {
         }
 
         stage('Build base') {
-            // Shared amd64 builder label. Track #396 is making freedev005 and
-            // freedev006 identical builders behind one label; until that lands
-            // on cloudbsd-ci main the label is poudriere-amd64.
-            agent { label 'poudriere-amd64' }
+            // Builder pool (see the header). Stage options are evaluated BEFORE
+            // the stage agent is allocated: the lock is held first, then the
+            // agent label is derived from the locked resource. The lock covers
+            // checkout, build and record; the handoff below only reads the
+            // output directory, which disableConcurrentBuilds() protects.
+            options {
+                lock(label: 'poudriere-amd64-builders', quantity: 1, variable: 'BUILDER')
+            }
+            agent { label builderAgentLabel(env.BUILDER) }
             environment {
                 SRC_DIR            = "${WORKSPACE}"
                 PKGBASE_ARTIFACTS  = "${WORKSPACE}/ci-artifacts"
@@ -106,17 +150,20 @@ pipeline {
                 PKGBASE_REPODIR    = "${WORKSPACE}@pkgbase/repo"
                 TARGET             = 'amd64'
                 TARGET_ARCH        = 'amd64'
+                PKGBASE_MAKE_JOBS  = "${params.MAKE_JOBS}"
+                PKGBASE_LLVM_TARGETS = "${params.LLVM_TARGETS}"
             }
             steps {
-                checkout scm
-                // Per-node build lock: the resource poudriere uses on this node
-                // (poudriere-amd64-${NODE_NAME}, Track #396). The other builder
-                // stays free for ports.
-                lock(resource: "poudriere-amd64-${env.NODE_NAME}") {
-                    sh 'sh tools/cloudbsd-ci/pkgbase/stamp.sh'
-                    sh 'sh tools/cloudbsd-ci/pkgbase/preflight.sh'
-                    sh 'sh tools/cloudbsd-ci/pkgbase/build.sh'
+                script {
+                    if (env.BUILDER != ('poudriere-amd64-' + env.NODE_NAME)) {
+                        error("holding builder lock ${env.BUILDER} but running on ${env.NODE_NAME}")
+                    }
+                    echo "builder lock ${env.BUILDER} held; building on ${env.NODE_NAME}"
                 }
+                checkout scm
+                sh 'sh tools/cloudbsd-ci/pkgbase/stamp.sh'
+                sh 'sh tools/cloudbsd-ci/pkgbase/preflight.sh'
+                sh 'sh tools/cloudbsd-ci/pkgbase/build.sh'
                 sh 'sh tools/cloudbsd-ci/pkgbase/record.sh'
                 archiveArtifacts artifacts: 'ci-artifacts/**', fingerprint: true, allowEmptyArchive: false
                 script {
