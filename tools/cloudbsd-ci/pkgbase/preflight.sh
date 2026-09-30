@@ -29,6 +29,16 @@ else
 	echo "pkgbase: ${avail_gb}G free under ${MAKEOBJDIRPREFIX} (need ${NEED_GB}G)"
 fi
 
+# The base export directory (the pkgrepo handoff's source) must already exist
+# and be ours: only root can create it, and failing after the build is late.
+if [ -n "${PKGBASE_REPODIR:-}" ]; then
+	if [ -d "${PKGBASE_REPODIR}" ] && [ -w "${PKGBASE_REPODIR}" ]; then
+		echo "pkgbase: export directory ${PKGBASE_REPODIR} ok"
+	else
+		bad "${PKGBASE_REPODIR} missing or not writable; as root: install -d -o $(id -un) -g $(id -gn) -m 0755 ${PKGBASE_REPODIR}"
+	fi
+fi
+
 # Say which OSVERSION this base will carry against the host building it.
 # Informational: buildworld bootstraps across versions. The fleet question of
 # which hosts may take a newer OSVERSION is Track #283, decided elsewhere.
