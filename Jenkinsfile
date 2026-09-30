@@ -7,7 +7,8 @@
 // job lives in cloudbsd-ci. Scripts: tools/cloudbsd-ci/pkgbase/ (README there).
 //
 //   make buildworld buildkernel      (unprivileged; objects beside the workspace)
-//   make packages                    (-DNO_ROOT staging; REPODIR beside the workspace)
+//   make packages                    (-DNO_ROOT staging; REPODIR = the builder's
+//                                     base export directory, see below)
 //
 // Package names are FreeBSD's own (FreeBSD-runtime, FreeBSD-kernel-generic,
 // ...): the fleet already runs pkgbase from pkg.FreeBSD.org's base_latest,
@@ -22,14 +23,18 @@
 // this job never sees the key.
 //
 // HOW IT GETS THERE (PUBLISH_VIA):
-//   handoff       Default today. Packages stay beside the workspace on the
-//                 builder; the job prints the exact commands and WAITS (input,
-//                 no executor held) until an operator has run them on
-//                 freedev008. "Built" and "published" must not arrive in the
-//                 same shape.
-//   pkgrepo-node  Once a node carries the `pkgrepo` role label (Track #396):
-//                 root pulls the packages into a root-owned staging directory
-//                 there and runs publish-internal-repo.sh -d .../base_latest.
+//   pkgrepo-node    Default. The `pkgrepo` Jenkins agent INSIDE the pkgrepo
+//                   jail (cloudbsd-ci #46, Track #396 option B) runs its one
+//                   narrow doas rule for base:
+//                     publish-internal-repo.sh -H <builder> -a <ABI> -B
+//                   with this build's package names on stdin. Root there pulls
+//                   exactly those files from the builder's fixed export
+//                   directory /var/db/pkgbase-export/<ABI>/latest into a
+//                   root-only staging directory, publishes into base_latest and
+//                   checks the catalogue (cloudbsd-ci #49).
+//   manual-handoff  EMERGENCY ONLY (pkgrepo agent down): prints the operator
+//                   commands and waits at an input gate. Hand-publishing is
+//                   deprecated.
 //
 // WHERE IT RUNS: the amd64 BUILDER POOL (cloudbsd-ci jenkins/casc/jenkins.yaml,
 // Track #396). The build locks ONE free resource labelled
@@ -94,8 +99,8 @@ pipeline {
             description: 'Publish to InternalPkg FreeBSD:16:amd64/base_latest (never the ports latest repo, never public). Off: build only.')
         choice(
             name: 'PUBLISH_VIA',
-            choices: ['handoff', 'pkgrepo-node'],
-            description: 'handoff: documented root step on freedev008, the job waits for it. pkgrepo-node: automatic, on the node carrying the pkgrepo label (Track #396).')
+            choices: ['pkgrepo-node', 'manual-handoff'],
+            description: 'pkgrepo-node (default): the pkgrepo agent publishes through its doas rule (publish-internal-repo.sh -H <builder> -a <ABI> -B). manual-handoff: EMERGENCY ONLY, when the pkgrepo agent is down; prints operator commands and waits.')
         string(
             name: 'MAKE_JOBS',
             defaultValue: '0',
@@ -107,7 +112,7 @@ pipeline {
         string(
             name: 'HANDOFF_WAIT_HOURS',
             defaultValue: '12',
-            description: 'How long the handoff gate waits for the operator before the build is aborted. The packages stay on the builder until the next build either way.')
+            description: 'manual-handoff only: how long the gate waits for the operator before the build is aborted. The packages stay on the builder until its next build either way.')
     }
 
     environment {
@@ -147,7 +152,11 @@ pipeline {
                 // Outside the source tree, so the tree stays clean and a
                 // checkout never walks the object tree.
                 MAKEOBJDIRPREFIX   = "${WORKSPACE}@pkgbase/obj"
-                PKGBASE_REPODIR    = "${WORKSPACE}@pkgbase/repo"
+                // The builder's fixed base export directory: the ONLY place the
+                // pkgrepo handoff (-B) reads from. Created once by root,
+                // jenkins-owned 0755 (the workspace is not readable by the
+                // handoff account). build.sh empties it at the start of a build.
+                PKGBASE_REPODIR    = '/var/db/pkgbase-export'
                 TARGET             = 'amd64'
                 TARGET_ARCH        = 'amd64'
                 PKGBASE_MAKE_JOBS  = "${params.MAKE_JOBS}"
@@ -166,6 +175,9 @@ pipeline {
                 sh 'sh tools/cloudbsd-ci/pkgbase/build.sh'
                 sh 'sh tools/cloudbsd-ci/pkgbase/record.sh'
                 archiveArtifacts artifacts: 'ci-artifacts/**', fingerprint: true, allowEmptyArchive: false
+                // For the publish stage on the pkgrepo agent, which has no git:
+                // this build's package names and the stage's script.
+                stash name: 'pkgbase-publish', includes: 'ci-artifacts/pkgbase-packages.txt,tools/cloudbsd-ci/pkgbase/publish-pkgrepo.sh'
                 script {
                     // key=value lines from record.sh. Not readProperties: that
                     // is pipeline-utility-steps, which the controller does not run.
@@ -188,16 +200,17 @@ pipeline {
             }
         }
 
-        stage('Publish: handoff') {
+        stage('Publish: manual handoff') {
             when {
                 beforeAgent true
                 allOf {
                     expression { return params.PUBLISH }
-                    expression { return params.PUBLISH_VIA == 'handoff' }
+                    expression { return params.PUBLISH_VIA == 'manual-handoff' }
                 }
             }
             steps {
-                echo """InternalPkg base handoff -- on freedev008, as an operator with sudo on both hosts
+                echo """EMERGENCY ONLY (pkgrepo agent down; hand-publishing is deprecated).
+InternalPkg base handoff -- on freedev008, as an operator with sudo on both hosts
 (the tar stream is written by ROOT into a ROOT-owned directory; the key never moves):
   STAGE=/var/db/pkgbase-handoff/${env.PKGBASE_VERSION}
   sudo install -d -o root -g wheel -m 0755 "\$STAGE"
@@ -220,13 +233,16 @@ lists FreeBSD-*-${env.PKGBASE_VERSION}.pkg (tools/cloudbsd-ci/pkgbase/README.md,
                     expression { return params.PUBLISH_VIA == 'pkgrepo-node' }
                 }
             }
+            // The pkgrepo agent inside the pkgrepo jail (one executor). No
+            // checkout: the jail has no git; the build stage stashed the names
+            // and the script.
             agent { label 'pkgrepo' }
+            options {
+                lock(resource: 'cloudbsd-pkgbase-publish')
+            }
             steps {
-                // readTrusted: the script from this branch's SCM, without a checkout.
-                writeFile file: 'pkgbase-publish-pkgrepo.sh', text: readTrusted('tools/cloudbsd-ci/pkgbase/publish-pkgrepo.sh')
-                lock(resource: 'cloudbsd-pkgbase-publish') {
-                    sh 'sh pkgbase-publish-pkgrepo.sh'
-                }
+                unstash 'pkgbase-publish'
+                sh 'sh tools/cloudbsd-ci/pkgbase/publish-pkgrepo.sh'
             }
         }
     }

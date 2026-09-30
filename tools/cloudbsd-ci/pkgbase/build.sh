@@ -6,10 +6,12 @@
 #   make buildworld buildkernel
 #   make packages               (stages with -DNO_ROOT; no root needed)
 #
-# Everything lands beside the workspace (<workspace>@pkgbase): objects under
-# MAKEOBJDIRPREFIX, the repository under PKGBASE_REPODIR/${ABI}/${PKG_VERSION}. The job user owns
-# all of it, which is the same reasoning as nested-media -- the build should
-# need nothing it does not already own.
+# Objects land beside the workspace (<workspace>@pkgbase/obj, MAKEOBJDIRPREFIX);
+# the repository under PKGBASE_REPODIR/${ABI}/${PKG_VERSION} with `latest`
+# pointing at it. PKGBASE_REPODIR is the builder's base export directory
+# (/var/db/pkgbase-export), the only place the pkgrepo handoff reads from;
+# root creates it once, jenkins owns it. The build needs nothing else it does
+# not already own.
 #
 # The catalogue `make packages` writes here is UNSIGNED and is not what
 # clients read: publish-internal-repo.sh re-runs pkg repo over the published
@@ -87,10 +89,15 @@ elif kldstat -q -m filemon 2>/dev/null; then
 fi
 mkdir -p "${MAKEOBJDIRPREFIX}"
 
-# Always a fresh repository directory: a package left from the last build must
-# not be published as part of this one.
-rm -rf "${PKGBASE_REPODIR}"
-mkdir -p "${PKGBASE_REPODIR}"
+# Always a fresh repository: a package left from the last build must not be
+# published as part of this one. Empty the export directory, never remove it:
+# only root can recreate it.
+[ -d "${PKGBASE_REPODIR}" ] && [ -w "${PKGBASE_REPODIR}" ] || {
+	echo "FAIL: ${PKGBASE_REPODIR} is missing or not writable; as root on $(hostname):" >&2
+	echo "  install -d -o $(id -un) -g $(id -gn) -m 0755 ${PKGBASE_REPODIR}" >&2
+	exit 1
+}
+find "${PKGBASE_REPODIR}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 
 cd "${SRC_DIR}"
 

@@ -33,7 +33,7 @@ also exists, but nothing in the nested pipeline builds from it.
    `__FreeBSD_version` against the host's `kern.osreldate`.
 3. **Build**, unprivileged, niced, with memory-capped parallelism:
    `make -j<N> buildworld buildkernel` then
-   `make -j<min(N,8)> packages PKG_CTHREADS=2 PKG_VERSION=<MAJOR>.snap<UTC timestamp> REPODIR=${WORKSPACE}@pkgbase/repo`.
+   `make -j<min(N,8)> packages PKG_CTHREADS=2 PKG_VERSION=<MAJOR>.snap<UTC timestamp> REPODIR=/var/db/pkgbase-export`.
    N is `MAKE_JOBS`, or with 0 (default) min(cores/2, RAM GiB/4): 31 on a
    64-core/128G builder. `LLVM_TARGETS=host-only` (default) adds
    `WITHOUT_LLVM_TARGET_ALL=yes`; `all` builds every LLVM target like
@@ -66,16 +66,47 @@ each. Do not raise `MAKE_JOBS` towards the core count.
 
 ## Publishing
 
-### `PUBLISH_VIA=handoff` (default until a `pkgrepo` node exists)
+### `PUBLISH_VIA=pkgrepo-node` (default)
 
-The job prints the exact commands and waits at an input gate
-(`HANDOFF_WAIT_HOURS`, no executor held). On **freedev008**, as an operator with
-sudo on both hosts:
+The `Publish: pkgrepo node` stage runs on the `pkgrepo` Jenkins agent, which
+lives INSIDE the pkgrepo jail on freedev008 (cloudbsd-ci #46, Track #396
+option B; no agent on the host, no broad root). The build stage stashes the
+package list and `publish-pkgrepo.sh` (the jail has no git). The script checks
+the list against the build's record, then runs the agent's one doas rule for
+base:
 
 ```sh
-V=<version from the build description>          # e.g. 16.snap20260929083000
+doas -n /usr/local/sbin/publish-internal-repo.sh -H <builder> -a FreeBSD:16:amd64 -B < ci-artifacts/pkgbase-packages.txt
+```
+
+As root, `publish-internal-repo.sh -B` (cloudbsd-ci #49) pulls exactly those
+files from the builder's fixed export directory
+`/var/db/pkgbase-export/FreeBSD:16:amd64/latest` (root's `pkghandoff-<builder>`
+SSH alias, landing on the builder's unprivileged `pkghandoff` account) into a
+root-only staging directory. It refuses anything that is not a base package
+(origin `base/*`, name `FreeBSD-*`) and refuses downgrades. It publishes into
+`base_latest` only and checks the regenerated catalogue. `publish-pkgrepo.sh`
+then re-reads the catalogue as the agent and requires every package at this
+version, including runtime, kernel-generic, utilities and rc. The signing key
+never leaves the jail and is not readable by the agent.
+
+One-off setup (done 2026-09-30):
+
+- on each builder, as root: `install -d -o jenkins -g jenkins -m 0755 /var/db/pkgbase-export`
+  (the build's `REPODIR`; the workspace itself is not readable by `pkghandoff`);
+- in the pkgrepo jail's `/usr/local/etc/doas.conf`, one rule per builder:
+  `permit nopass jenkins as root cmd /usr/local/sbin/publish-internal-repo.sh args -H <builder> -a FreeBSD:16:amd64 -B`.
+
+### `PUBLISH_VIA=manual-handoff` (EMERGENCY ONLY)
+
+Hand-publishing is deprecated. Use this only while the `pkgrepo` agent is down.
+The job prints the commands and waits at an input gate (`HANDOFF_WAIT_HOURS`,
+no executor held). On **freedev008**, as an operator with sudo on both hosts:
+
+```sh
+V=<version from the build description>          # e.g. 16.snap20260929130756
 B=<builder from the build description>          # freedev005 or freedev006
-SRC=<pkgdir from ci-artifacts/pkgbase-build.properties>   # <workspace>@pkgbase/repo/FreeBSD:16:amd64/$V
+SRC=/var/db/pkgbase-export/FreeBSD:16:amd64/$V
 STAGE=/var/db/pkgbase-handoff/$V
 sudo install -d -o root -g wheel -m 0755 "$STAGE"
 ssh $B.cloudbsd.org "sudo tar -C '$SRC' -cf - ." | sudo tar -C "$STAGE" -xf -
@@ -83,20 +114,8 @@ sudo /usr/local/sbin/publish-internal-repo.sh -s "$STAGE" \
     -d /usr/local/bastille/jails/pkgrepo/root/usr/local/www/pkgrepo/FreeBSD:16:amd64/base_latest
 ```
 
-The tar stream is written by root into a root-owned directory; the packages
-never pass through a workspace on the repository host. Wait for `PUBLISH_OK`,
-check the count against `ci-artifacts/pkgbase-packages.txt`, then answer the
-input gate. The staging directory can be removed after verification.
-
-### `PUBLISH_VIA=pkgrepo-node`
-
-When a Jenkins node carries the `pkgrepo` role label (Track #396), the
-`Publish: pkgrepo node` stage runs `publish-pkgrepo.sh` there (read with `readTrusted`, no checkout): the same
-root-to-root pull (as the ports handoff does), a count check against the
-build's record, `publish-internal-repo.sh -d .../base_latest`, and a catalogue
-check. It needs the same root ssh from the repo host to the builders and the
-same doas rules the ports handoff needs. Flip the default of `PUBLISH_VIA` in the
-Jenkinsfile once that node is live.
+Wait for `PUBLISH_OK`, check the count against `ci-artifacts/pkgbase-packages.txt`,
+then answer the input gate.
 
 ### Bootstrap (one-off, done 2026-09-29)
 
