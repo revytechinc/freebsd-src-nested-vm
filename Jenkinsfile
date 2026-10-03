@@ -85,6 +85,12 @@ pipeline {
     }
 
     parameters {
+        // Track #479: the aarch64 base is CROSS-built on the same amd64 pool
+        // (make TARGET=arm64 TARGET_ARCH=aarch64); no arm64 builder needed.
+        choice(
+            name: 'ARCH',
+            choices: ['amd64', 'arm64'],
+            description: 'Base system architecture. amd64 -> FreeBSD:16:amd64/base_latest; arm64 is cross-built on the amd64 builder pool -> FreeBSD:16:aarch64/base_latest.')
         string(
             name: 'KERNCONF',
             defaultValue: 'GENERIC',
@@ -96,7 +102,7 @@ pipeline {
         booleanParam(
             name: 'PUBLISH',
             defaultValue: true,
-            description: 'Publish to InternalPkg FreeBSD:16:amd64/base_latest (never the ports latest repo, never public). Off: build only.')
+            description: 'Publish to InternalPkg FreeBSD:16:<ABI>/base_latest for the chosen ARCH (never the ports latest repo, never public). Off: build only.')
         choice(
             name: 'PUBLISH_VIA',
             choices: ['pkgrepo-node', 'manual-handoff'],
@@ -123,6 +129,12 @@ pipeline {
         stage('Validate inputs') {
             steps {
                 script {
+                    // Literal allowlist, and no default: a build started before
+                    // this parameter existed sees null here and must stop
+                    // rather than quietly build the other architecture.
+                    if (!(params.ARCH in ['amd64', 'arm64'])) {
+                        error("ARCH must be amd64 or arm64, got: ${params.ARCH}")
+                    }
                     if (!(params.KERNCONF ==~ /^[A-Z0-9_-]+$/)) {
                         error("KERNCONF is not a usable kernel config name: ${params.KERNCONF}")
                     }
@@ -157,8 +169,9 @@ pipeline {
                 // jenkins-owned 0755 (the workspace is not readable by the
                 // handoff account). build.sh empties it at the start of a build.
                 PKGBASE_REPODIR    = '/var/db/pkgbase-export'
-                TARGET             = 'amd64'
-                TARGET_ARCH        = 'amd64'
+                // A ternary over LITERALS, never interpolation of the parameter.
+                TARGET             = "${params.ARCH == 'arm64' ? 'arm64' : 'amd64'}"
+                TARGET_ARCH        = "${params.ARCH == 'arm64' ? 'aarch64' : 'amd64'}"
                 PKGBASE_MAKE_JOBS  = "${params.MAKE_JOBS}"
                 PKGBASE_LLVM_TARGETS = "${params.LLVM_TARGETS}"
             }

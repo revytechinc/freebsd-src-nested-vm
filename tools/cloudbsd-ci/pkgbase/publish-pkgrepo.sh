@@ -16,7 +16,7 @@
 # Inputs (environment, set by the pipeline from the build stage's record):
 #   PKGBASE_BUILDER  Jenkins NODE_NAME of the builder that built the set
 #   PKGBASE_VERSION  e.g. 16.snap20260929130756
-#   PKGBASE_ABI      FreeBSD:16:amd64
+#   PKGBASE_ABI      FreeBSD:16:amd64 or FreeBSD:16:aarch64 (Track #479)
 #   PKGBASE_COUNT    number of packages the build recorded
 #   BASE_REPO_NAME   base_latest
 # and ci-artifacts/pkgbase-packages.txt (unstashed): one name-version per line.
@@ -36,7 +36,7 @@ case "${PKGBASE_VERSION:-}" in
 esac
 case "${PKGBASE_VERSION}" in *[!A-Za-z0-9.]*) die "version has unexpected characters" ;; esac
 case "${PKGBASE_ABI:-}" in
-FreeBSD:16:amd64) ;;
+FreeBSD:16:amd64 | FreeBSD:16:aarch64) ;;
 *) die "ABI is not wired for the base handoff: ${PKGBASE_ABI:-}" ;;
 esac
 [ "${BASE_REPO_NAME:-}" = base_latest ] || die "the handoff publishes base_latest only, not ${BASE_REPO_NAME:-}"

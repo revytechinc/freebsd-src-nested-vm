@@ -26,9 +26,9 @@ if [ $# -ne 1 ] || [ ! -d "$1" ]; then
 fi
 pkgdir=$1
 abi=$(basename "$(dirname "$pkgdir")")
-case "$abi" in
-FreeBSD:[0-9]*:amd64) ;;
-*) echo "FAIL: unexpected ABI directory ${abi}" >&2; exit 1 ;;
+case "${TARGET_ARCH:-amd64}:$abi" in
+amd64:FreeBSD:[0-9]*:amd64 | aarch64:FreeBSD:[0-9]*:aarch64) ;;
+*) echo "FAIL: ABI directory ${abi} does not match TARGET_ARCH ${TARGET_ARCH:-amd64}" >&2; exit 1 ;;
 esac
 
 # The set must be COMPLETE, not merely non-empty: a base without runtime or
