@@ -1,0 +1,34 @@
+{
+ "release": "-d",
+ "version": "/tmp/tmp.1fXsslaK67",
+ "generated": "2026-09-10T05:15:32Z",
+ "gate_count": {
+  "value": 1,
+  "unit": "gates"
+ },
+ "passed": {
+  "value": 0,
+  "unit": "gates"
+ },
+ "failed": {
+  "value": 0,
+  "unit": "gates"
+ },
+ "unknown": {
+  "value": 1,
+  "unit": "gates"
+ },
+ "gates": [
+  {
+   "log": "/tmp/tmp.1fXsslaK67/out.json",
+   "script": null,
+   "result": "unknown",
+   "summary": "could not be read: [Errno 2] No such file or directory: '/tmp/tmp.1fXsslaK67/out.json'",
+   "host": "",
+   "cpu": "",
+   "evidence": "",
+   "from_version": "",
+   "to_version": ""
+  }
+ ]
+}
