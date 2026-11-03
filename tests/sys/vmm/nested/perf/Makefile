@@ -42,10 +42,13 @@ PACKAGE=	tests
 
 TESTSDIR=	${TESTSBASE}/sys/vmm/nested/perf
 
-FILES+=		perf_microbench.sh
-FILES+=		perf_regression.sh
-FILES+=		perf_nested.sh
-FILES+=		baseline.txt
+# ${PACKAGE}FILES, not a bare FILES: bsd.test.mk has already set
+# FILESGROUPS, so bsd.files.mk's `FILESGROUPS?= FILES' never takes effect
+# and a plain FILES group is silently never installed.
+${PACKAGE}FILES+=		perf_microbench.sh
+${PACKAGE}FILES+=		perf_regression.sh
+${PACKAGE}FILES+=		perf_nested.sh
+${PACKAGE}FILES+=		baseline.txt
 
 # No ATF_C / ATF_SH tests; the scripts are operator-invoked.
 # They do not consume libatf-c / libvmmapi; kyua just installs them.

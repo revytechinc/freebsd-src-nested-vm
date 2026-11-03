@@ -17,8 +17,11 @@ ATF_TESTS_SH+=	run_exit_plumbing_tests
 ${PACKAGE}FILES+=	hw_test_common.sh
 ${PACKAGE}FILES+=	nested_utils.subr
 
-SUBDIR+=	exit_plumbing
-SUBDIR+=	preflight
-SUBDIR+=	stress
+# TESTS_SUBDIRS, not SUBDIR: see the note in ../Makefile.  These three
+# hold the only tests in this tree that actually boot bhyve, and with
+# SUBDIR they installed to /usr/tests and were never discovered.
+TESTS_SUBDIRS+=	exit_plumbing
+TESTS_SUBDIRS+=	preflight
+TESTS_SUBDIRS+=	stress
 
 .include <bsd.test.mk>

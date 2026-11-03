@@ -1,0 +1,400 @@
+#!/bin/sh
+#-
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 REVYTECH, Inc.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+#
+# nested-test -- run a nested-virtualization test suite on THIS host and
+# report a verdict that can be trusted.
+#
+# Nothing here knows that more than one machine exists.  Running a round
+# across the fleet is an MCP tool's job; this emits machine-readable rows
+# stamped with the host and the build so an aggregator can join them.
+#
+# Replaces, with the same coverage and a verdict that is actually
+# computed:
+#	hw/exit_plumbing/run_exit_plumbing_tests.sh
+#	hw/stress/run_stress_tests.sh
+#	hw/preflight/run_preflight_tests.sh
+#	hw/run_exit_plumbing_tests.sh
+#
+# Usage:
+#	nested-test run [--suite <name> | --suite-dir <path>] [--rows]
+#	nested-test capabilities [--rows]
+#	nested-test suites
+#
+# shellcheck shell=sh
+# shellcheck disable=SC3043
+
+# Pin the locale, byte-oriented, before anything runs.
+#
+# Raised by grok in review, and it is the same defect class this program
+# exists to remove.  Cron and CI hand a script LC_ALL=C; an interactive
+# ssh usually hands it a UTF-8 locale.  Under UTF-8 `cut -c' slices
+# characters and under C it slices bytes; ${#var} counts code points in
+# FreeBSD /bin/sh only when the codeset is UTF-8; `case' globs and
+# character classes follow LC_COLLATE and LC_CTYPE; `sort' order changes.
+# A harness whose parsing depends on who invoked it passes every
+# interactive test and then reports something different from cron.
+#
+# C rather than C.UTF-8 deliberately: everything this program parses is
+# ASCII -- sysctl names, hashes, exit codes, PASS markers.  A pipeline
+# that genuinely needs characters must override LC_ALL locally and say
+# why.  TZ is pinned for the same reason: timestamps are recorded in UTC.
+LC_ALL=C
+LANG=C
+TZ=UTC
+export LC_ALL LANG TZ
+IFS='	
+ '
+umask 022
+
+set -u
+
+SELF="${0##*/}"
+HERE="${HERE:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}"
+
+for _d in "${HERE}/lib" "${HERE}/../lib" /usr/tests/sys/vmm/nested/lib; do
+	if [ -r "${_d}/nested_verdict.subr" ]; then
+		NV_LIB="${_d}/nested_verdict.subr"
+		break
+	fi
+done
+if [ -z "${NV_LIB:-}" ]; then
+	# The verdict contract is the only thing standing between this
+	# program and the class of bug it was written to remove.  Without
+	# it there is no safe degraded mode, so refuse rather than run.
+	printf '%s: cannot find nested_verdict.subr; refusing to run\n' \
+	    "${SELF}" >&2
+	exit 2
+fi
+# shellcheck source=/dev/null
+. "${NV_LIB}"
+
+usage()
+{
+	cat >&2 <<EOF
+usage: ${SELF} run [--suite <name>|--suite-dir <path>] [--rows] [--evidence <dir>]
+       ${SELF} capabilities [--rows]
+       ${SELF} suites
+
+Exit status is the verdict for the whole run:
+  0 PASS   1 FAIL   2 ERROR (could not run)   77 N/A   78 GAP
+EOF
+	exit 2
+}
+
+# --- host and build identity --------------------------------------------
+#
+# Every row carries these.  A result that cannot be tied to a build is not
+# evidence about that build, and a fleet round that cannot be joined by
+# host is a pile of numbers.
+nt_host_id()
+{
+	hostname 2>/dev/null || printf 'unknown-host\n'
+}
+
+nt_build_stamp()
+{
+	local _s
+	_s=$(uname -v 2>/dev/null) || _s=""
+	[ -n "${_s}" ] || _s="unknown-build"
+	printf '%s\n' "${_s}"
+}
+
+nt_vmm_stamp()
+{
+	local _k
+	for _k in /boot/kernel/vmm.ko /boot/modules/vmm.ko; do
+		if [ -r "${_k}" ]; then
+			if command -v sha256 >/dev/null 2>&1; then
+				sha256 -q "${_k}" 2>/dev/null && return 0
+			elif command -v sha256sum >/dev/null 2>&1; then
+				sha256sum "${_k}" 2>/dev/null | \
+				    LC_ALL=C cut -d' ' -f1 && return 0
+			fi
+		fi
+	done
+	printf 'no-vmm-module\n'
+}
+
+# --- capability probe ----------------------------------------------------
+#
+# One place decides what this host can do.  It replaces eleven divergent
+# copies of an *_unsupported() gate, several of which asked
+# /proc/cpuinfo -- a Linux path that does not exist on FreeBSD, so those
+# gates always answered "unsupported", skipped, and exited 0.
+#
+# The probe reports three distinguishable things per capability:
+#	yes  - measured present
+#	no   - measured absent
+#	unknown - COULD NOT MEASURE.  Never treated as absent.
+nt_probe_one()
+{
+	local _name="$1" _value="$2" _how="$3"
+	printf '%s\t%s\t%s\n' "${_name}" "${_value}" "${_how}"
+}
+
+nt_capabilities()
+{
+	local _os _vendor _vmm _nested _ncpu _v
+
+	_os=$(uname -s 2>/dev/null) || _os=""
+	if [ -z "${_os}" ]; then
+		nt_probe_one os unknown "uname -s failed"
+	else
+		nt_probe_one os "${_os}" "uname -s"
+	fi
+
+	if [ "${_os}" != "FreeBSD" ]; then
+		# Say so once, plainly, rather than letting every downstream
+		# check rediscover it as a mysterious absence.
+		nt_probe_one cpu_vendor unknown "not FreeBSD"
+		nt_probe_one vmm unknown "not FreeBSD"
+		nt_probe_one nested unknown "not FreeBSD"
+		nt_probe_one ncpu unknown "not FreeBSD"
+		return 0
+	fi
+
+	# CPU vendor from the kernel, not from /proc/cpuinfo.
+	if _v=$(sysctl -n hw.model 2>/dev/null) && [ -n "${_v}" ]; then
+		case "${_v}" in
+		*Intel*)	_vendor=intel ;;
+		*AMD*)		_vendor=amd ;;
+		*)		_vendor=other ;;
+		esac
+		nt_probe_one cpu_vendor "${_vendor}" "hw.model=${_v}"
+	else
+		nt_probe_one cpu_vendor unknown "sysctl hw.model unreadable"
+	fi
+
+	if _v=$(sysctl -n hw.ncpu 2>/dev/null) && [ -n "${_v}" ]; then
+		nt_probe_one ncpu "${_v}" "hw.ncpu"
+	else
+		nt_probe_one ncpu unknown "sysctl hw.ncpu unreadable"
+	fi
+
+	# vmm(4): kldstat can fail for reasons other than "not loaded".
+	# Distinguish them -- a kldstat we could not run is not proof that
+	# the module is absent.
+	if command -v kldstat >/dev/null 2>&1; then
+		if kldstat -q -n vmm 2>/dev/null; then
+			_vmm=yes
+		elif [ -c /dev/vmm ] || [ -d /dev/vmm ]; then
+			_vmm=yes
+		else
+			_vmm=no
+		fi
+		nt_probe_one vmm "${_vmm}" "kldstat -q -n vmm"
+	else
+		nt_probe_one vmm unknown "kldstat absent"
+	fi
+
+	if _v=$(sysctl -n hw.vmm.nested.enable 2>/dev/null); then
+		case "${_v}" in
+		1)	_nested=yes ;;
+		0)	_nested=no ;;
+		*)	_nested=unknown ;;
+		esac
+		nt_probe_one nested "${_nested}" "hw.vmm.nested.enable=${_v}"
+	else
+		nt_probe_one nested unknown \
+		    "sysctl hw.vmm.nested.enable unreadable"
+	fi
+	return 0
+}
+
+# --- suites --------------------------------------------------------------
+NT_SUITES="preflight exit_plumbing stress features io negative resource integration"
+
+nt_suite_dir()
+{
+	case "$1" in
+	preflight)	printf '%s\n' "${HERE}/hw/preflight" ;;
+	exit_plumbing)	printf '%s\n' "${HERE}/hw/exit_plumbing" ;;
+	stress)		printf '%s\n' "${HERE}/hw/stress" ;;
+	*)		printf '%s\n' "${HERE}/$1" ;;
+	esac
+}
+
+# nt_run_suite <dir>
+#
+# Every executable *_test.sh / *.sh in the directory is a case, except the
+# old run_*.sh drivers, which this program replaces.
+nt_run_suite()
+{
+	local _dir="$1" _f _n
+
+	if [ ! -d "${_dir}" ]; then
+		nv_error "suite directory ${_dir}" "no such directory"
+		return 0
+	fi
+	if [ ! -r "${_dir}" ] || [ ! -x "${_dir}" ]; then
+		nv_error "suite directory ${_dir}" "not readable"
+		return 0
+	fi
+
+	_n=0
+	for _f in "${_dir}"/*.sh; do
+		[ -e "${_f}" ] || continue
+		case "${_f##*/}" in
+		run_*.sh|*_selftest.sh|*.subr)
+			continue
+			;;
+		esac
+		_n=$((_n + 1))
+		nv_case "${_f##*/}" "${_f}"
+	done
+
+	if [ "${_n}" -eq 0 ]; then
+		# An empty suite is not a passing suite.  It is a suite that
+		# selected nothing, which is a harness fault.
+		nv_error "suite ${_dir}" "selected zero cases"
+	fi
+	return 0
+}
+
+# nt_declare_gaps reads the gap registry and records one GAP per entry.
+#
+# Gaps are reported in their own column so that removing a test which only
+# pretended to cover something reads as a named gap rather than as
+# coverage that quietly vanished.  A gap is never a pass, and a run that
+# is nothing but gaps is an ERROR (see nv_exit_code).
+nt_declare_gaps()
+{
+	local _reg="$1" _surface _why _rest
+
+	if [ ! -r "${_reg}" ]; then
+		nv_error "gap registry ${_reg}" "unreadable"
+		return 0
+	fi
+	while IFS='	' read -r _surface _why _rest; do
+		case "${_surface}" in
+		''|'#'*)	continue ;;
+		esac
+		[ -n "${_why}" ] || _why="no reason recorded"
+		nv_gap "${_surface}" "${_why}"
+	done < "${_reg}"
+	return 0
+}
+
+nt_gap_registry()
+{
+	local _d
+	for _d in "${HERE}/lib" "${HERE}/../lib" /usr/tests/sys/vmm/nested/lib; do
+		if [ -r "${_d}/gaps.tsv" ]; then
+			printf '%s\n' "${_d}/gaps.tsv"
+			return 0
+		fi
+	done
+	printf '%s\n' "${HERE}/lib/gaps.tsv"
+	return 0
+}
+
+# --- verbs ---------------------------------------------------------------
+cmd_run()
+{
+	local _suite="" _dir="" _rows=0 _ev="" _code
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--suite)	_suite="${2:-}"; shift 2 || usage ;;
+		--suite-dir)	_dir="${2:-}"; shift 2 || usage ;;
+		--evidence)	_ev="${2:-}"; shift 2 || usage ;;
+		--rows)		_rows=1; shift ;;
+		-h|--help)	usage ;;
+		*)		usage ;;
+		esac
+	done
+
+	[ -n "${_ev}" ] && NV_EVIDENCE_DIR="${_ev}"
+
+	nv_reset
+	printf '# host=%s build=%s vmm=%s\n' \
+	    "$(nt_host_id)" "$(nt_build_stamp)" "$(nt_vmm_stamp)"
+
+	if [ -n "${_dir}" ]; then
+		nt_run_suite "${_dir}"
+	elif [ -n "${_suite}" ]; then
+		nt_run_suite "$(nt_suite_dir "${_suite}")"
+	else
+		for _suite in ${NT_SUITES}; do
+			nt_run_suite "$(nt_suite_dir "${_suite}")"
+		done
+		# Gaps describe the coverage of the WHOLE suite, so they are
+		# declared only for a whole-suite run.  Attaching them to an
+		# arbitrary --suite-dir would report the tree's gaps against
+		# somebody else's directory.
+		nt_declare_gaps "$(nt_gap_registry)"
+	fi
+
+	nv_summary
+	[ "${_rows}" -eq 1 ] && nv_rows
+	_code=$(nv_exit_code)
+	return "${_code}"
+}
+
+cmd_capabilities()
+{
+	local _rows=0
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--rows)	_rows=1; shift ;;
+		*)	usage ;;
+		esac
+	done
+
+	if [ "${_rows}" -eq 1 ]; then
+		nt_capabilities
+		return 0
+	fi
+	printf '%-12s %-10s %s\n' CAPABILITY VALUE EVIDENCE
+	nt_capabilities | while IFS='	' read -r _n _v _h; do
+		printf '%-12s %-10s %s\n' "${_n}" "${_v}" "${_h}"
+	done
+	return 0
+}
+
+cmd_suites()
+{
+	local _s
+	for _s in ${NT_SUITES}; do
+		printf '%s\t%s\n' "${_s}" "$(nt_suite_dir "${_s}")"
+	done
+	return 0
+}
+
+[ $# -ge 1 ] || usage
+verb="$1"
+shift
+case "${verb}" in
+run)		cmd_run "$@" ;;
+capabilities)	cmd_capabilities "$@" ;;
+suites)		cmd_suites "$@" ;;
+gaps)		nv_reset; nt_declare_gaps "$(nt_gap_registry)"; exit 0 ;;
+-h|--help)	usage ;;
+*)		usage ;;
+esac
+exit $?

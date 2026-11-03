@@ -11,6 +11,7 @@ BINDIR=		${TESTSDIR}
 
 
 ${PACKAGE}FILES+=	preflight_unit_help.sh \
+${PACKAGE}FILES+=	preflight_nsvm_dispatcher.sh
 			preflight_unit_classify.sh \
 			preflight_sysctl_paths.sh \
 			preflight_intel_ivybridge.sh \

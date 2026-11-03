@@ -1,0 +1,46 @@
+# Declared coverage gaps for the nested-virtualization test suite.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 REVYTECH, Inc.
+#
+# A gap is a surface we know is not covered.  It is DECLARED here, never
+# inferred from a missing file, for two reasons.  A gap that is inferred
+# from absence cannot tell "we have not written this" apart from "someone
+# deleted it"; and a suite that simply reports fewer tests after untrue
+# ones are removed reads as lost coverage rather than as honesty.
+#
+# These entries replace seventeen scripts that printed a PASS line having
+# executed nothing under test.  features/efer_l2.sh was representative in
+# full:
+#
+#	if ef_unsupported; then exit 0; fi
+#	echo "T50 efer_l2: EFER bits in L2"
+#	echo "  L1 sets     = LME=1 LMA=1 NXE=1 (long mode active)"
+#	echo "PASS: efer_l2 enumerated 4 EFER checks"
+#
+# "enumerated" is doing the load-bearing work in that sentence.  The
+# script printed a description of a test and then printed PASS.  Nothing
+# was set, nothing was read, no guest ran.  Seventeen of those is not
+# seventeen passing tests; it is seventeen gaps with a green light over
+# them, which is strictly worse than an empty directory.
+#
+# Format: surface<TAB>why<TAB>replaces
+# Lines beginning with # and blank lines are ignored.
+
+L2 EFER shadowing (LME/LMA/NXE)	no assertion written; needs an L2 guest that reads EFER and a #GP probe on a read-only bit	features/efer_l2.sh
+L2 CPUID masking	no assertion written; needs an L2 guest reporting CPUID against the L1 mask	features/cpuid_mask_l2.sh
+L2 LA57 5-level paging	no assertion written; also needs LA57 silicon, which the fleet may not have	features/la57_l2.sh
+L2 MTRR handling	no assertion written; needs an L2 guest reading MTRR MSRs	features/mtrr_l2.sh
+L2 PAT handling	no assertion written; needs an L2 guest reading the PAT MSR	features/pat_l2.sh
+L2 XSAVE state	no assertion written; needs an L2 guest exercising XSAVE/XRSTOR	features/xsave_l2.sh
+L1 SMP under nesting	no assertion written; multi-vCPU L1 is a stated requirement and is untested here	integration/smp_l1.sh
+VMRUN stress	no assertion written; needs a repeated-entry loop with a measured exit count	integration/stress_vmrun.sh
+L2 device hotplug	no assertion written; needs a running L2 and a PCI attach/detach	io/hotplug_l2.sh
+Guest escape negative	no assertion written; this is a SECURITY boundary and is currently unproven	negative/escape_negative.sh
+MSR access negative	no assertion written; needs an L2 that touches denied MSRs and a #GP check	negative/msr_negative.sh
+SVM negative paths	no assertion written; gate also read /proc/cpuinfo, which does not exist on FreeBSD	negative/svm_negative.sh
+VMX negative paths	no assertion written; needs invalid VMCS states driven from an L1	negative/vmx_negative.sh
+ASID exhaustion (AMD)	no assertion written; needs enough concurrent L2s to exhaust the ASID space	resource/asid_exhaust_test.sh
+Max vCPU ceiling	no assertion written; needs a real ceiling search, which demo/home/4 does for the demo path only	resource/max_vcpu_test.sh
+Guest memory limit	no assertion written; needs an L2 allocated past the L1 limit and a refusal check	resource/memory_limit_test.sh
+VPID exhaustion (Intel)	no assertion written; needs enough concurrent L2s to exhaust the VPID space	resource/vpid_exhaust_test.sh

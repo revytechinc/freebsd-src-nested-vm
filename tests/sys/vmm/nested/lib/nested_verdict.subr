@@ -1,0 +1,424 @@
+#-
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 REVYTECH, Inc.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+#
+# nested_verdict.subr -- the one place a nested-virt check turns into a
+# verdict.
+#
+# The rule this file exists to enforce is that a check which could not run
+# is not a pass.  "I could not look", "there is nothing there" and "it is
+# broken" are three different answers, and every place they collapse into
+# one produces a confident wrong result.
+#
+#	0   PASS   ran, assertion met
+#	1   FAIL   ran, assertion not met
+#	2   ERROR  could not run -- absent tool, no permission, timeout,
+#	           unreadable evidence.  Never green, never silent.
+#	77  NA     inapplicable to this silicon, WITH a measured reason
+#	78  GAP    surface knowingly not covered yet, declared not inferred
+#
+# NA is the only non-run that is not a problem, and it is refused unless
+# the caller states the fact that makes the case inapplicable.  GAP is for
+# coverage we have not written: it is declared in one registry, never
+# inferred from a missing file, so removing a fake test does not silently
+# become "fewer tests" -- it becomes a named gap.
+#
+# ERROR outranks FAIL in a summary.  A run where three cases could not run
+# is not a failure of the code under test; it is a failure to test, and
+# the two demand different actions.
+#
+# shellcheck shell=sh
+# FreeBSD /bin/sh supports `local' though POSIX leaves it undefined.
+# shellcheck disable=SC3043
+
+NV_PASS=0
+NV_FAIL=1
+NV_ERROR=2
+NV_NA=77
+NV_GAP=78
+
+# Seconds before a case is abandoned.  A harness that boots VMs must never
+# hang for ever: an unbounded case is indistinguishable from a wedged one,
+# and CI reports it as neither pass nor fail but as nothing at all.
+NV_TIMEOUT="${NV_TIMEOUT:-0}"
+
+# Where per-case evidence is written.  Every verdict names the file that
+# justifies it, because a verdict nobody can check is a rumour.
+NV_EVIDENCE_DIR="${NV_EVIDENCE_DIR:-}"
+
+# nv_reset clears the accumulated run.  Call before the first case.
+nv_reset()
+{
+	NV_N_PASS=0
+	NV_N_FAIL=0
+	NV_N_ERROR=0
+	NV_N_NA=0
+	NV_N_GAP=0
+	NV_LAST=""
+	NV_LAST_CODE=""
+	NV_ROWS=""
+}
+nv_reset
+
+# nv_last_state_code echoes the numeric state of the most recent case.
+nv_last_state_code()
+{
+	printf '%s\n' "${NV_LAST_CODE}"
+}
+
+# nv_last_state echoes the symbolic state of the most recent case.
+nv_last_state()
+{
+	printf '%s\n' "${NV_LAST}"
+}
+
+_nv_name_of()
+{
+	case "$1" in
+	0)	printf 'PASS\n' ;;
+	1)	printf 'FAIL\n' ;;
+	2)	printf 'ERROR\n' ;;
+	77)	printf 'NA\n' ;;
+	78)	printf 'GAP\n' ;;
+	*)	printf 'ERROR\n' ;;
+	esac
+}
+
+# _nv_record <code> <description> [detail]
+_nv_record()
+{
+	local _code="$1" _desc="$2" _detail="${3:-}"
+	local _name
+
+	_name=$(_nv_name_of "${_code}")
+	NV_LAST="${_name}"
+	NV_LAST_CODE="${_code}"
+
+	case "${_name}" in
+	PASS)	NV_N_PASS=$((NV_N_PASS + 1)) ;;
+	FAIL)	NV_N_FAIL=$((NV_N_FAIL + 1)) ;;
+	ERROR)	NV_N_ERROR=$((NV_N_ERROR + 1)) ;;
+	NA)	NV_N_NA=$((NV_N_NA + 1)) ;;
+	GAP)	NV_N_GAP=$((NV_N_GAP + 1)) ;;
+	esac
+
+	# Tab-separated so a caller can parse it without a JSON dependency.
+	NV_ROWS="${NV_ROWS}${_name}	${_desc}	${_detail}
+"
+	printf '%-6s %s%s\n' "${_name}" "${_desc}" \
+	    "${_detail:+  (${_detail})}"
+}
+
+# _nv_classify <raw exit status>
+#
+# Translate a process exit status into a contract state.
+#
+# 0 is the only PASS and 1 is the only FAIL.  EVERYTHING ELSE IS ERROR --
+# not because the other codes are meaningless, but because they are not
+# ours: 124 is timeout(1), 126/127 are exec failures, 128+n is death by
+# signal, and a bare `exit 3` is someone's typo.  A test process that
+# segfaulted did not evaluate its assertion, so calling it FAIL sends a
+# person to debug the kernel when the bug is in the harness.
+#
+# This is deliberately the strict direction.  An accidental `exit 1`
+# becomes a false FAIL, which is loud; the alternative -- treating
+# unrecognised statuses as FAIL -- makes a crashed test indistinguishable
+# from a refuted one.
+_nv_classify()
+{
+	case "$1" in
+	0)	printf '%s\n' "${NV_PASS}" ;;
+	1)	printf '%s\n' "${NV_FAIL}" ;;
+	77)	printf '%s\n' "${NV_NA}" ;;
+	78)	printf '%s\n' "${NV_GAP}" ;;
+	*)	printf '%s\n' "${NV_ERROR}" ;;
+	esac
+}
+
+# _nv_run <cmd> [args...] -- run a case body, honouring NV_TIMEOUT.
+#
+# stdout and stderr of the case go to the evidence file when one is
+# configured, and are otherwise discarded from the verdict path so a
+# chatty test cannot be mistaken for a passing one.
+_nv_run()
+{
+	if [ "${NV_TIMEOUT}" -gt 0 ] 2>/dev/null; then
+		if ! command -v timeout >/dev/null 2>&1; then
+			# We were told to bound this case and cannot.  An
+			# unenforceable guard is not a guard; refuse rather
+			# than run unbounded and pretend it was bounded.
+			return 125
+		fi
+		timeout -k 5 "${NV_TIMEOUT}" "$@"
+		return $?
+	fi
+	"$@"
+	return $?
+}
+
+# nv_case <description> <cmd> [args...]
+#
+# Run one case and record its verdict.
+nv_case()
+{
+	local _desc="$1"
+	shift
+	local _rc _state _out
+
+	if [ $# -eq 0 ]; then
+		_nv_record "${NV_ERROR}" "${_desc}" "no command given"
+		return 0
+	fi
+
+	# A command we cannot even locate is ERROR, decided before running
+	# so the reason is specific rather than a bare 127.
+	case "$1" in
+	*/*)
+		if [ ! -x "$1" ]; then
+			_nv_record "${NV_ERROR}" "${_desc}" \
+			    "not executable: $1"
+			return 0
+		fi
+		;;
+	*)
+		if ! command -v "$1" >/dev/null 2>&1; then
+			_nv_record "${NV_ERROR}" "${_desc}" \
+			    "command not found: $1"
+			return 0
+		fi
+		;;
+	esac
+
+	if [ -n "${NV_EVIDENCE_DIR}" ]; then
+		if ! mkdir -p "${NV_EVIDENCE_DIR}" 2>/dev/null; then
+			_nv_record "${NV_ERROR}" "${_desc}" \
+			    "evidence dir unwritable: ${NV_EVIDENCE_DIR}"
+			return 0
+		fi
+		_out="${NV_EVIDENCE_DIR}/$(_nv_slug "${_desc}").log"
+		_nv_run "$@" >"${_out}" 2>&1
+		_rc=$?
+	else
+		_nv_run "$@" >/dev/null 2>&1
+		_rc=$?
+		_out=""
+	fi
+
+	_state=$(_nv_classify "${_rc}")
+	_nv_record "${_state}" "${_desc}" \
+	    "rc=${_rc}${_out:+ evidence=${_out}}"
+	return 0
+}
+
+# nv_case_expect_output <description> <required marker> <cmd> [args...]
+#
+# A case that must PROVE it did the work by emitting a marker.  A command
+# that exits 0 without producing its evidence is a FAIL, not a PASS: exit
+# status is what a program claims, output is what it did.  This is the
+# form to use for anything whose success is asserted by a guest, a console
+# or another machine, where "the command returned" and "the thing
+# happened" are genuinely different events.
+nv_case_expect_output()
+{
+	local _desc="$1" _marker="$2"
+	shift 2
+	local _rc _state _tmp
+
+	if [ -z "${_marker}" ]; then
+		_nv_record "${NV_ERROR}" "${_desc}" "no marker given"
+		return 0
+	fi
+	if [ $# -eq 0 ]; then
+		_nv_record "${NV_ERROR}" "${_desc}" "no command given"
+		return 0
+	fi
+	case "$1" in
+	*/*)	[ -x "$1" ] || {
+			_nv_record "${NV_ERROR}" "${_desc}" \
+			    "not executable: $1"
+			return 0
+		} ;;
+	*)	command -v "$1" >/dev/null 2>&1 || {
+			_nv_record "${NV_ERROR}" "${_desc}" \
+			    "command not found: $1"
+			return 0
+		} ;;
+	esac
+
+	_tmp=$(mktemp 2>/dev/null) || {
+		_nv_record "${NV_ERROR}" "${_desc}" "cannot create temp file"
+		return 0
+	}
+
+	_nv_run "$@" >"${_tmp}" 2>&1
+	_rc=$?
+	_state=$(_nv_classify "${_rc}")
+
+	if [ "${_state}" -eq "${NV_PASS}" ]; then
+		# LC_ALL=C for OUR pattern match only.  The case body ran in
+		# the caller's locale on purpose -- forcing C on the thing
+		# under test would change what is being tested.
+		if ! LC_ALL=C grep -q -- "${_marker}" "${_tmp}" 2>/dev/null; then
+			_state="${NV_FAIL}"
+			_nv_record "${_state}" "${_desc}" \
+			    "exited 0 but never emitted '${_marker}'"
+			rm -f "${_tmp}"
+			return 0
+		fi
+	fi
+
+	if [ -n "${NV_EVIDENCE_DIR}" ] && mkdir -p "${NV_EVIDENCE_DIR}" 2>/dev/null; then
+		cat "${_tmp}" >"${NV_EVIDENCE_DIR}/$(_nv_slug "${_desc}").log" 2>/dev/null
+	fi
+	rm -f "${_tmp}"
+	_nv_record "${_state}" "${_desc}" "rc=${_rc}"
+	return 0
+}
+
+# nv_na <reason> <evidence>
+#
+# Declare a case inapplicable.  BOTH arguments are required: an
+# unexplained N/A is how a test quietly stops running everywhere.  The
+# evidence is the measured fact -- "cpu_vendor=GenuineIntel", not "not
+# supported".
+nv_na()
+{
+	local _reason="${1:-}" _evidence="${2:-}"
+
+	if [ -z "${_reason}" ] || [ -z "${_evidence}" ]; then
+		_nv_record "${NV_ERROR}" "N/A declared without a reason" \
+		    "refusing to record an unexplained N/A"
+		return 1
+	fi
+	_nv_record "${NV_NA}" "${_reason}" "${_evidence}"
+	return 0
+}
+
+# nv_gap <surface> <why>
+#
+# Declare a surface knowingly not covered.  Reported as its own state so
+# that deleting a test which only pretended to cover something reads as a
+# named gap rather than as coverage that vanished.
+nv_gap()
+{
+	local _surface="${1:-}" _why="${2:-}"
+
+	if [ -z "${_surface}" ] || [ -z "${_why}" ]; then
+		_nv_record "${NV_ERROR}" "gap declared without a subject" \
+		    "refusing to record an unexplained gap"
+		return 1
+	fi
+	_nv_record "${NV_GAP}" "${_surface}" "${_why}"
+	return 0
+}
+
+# nv_error <description> <detail> -- record an explicit could-not-run.
+nv_error()
+{
+	_nv_record "${NV_ERROR}" "${1:-unspecified}" "${2:-}"
+	return 0
+}
+
+# nv_exit_code echoes the exit status the whole run should carry.
+#
+# Precedence: ERROR, then FAIL, then PASS.  A run that selected no cases
+# at all is ERROR -- zero tests is not success, and treating it as success
+# is exactly how a broken capability probe becomes a green CI result.
+nv_exit_code()
+{
+	local _total
+
+	_total=$((NV_N_PASS + NV_N_FAIL + NV_N_ERROR + NV_N_NA + NV_N_GAP))
+	if [ "${_total}" -eq 0 ]; then
+		printf '%s\n' "${NV_ERROR}"
+		return 0
+	fi
+	if [ "${NV_N_ERROR}" -gt 0 ]; then
+		printf '%s\n' "${NV_ERROR}"
+		return 0
+	fi
+	if [ "${NV_N_FAIL}" -gt 0 ]; then
+		printf '%s\n' "${NV_FAIL}"
+		return 0
+	fi
+	# Nothing failed, nothing errored -- and nothing passed either.  A run
+	# that is entirely N/A and GAP has not demonstrated anything about
+	# this host, so it cannot report success.  This is what an AMD machine
+	# looks like when the AMD tests were never installed: every case
+	# correctly inapplicable, and a green light over an untested kernel.
+	if [ "${NV_N_PASS}" -eq 0 ]; then
+		printf '%s\n' "${NV_ERROR}"
+		return 0
+	fi
+	printf '%s\n' "${NV_PASS}"
+	return 0
+}
+
+# nv_summary prints the tally.  It never prints the word PASS unless the
+# run actually passed, which the runners it replaces did unconditionally.
+nv_summary()
+{
+	local _code _total
+
+	_total=$((NV_N_PASS + NV_N_FAIL + NV_N_ERROR + NV_N_NA + NV_N_GAP))
+	_code=$(nv_exit_code)
+
+	printf -- '---\n'
+	if [ "${_total}" -eq 0 ]; then
+		printf 'ERROR: no cases ran.  Zero tests is not a pass.\n'
+	elif [ "${NV_N_PASS}" -eq 0 ] && [ "${NV_N_FAIL}" -eq 0 ] && \
+	     [ "${NV_N_ERROR}" -eq 0 ]; then
+		printf 'ERROR: nothing passed.  Every case was N/A or a\n'
+		printf '       declared gap, so this run proved nothing\n'
+		printf '       about this host.\n'
+	fi
+	printf 'pass=%d fail=%d error=%d na=%d gap=%d  verdict=%s\n' \
+	    "${NV_N_PASS}" "${NV_N_FAIL}" "${NV_N_ERROR}" \
+	    "${NV_N_NA}" "${NV_N_GAP}" "$(_nv_name_of "${_code}")"
+	if [ "${NV_N_ERROR}" -gt 0 ]; then
+		printf 'NOTE: %d case(s) could not run.  That is not a\n' \
+		    "${NV_N_ERROR}"
+		printf '      failure of the code under test, and it is not\n'
+		printf '      a pass either.  Fix the harness, then re-run.\n'
+	fi
+	return 0
+}
+
+# nv_rows emits the accumulated cases, tab-separated: STATE<TAB>DESC<TAB>DETAIL
+# This is what a fleet MCP aggregates; nothing in this library knows that
+# more than one host exists.
+nv_rows()
+{
+	printf '%s' "${NV_ROWS}"
+}
+
+# _nv_slug turns a description into a filename.  Byte-oriented on purpose:
+# under the LC_ALL=C that cron and CI hand a script, character classes and
+# character slicing behave differently from an interactive shell, and a
+# harness that only works interactively is not a harness.
+_nv_slug()
+{
+	printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_' | LC_ALL=C cut -b 1-64
+}
